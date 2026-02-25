@@ -1,0 +1,43 @@
+// =============================================================================
+// Version_Recipe - 08_Main_OB1.scl
+// Main organization block - entry point for cyclic execution
+// =============================================================================
+
+ORGANIZATION_BLOCK "Main"
+TITLE = "Main Program Sweep (Cycle)"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_TEMP
+        tempRetVal : Int;
+    END_VAR
+BEGIN
+    // Call main process function block
+    "fbProcess"(
+        Panel_Start := "Panel_Start",
+        Panel_Stop := "Panel_Stop",
+        Panel_Pause := "Panel_Pause", 
+        Panel_Reset := "Panel_Reset",
+        Rem_Start := FALSE,
+        Rem_Stop := FALSE,
+        EStop_OK := "Safety_Estop",
+        Door_Closed := "Safety_Door",
+        AirPressure_OK := "Safety_Air",
+        HW_Limit_X_Min := "Limit_X_Min",
+        HW_Limit_X_Max := "Limit_X_Max",
+        HW_Limit_Z_Min := "Limit_Z_Min",
+        HW_Limit_Z_Max := "Limit_Z_Max",
+        Axis_X := "TO_AxisX",
+        Axis_Z := "TO_AxisZ",
+        Axis_Tool := "TO_AxisTool",
+        Axis_Spindle := "TO_AxisSpindle"
+    );
+END_ORGANIZATION_BLOCK
+
+// Instance Data Block for FB_Process
+DATA_BLOCK "fbProcess"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_Process"
+BEGIN
+END_DATA_BLOCK

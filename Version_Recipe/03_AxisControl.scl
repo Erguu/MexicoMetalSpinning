@@ -1,0 +1,114 @@
+// 03_AxisControl.scl - GCODE Version (same as base)
+
+FUNCTION_BLOCK "FB_Axis_AbsPos"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+    VAR_INPUT 
+        Execute : Bool;
+        Position : Real;
+        Velocity : Real;
+    END_VAR
+    VAR_OUTPUT 
+        Done : Bool;
+        Busy : Bool;
+        Error : Bool;
+        ErrorID : Word;
+    END_VAR
+    VAR_IN_OUT 
+        Axis : TO_PositioningAxis;
+    END_VAR
+    VAR 
+        MC_MoveAbsolute_Instance : MC_MoveAbsolute;
+        execLatch : Bool;
+        doneLatch : Bool;
+    END_VAR
+    VAR prevExecute : Bool; END_VAR
+BEGIN
+    // Detect rising edge of Execute to clear previous Done state
+    IF #Execute AND NOT #prevExecute THEN
+        #doneLatch := FALSE;  // Clear Done only on NEW command
+    END_IF;
+    #prevExecute := #Execute;
+    
+    // Start new move on rising edge when not already done
+    IF #Execute AND NOT #execLatch AND NOT #doneLatch THEN
+        #execLatch := TRUE;
+    END_IF;
+    
+    // Call MC_MoveAbsolute
+    #MC_MoveAbsolute_Instance(Axis := #Axis, Execute := #execLatch, Position := #Position,
+        Velocity := #Velocity, Done => #Done, Busy => #Busy, Error => #Error, ErrorID => #ErrorID);
+    
+    // Latch Done/Error state
+    IF #MC_MoveAbsolute_Instance.Done OR #MC_MoveAbsolute_Instance.Error THEN
+        #execLatch := FALSE;
+        #doneLatch := TRUE;
+    END_IF;
+    
+    // Output Done stays TRUE until caller starts a new command
+    #Done := #doneLatch OR #MC_MoveAbsolute_Instance.Done;
+    #Error := #MC_MoveAbsolute_Instance.Error;
+END_FUNCTION_BLOCK
+
+FUNCTION_BLOCK "FB_Axis_Power"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_INPUT Enable : Bool; END_VAR
+    VAR_OUTPUT Status : Bool; Error : Bool; END_VAR
+    VAR_IN_OUT Axis : TO_PositioningAxis; END_VAR
+    VAR MC_Power_Instance : MC_Power; END_VAR
+BEGIN
+    #MC_Power_Instance(Axis := #Axis, Enable := #Enable, Status => #Status, Error => #Error);
+END_FUNCTION_BLOCK
+
+FUNCTION_BLOCK "FB_Axis_Home"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.2
+    VAR_INPUT 
+        Execute : Bool;
+        Mode : Int := 3;    // 0=Passive (set pos), 2=Active (ref cam), 3=Active (ref cam+zero)
+        Position : Real := 0.0;  // Home position value
+    END_VAR
+    VAR_OUTPUT Done : Bool; Busy : Bool; Error : Bool; END_VAR
+    VAR_IN_OUT Axis : TO_PositioningAxis; END_VAR
+    VAR MC_Home_Instance : MC_Home; execInternal : Bool; END_VAR
+BEGIN
+    #execInternal := #Execute OR #MC_Home_Instance.Busy;
+    #MC_Home_Instance(Axis := #Axis, Execute := #execInternal, Position := #Position, Mode := #Mode,
+        Done => #Done, Busy => #Busy, Error => #Error);
+END_FUNCTION_BLOCK
+
+FUNCTION_BLOCK "FB_Axis_Halt"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_INPUT Execute : Bool; END_VAR
+    VAR_OUTPUT Done : Bool; Busy : Bool; Error : Bool; END_VAR
+    VAR_IN_OUT Axis : TO_PositioningAxis; END_VAR
+    VAR MC_Halt_Instance : MC_Halt; END_VAR
+BEGIN
+    #MC_Halt_Instance(Axis := #Axis, Execute := #Execute, Done => #Done, Busy => #Busy, Error => #Error);
+END_FUNCTION_BLOCK
+
+FUNCTION_BLOCK "FB_Axis_Jog"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_INPUT JogForward : Bool; JogBackward : Bool; Velocity : Real; END_VAR
+    VAR_OUTPUT Busy : Bool; Error : Bool; END_VAR
+    VAR_IN_OUT Axis : TO_PositioningAxis; END_VAR
+    VAR MC_MoveJog_Instance : MC_MoveJog; END_VAR
+BEGIN
+    #MC_MoveJog_Instance(Axis := #Axis, JogForward := #JogForward, JogBackward := #JogBackward,
+        Velocity := #Velocity, Busy => #Busy, Error => #Error);
+END_FUNCTION_BLOCK
+
+FUNCTION_BLOCK "FB_Axis_Reset"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_INPUT Execute : Bool; END_VAR
+    VAR_OUTPUT Done : Bool; Busy : Bool; Error : Bool; END_VAR
+    VAR_IN_OUT Axis : TO_PositioningAxis; END_VAR
+    VAR MC_Reset_Instance : MC_Reset; END_VAR
+BEGIN
+    #MC_Reset_Instance(Axis := #Axis, Execute := #Execute, 
+        Done => #Done, Busy => #Busy, Error => #Error);
+END_FUNCTION_BLOCK

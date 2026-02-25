@@ -1,0 +1,56 @@
+// 07_SpindleControl.scl - GCODE Version
+// Note: DB_Spindle is defined in 02_DataBlocks.scl
+
+FUNCTION_BLOCK "FB_SpindleControl"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+    VAR_INPUT Start : Bool; Stop : Bool; SetSpeed : Real; Direction : Int; SpeedOverride : Real; Reset : Bool; END_VAR
+    VAR_OUTPUT Running : Bool; AtSpeed : Bool; ActualSpeed : Real; CommandedSpeed : Real; Error : Bool; ErrorID : Word; END_VAR
+    VAR_IN_OUT Axis_Spindle : TO_PositioningAxis; END_VAR
+    VAR state : Int; targetSpeed, speedWithOverride : Real;
+        prevStart, prevStop, startEdge, stopEdge : Bool;
+        MC_Power_Inst : MC_Power; MC_MoveVelocity_Inst : MC_MoveVelocity; MC_Halt_Inst : MC_Halt;
+        bPowerEnable, bMoveVelExec, bHaltExec : Bool; speedDiff, speedPercent : Real; END_VAR
+BEGIN
+    #startEdge := #Start AND NOT #prevStart; #stopEdge := #Stop AND NOT #prevStop;
+    #prevStart := #Start; #prevStop := #Stop;
+    IF #Reset THEN #state := 0; #Error := FALSE; #ErrorID := 0; #bMoveVelExec := FALSE; #bHaltExec := FALSE; END_IF;
+    
+    #speedWithOverride := #SetSpeed * (#SpeedOverride / 100.0);
+    IF #speedWithOverride < "DB_Spindle".MinSpeed THEN #speedWithOverride := "DB_Spindle".MinSpeed; END_IF;
+    IF #speedWithOverride > "DB_Spindle".MaxSpeed THEN #speedWithOverride := "DB_Spindle".MaxSpeed; END_IF;
+    #CommandedSpeed := #speedWithOverride;
+    IF #Direction = 1 THEN #targetSpeed := -#speedWithOverride; ELSE #targetSpeed := #speedWithOverride; END_IF;
+    
+    CASE #state OF
+        0: #Running := FALSE; #AtSpeed := FALSE; #bPowerEnable := FALSE; #bMoveVelExec := FALSE;
+           IF #startEdge THEN #bPowerEnable := TRUE; #state := 10; END_IF;
+        10: #bPowerEnable := TRUE;
+            IF #MC_Power_Inst.Status THEN #bMoveVelExec := TRUE; #state := 20;
+            ELSIF #MC_Power_Inst.Error THEN #ErrorID := 16#0501; #state := 999; END_IF;
+            IF #stopEdge THEN #state := 30; END_IF;
+        20: #Running := TRUE; #bMoveVelExec := TRUE;
+            #speedDiff := ABS(ABS(#ActualSpeed) - ABS(#CommandedSpeed));
+            #speedPercent := (#speedDiff / ABS(#CommandedSpeed)) * 100.0;
+            #AtSpeed := (#speedPercent <= "DB_Spindle".SpeedTolerance);
+            IF #stopEdge THEN #state := 30; END_IF;
+            IF #MC_MoveVelocity_Inst.Error THEN #ErrorID := 16#0502; #state := 999; END_IF;
+        30: #bMoveVelExec := FALSE; #bHaltExec := TRUE; #AtSpeed := FALSE;
+            IF #MC_Halt_Inst.Done THEN #bHaltExec := FALSE; #bPowerEnable := FALSE; #Running := FALSE; #state := 0;
+            ELSIF #MC_Halt_Inst.Error THEN #ErrorID := 16#0503; #state := 999; END_IF;
+        999: #Error := TRUE; #Running := FALSE; #AtSpeed := FALSE; #bMoveVelExec := FALSE; #bHaltExec := FALSE; #bPowerEnable := FALSE;
+    END_CASE;
+    
+    #MC_Power_Inst(Axis := #Axis_Spindle, Enable := #bPowerEnable);
+    #MC_MoveVelocity_Inst(Axis := #Axis_Spindle, Execute := #bMoveVelExec, Velocity := ABS(#targetSpeed),
+                          Direction := SEL(G := (#targetSpeed >= 0), IN0 := 1, IN1 := 0));
+    #MC_Halt_Inst(Axis := #Axis_Spindle, Execute := #bHaltExec);
+    #ActualSpeed := ABS(#Axis_Spindle.ActualVelocity);
+    
+    "DB_Spindle".IsRunning := #Running;
+    "DB_Spindle".AtSpeed := #AtSpeed;
+    "DB_Spindle".ActualSpeed := #ActualSpeed;
+    "DB_Spindle".CommandedSpeed := #CommandedSpeed;
+    "DB_Spindle".Error := #Error;
+    "DB_Spindle".ErrorID := #ErrorID;
+END_FUNCTION_BLOCK

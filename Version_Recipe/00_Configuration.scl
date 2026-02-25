@@ -1,0 +1,172 @@
+// =============================================================================
+// Version_Recipe - 00_Configuration.scl
+// Centralized machine configuration - loaded once at PLC startup (OB100)
+// Edit THIS file to change machine parameters for different setups
+// =============================================================================
+
+// ============================================================================
+// HMI MAPPING GUIDE (Quick reference)
+// ----------------------------------------------------------------------------
+// This section lists the canonical DB fields and FB outputs that should be
+// mapped to the HMI. Use these tags on the HMI screens to ensure consistent
+// behavior with the centralized error & diagnostic design.
+//
+// Important: The project uses a single source-of-truth for errors: DB_Error.
+// Map HMI alarm display to:
+//   - DB_Error.Active         (Bool)   -> show "Has active error"
+//   - DB_Error.Code           (Word)   -> machine-readable error id
+//   - DB_Error.Details        (String) -> human-readable detailed text
+//   - DB_Error.Severity       (Byte)   -> 0=info,1=warn,2=error,3=fatal (use for coloring)
+//   - DB_Error.Source         (String) -> error category for filters
+//   - DB_Error.Line           (Int)    -> recipe line (if applicable)
+//   - DB_Error.TimeStamp      (DTL)    -> timestamp of the error
+//   - DB_Error.History_*      -> use history arrays for alarm log view (last 10)
+//
+// Primary runtime/status mappings (HMI status panel):
+//   - DB_HMI.StatusMsg        (String) -> status text (Stopped/Running/Error/...)
+//   - DB_HMI.IsRunning        (Bool)   -> running lamp
+//   - DB_HMI.IsPaused         (Bool)   -> paused lamp
+//   - DB_HMI.HasError         (Bool)   -> global error indicator
+//   - DB_HMI.Position_X/Z     (Real)   -> axis position displays
+//   - DB_HMI.CurrentLine      (Int)    -> recipe current line
+//   - DB_HMI.ProgressPercent  (Real)   -> progress bar
+//   - DB_HMI.ElapsedTime      (Time)   -> elapsed time display
+//
+// Diagnostic mappings (use these on an advanced debug screen):
+//   - DB_Diagnostic.Recipe_CurrentLine   (Int)
+//   - DB_Diagnostic.Recipe_TargetX/Z     (Real)
+//   - DB_Diagnostic.MoveX_Busy/Done/Error (Bool)
+//   - DB_Diagnostic.MoveZ_Busy/Done/Error (Bool)
+//   - DB_Diagnostic.Error_ProcessState   (Int)
+//   - DB_Diagnostic.Error_Line           (Int)
+//   - DB_Diagnostic.Error_Code           (Word)
+//
+// Error management FB (map if you want live telemetry):
+//   - FB_AlarmManager outputs (read-only via DB_Error/DB_Diagnostic):
+//       * ActiveErrorCode, ActiveErrorText, ActiveSeverity, ActiveSource, ActiveTime
+//
+// Notes:
+//  - The HMI should read DB_Error for alarms and DB_Diagnostic for contextual info.
+//  - Avoid writing to these DBs from HMI; use existing command bits/buttons only.
+//  - If you re-map HMI alarm words, prefer reading DB_Error.Code and deriving bits
+//    on the HMI side to reduce PLC load.
+// ============================================================================
+
+// -----------------------------------------------------------------------------
+// FC_LoadConfig - Write all initial configuration values
+// Called from OB100 (Startup) - runs once when PLC powers on or restarts
+// Runtime changes via HMI are preserved until next PLC restart
+// -----------------------------------------------------------------------------
+FUNCTION "FC_LoadConfig" : Void
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+BEGIN
+    // =========================================================================
+    // MACHINE LIMITS (mm)
+    // Set these to your machine's physical travel limits
+    // =========================================================================
+    "DB_MachineConfig".SoftLimit_MinX := 0.0;
+    "DB_MachineConfig".SoftLimit_MaxX := 170.0;
+    "DB_MachineConfig".SoftLimit_MinZ := 200.0;
+    "DB_MachineConfig".SoftLimit_MaxZ := 0.0;
+    
+    // =========================================================================
+    // VELOCITY LIMITS (mm/s)
+    // Must match Technology Object configuration in TIA Portal
+    // =========================================================================
+    "DB_MachineConfig".MaxVelocity := 50.0;      // Maximum axis speed
+    "DB_MachineConfig".RapidVelocity := 50.0;     // G0 rapid speed
+    "DB_MachineConfig".MinVelocity := 1.0;        // Minimum (matches TO setting)
+    "DB_MachineConfig".DefaultFeedrate := 300.0;  // Default feedrate (mm/min)
+    
+    // =========================================================================
+    // HOMING CONFIGURATION
+    // =========================================================================
+    "DB_MachineConfig".HomeOffset_X := 0.0;       // Home position offset X
+    "DB_MachineConfig".HomeOffset_Z := 0.0;       // Home position offset Z
+    "DB_MachineConfig".HomeVelocity := 10.0;      // Homing speed (mm/s)
+    "DB_Manual".HomingMode := 3;                  // 0=Passive, 2=Active, 3=Active+Zero
+    
+    // =========================================================================
+    // SAFE POSITIONS (mm)
+    // Where axes go when "Go Safe" is pressed
+    // =========================================================================
+    "DB_MachineConfig".SafePos_X := 10.0;
+    "DB_MachineConfig".SafePos_Z := 10.0;
+    
+    // =========================================================================
+    // TOOL CHANGER
+    // Tool turret positions (degrees) and safe change position
+    // =========================================================================
+    "DB_MachineConfig".ToolCount := 4;
+    "DB_MachineConfig".ToolChangePos_X := 10.0;    // Safe X for tool change
+    "DB_MachineConfig".ToolChangePos_Z := 10.0;    // Safe Z for tool change
+    
+    "DB_ToolConfig".Tool1_Position := 0.0;        // Tool 1 angle
+    "DB_ToolConfig".Tool2_Position := 90.0;       // Tool 2 angle
+    "DB_ToolConfig".Tool3_Position := 180.0;      // Tool 3 angle
+    "DB_ToolConfig".Tool4_Position := 270.0;      // Tool 4 angle
+    "DB_ToolConfig".ToolChangePos_X := 0.0;
+    "DB_ToolConfig".ToolChangePos_Z := 0.0;
+    "DB_ToolConfig".CurrentTool := 1;
+    
+    // =========================================================================
+    // SPINDLE CONFIGURATION (RPM)
+    // =========================================================================
+    "DB_Spindle".MinSpeed := 100.0;               // Minimum RPM
+    "DB_Spindle".MaxSpeed := 3000.0;              // Maximum RPM
+    "DB_Spindle".DefaultSpeed := 1000.0;          // Default RPM
+    "DB_Spindle".SpeedTolerance := 5.0;           // AtSpeed tolerance (%)
+    "DB_Spindle".SpeedOverride := 100.0;          // Speed override (%)
+    
+    // =========================================================================
+    // MANUAL MODE DEFAULTS
+    // =========================================================================
+    "DB_Manual".JogSpeed := 20.0;                 // Jog speed (mm/s)
+    "DB_Manual".JogIncrement := 1.0;              // Step increment (mm)
+    "DB_Manual".ToolStepAngle := 90.0;            // Tool step angle (degrees)
+    "DB_Manual".Manual_SpindleSpeed := 500.0;     // Manual spindle speed (RPM)
+    "DB_Manual".Manual_SpindleDir := 1;           // 1=CW, -1=CCW
+    
+    // =========================================================================
+    // HMI OVERRIDES (initial values)
+    // These can be changed from HMI during runtime
+    // =========================================================================
+    "DB_HMI".FeedrateOverride := 100.0;           // Feedrate override (50-200%)
+    "DB_HMI".RapidOverride := 100.0;              // Rapid override (50-200%)
+    "DB_HMI".SingleStepMode := FALSE;             // Single step mode off
+    "DB_HMI".ProductSelect := 0;                  // Default program 1
+    
+    // =========================================================================
+    // SAFETY BYPASSES
+    // ⚠️ WARNING: Set ALL to FALSE for production use!
+    // TRUE = bypass safety check (for testing/commissioning only)
+    // =========================================================================
+    "DB_HMI".Bypass_EStop := TRUE;                // Bypass E-Stop
+    "DB_HMI".Bypass_Door := TRUE;                 // Bypass door sensor
+    "DB_HMI".Bypass_AirPressure := TRUE;          // Bypass air pressure
+    "DB_HMI".Bypass_Drives := TRUE;               // Bypass drive ready
+    "DB_HMI".Bypass_Spindle := TRUE;              // Bypass spindle commands
+    "DB_HMI".Bypass_ToolChanger := TRUE;          // Bypass tool changer
+    
+    // Also set DB_MachineConfig bypasses (keep in sync)
+    "DB_MachineConfig".Bypass_ToolAxis := TRUE;   // Skip tool changes
+    "DB_MachineConfig".Bypass_Spindle := TRUE;    // Skip spindle in recipe
+    
+END_FUNCTION
+
+// -----------------------------------------------------------------------------
+// OB100 - Startup Organization Block
+// Runs ONCE when PLC powers on, goes to RUN, or downloads
+// -----------------------------------------------------------------------------
+ORGANIZATION_BLOCK "Startup"
+TITLE = "PLC Startup - Load Configuration"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+    VAR_TEMP
+        tempRetVal : Int;
+    END_VAR
+BEGIN
+    // Load all machine configuration parameters
+    "FC_LoadConfig"();
+END_ORGANIZATION_BLOCK

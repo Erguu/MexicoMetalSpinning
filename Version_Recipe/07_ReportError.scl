@@ -1,0 +1,41 @@
+// =============================================================================
+// Version_Recipe - 07_ReportError.scl
+// Central helper to report errors from any FB/FC/FCU without duplicating logic.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// DB_SystemEvents - small DB for inter-block requests (error reporting)
+// ---------------------------------------------------------------------------
+DATA_BLOCK "DB_SystemEvents"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        ReportError_Flag : Bool := FALSE;       // Set TRUE to request an error report
+        ReportError_Code : Word := 0;           // Error code to report
+        ReportError_Details : String[80];       // Optional text
+        ReportError_Source  : String[20];       // Optional source/category
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// ---------------------------------------------------------------------------
+// FC_ReportError - Utility to request a centralized error handling via DB_SystemEvents
+// Usage: FC_ReportError(Code := <word>, Details := 'text', Source := 'Recipe');
+// ---------------------------------------------------------------------------
+FUNCTION "FC_ReportError" : Void
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+    VAR_INPUT
+        Code : Word;
+        Details : String[80];
+        Source : String[20];
+    END_VAR
+BEGIN
+    // Write request into DB_SystemEvents for FB_AlarmManager / FB_Process to consume.
+    "DB_SystemEvents".ReportError_Code := #Code;
+    "DB_SystemEvents".ReportError_Details := #Details;
+    "DB_SystemEvents".ReportError_Source := #Source;
+    "DB_SystemEvents".ReportError_Flag := TRUE;
+END_FUNCTION
+

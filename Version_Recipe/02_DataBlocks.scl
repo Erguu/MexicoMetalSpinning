@@ -1,0 +1,553 @@
+// =============================================================================
+// Version_Recipe - 02_DataBlocks.scl
+// Memory-optimized data blocks for 5 recipe programs
+// Target: CPU 1214C (100KB work memory)
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram1 - Recipe data for Program 1 (max 1000 lines = 12KB)
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram1"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR 
+        Header : "RecipeHeader";
+        Lines : Array[0..999] of "RecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram2 - Recipe data for Program 2
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram2"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR 
+        Header : "RecipeHeader";
+        Lines : Array[0..999] of "RecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram3 - Recipe data for Program 3
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram3"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR 
+        Header : "RecipeHeader";
+        Lines : Array[0..999] of "RecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram4 - Recipe data for Program 4
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram4"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR 
+        Header : "RecipeHeader";
+        Lines : Array[0..999] of "RecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram5 - Recipe data for Program 5
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram5"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR 
+        Header : "RecipeHeader";
+        Lines : Array[0..999] of "RecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_HMI - Human Machine Interface data
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_HMI"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.3
+NON_RETAIN
+    VAR 
+        // ===========================================================
+        // BUTTONS (Input) - Version_GCODE compatible
+        // ===========================================================
+        Btn_Start : Bool;           // Start machine
+        Btn_Stop : Bool;            // Stop machine
+        Btn_Pause : Bool;           // Pause/Resume toggle
+        Btn_Reset : Bool;           // Reset program to beginning
+        Btn_ApplyToolConfig : Bool;  // Apply tool-slot codes from HMI to DB_ToolConfig
+        Btn_AckError : Bool;        // Acknowledge error ONLY (no reset)
+        Btn_Continue : Bool;        // Continue from saved line (warm restart)
+        Btn_Restart : Bool;         // Restart program from beginning
+        Btn_ProdReset : Bool;       // Reset production counters + history
+        Btn_LastCycleReset : Bool;  // Clear last cycle summary only
+        
+        // Aliases for code compatibility (same function)
+        Cmd_Start : Bool;
+        Cmd_Stop : Bool;
+        Cmd_Pause : Bool;
+        Cmd_Reset : Bool;
+        Cmd_Home : Bool;
+        Cmd_ManualMode : Bool;
+        
+        // ===========================================================
+        // MODE SELECTION (Input)
+        // ===========================================================
+        UseTextParser : Bool := FALSE;      // TRUE=Text parser, FALSE=Recipe
+        ProductSelect : Int := 1;           // Recipe selector (1-5)
+        ActiveProgram : Int := 1;           // Alias for ProductSelect
+        FeedrateOverride : Real := 100.0;   // Speed % for G1 moves (50-200, 100=normal)
+        RapidOverride : Real := 100.0;      // Speed % for G0 rapid moves (50-200)
+        SingleStepMode : Bool := FALSE;     // TRUE = stop after each line, wait for StepNext
+        StepNext : Bool := FALSE;           // Pulse to advance one step in SingleStepMode
+        
+        ProgramNames : Array[1..5] of String[20];
+        ProgramValid : Array[1..5] of Bool;
+        
+        // Tool slot codes editable from HMI. Enter external codes like 101, 406 etc.
+        // These are copied to DB_ToolConfig.ToolCode_List when operator presses Apply.
+        ToolSlotCode : Array[1..4] of Int := [101, 102, 103, 104];
+        
+        // ===========================================================
+        // POSITION DISPLAYS (Output)
+        // ===========================================================
+        ActualX : Real;             // Current X position (mm)
+        ActualZ : Real;             // Current Z position (mm)
+        Position_X : Real;          // Alias for ActualX
+        Position_Z : Real;          // Alias for ActualZ
+        
+        // ===========================================================
+        // STATUS DISPLAYS (Output)
+        // ===========================================================
+        StatusMsg : String[50];     // Status message text
+        MachineState : Int;         // State machine state
+        CurrentLine : Int;          // Current line being executed
+        TotalLines : Int;           // Total lines in program
+        ProgressPercent : Real;     // Progress 0-100%
+        CurrentTool : Int;          // Active tool (1-4)
+        FeedrateActive : Real;      // Actual feedrate (mm/min)
+        Feedrate : Int;             // Alias (integer version)
+        Axis_Status_X : Int;	    // Axis indication with colour
+	Axis_Status_Z : Int;	    // Axis indication with colour
+	Axis_Status_Spidle : Int;   // Axis indication with colour
+	Axis_Status_Toolhead : Int; // Axis indication with colour
+	Axis_Status_X_Str : String[10]; // Axis indication string with colour
+	Axis_Status_Z_Str : String[10]; // Axis indication string with colour
+	Axis_Status_Spindle_Str : String[10]; // Axis indication string with colour
+	Axis_Status_Toolhead_Str : String[10]; // Axis indication string with colour
+        // ===========================================================
+        // STATUS LAMPS (Output)
+        // ===========================================================
+        IsRunning : Bool;           // Machine is running
+        IsPaused : Bool;            // Machine is paused
+        HasError : Bool;            // Error is active
+        ElapsedTime : Time;         // Program elapsed time
+        ElapsedSeconds : Int;       // Elapsed time in seconds (for HMI display)
+        CycleCount : Int;           // Number of completed programs
+        
+        // ===========================================================
+        // ERROR DISPLAY (Output)
+        // ===========================================================
+        ErrorID : Word;             // Error code (0=OK)
+        ErrorText : String[40];     // Error description
+        ErrorDetail : String[60];   // Additional error info
+        
+        // ===========================================================
+        // BYPASS SWITCHES (for testing) - Version_GCODE compatible
+        // ===========================================================
+        Bypass_EStop : Bool := TRUE;        // Bypass E-Stop check
+        Bypass_Door : Bool := TRUE;         // Bypass door sensor
+        Bypass_AirPressure : Bool := TRUE;  // Bypass air pressure check
+        Bypass_Drives : Bool := TRUE;       // Bypass drive ready check
+        Bypass_Spindle : Bool := TRUE;      // Bypass spindle requirements
+        Bypass_ToolChanger : Bool := TRUE;  // Bypass tool changer
+        
+        // ===========================================================
+        // BOUNDING BOX (Output - from pre-scan)
+        // ===========================================================
+        BoundingBox_MinX : Real;
+        BoundingBox_MaxX : Real;
+        BoundingBox_MinZ : Real;
+        BoundingBox_MaxZ : Real;
+        BoundingBox_Valid : Bool;
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_MachineConfig - Machine configuration parameters
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_MachineConfig"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        // Soft Limits (mm) - Set these to your machine limits!
+        SoftLimit_MinX : Real := 0.0;
+        SoftLimit_MaxX : Real := 170.0;
+        SoftLimit_MinZ : Real := -200.0;
+        SoftLimit_MaxZ : Real := 0.0;
+        
+        // Velocity Limits
+        MaxVelocity : Real := 50.0;     // mm/s - TO limit
+        RapidVelocity : Real := 50.0;   // mm/s for G0
+        MinVelocity : Real := 1.0;      // mm/s minimum (matches TO setting)
+        
+        // Homing
+        HomeOffset_X : Real := 0.0;
+        HomeOffset_Z : Real := 0.0;
+        HomeVelocity : Real := 10.0;
+        
+        // Safe Positions
+        SafePos_X : Real := 0.0;
+        SafePos_Z : Real := 0.0;
+        
+        // Tool Configuration
+        ToolCount : Int := 4;
+        ToolChangePos_X : Real := 0.0;
+        ToolChangePos_Z : Real := 0.0;
+        
+        // Safety Bypass (for testing only!)
+        Bypass_EStop : Bool := FALSE;
+        Bypass_Door : Bool := FALSE;
+        Bypass_Air : Bool := FALSE;
+        Bypass_Drives : Bool := FALSE;      // Bypass drive ready check
+        
+        // Axis Bypass (for X/Z only test setup)
+        Bypass_ToolAxis : Bool := TRUE;     // TRUE = Skip tool changes
+        Bypass_ToolChanger : Bool := TRUE;  // Alias for Bypass_ToolAxis
+        Bypass_Spindle : Bool := TRUE;      // TRUE = Skip spindle commands
+        
+        // Feedrate defaults
+        DefaultFeedrate : Real := 300.0;    // Default feedrate (mm/min)
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_ErrorCodes - Error code constants (same as Version_GCODE)
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_ErrorCodes"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR 
+        // Axis errors
+        ERR_AXIS_X_MOVE : Word := 16#0001;
+        ERR_AXIS_Z_MOVE : Word := 16#0002;
+        ERR_AXIS_X_HOME : Word := 16#0003;
+        ERR_AXIS_Z_HOME : Word := 16#0004;
+        ERR_DRIVE_FAULT : Word := 16#0005;
+        ERR_MOTION_TIMEOUT : Word := 16#0008;
+        
+        // Soft limit errors
+        ERR_SOFT_X_MIN : Word := 16#0101;
+        ERR_SOFT_X_MAX : Word := 16#0102;
+        ERR_SOFT_Z_MIN : Word := 16#0103;
+        ERR_SOFT_Z_MAX : Word := 16#0104;
+        
+        // Hard limit errors
+        ERR_HARD_X_MIN : Word := 16#0111;
+        ERR_HARD_X_MAX : Word := 16#0112;
+        ERR_HARD_Z_MIN : Word := 16#0113;
+        ERR_HARD_Z_MAX : Word := 16#0114;
+        
+        // Tool errors
+        ERR_TOOL_INVALID : Word := 16#0201;
+        ERR_TOOL_NUMBER : Word := 16#0202;
+        ERR_TOOL_ROTATION : Word := 16#0203;
+        ERR_TOOL_RETRACT : Word := 16#0204;
+        ERR_TOOL_ROTATE : Word := 16#0205;
+        
+        // G-code errors
+        ERR_GCODE_LIMITS : Word := 16#0305;
+        
+        // Safety errors
+        ERR_ESTOP : Word := 16#0401;
+        ERR_DOOR_OPEN : Word := 16#0402;
+        ERR_AIR_LOW : Word := 16#0404;
+        
+        // Spindle errors
+        ERR_SPINDLE_POWER : Word := 16#0501;
+        ERR_SPINDLE_RUN : Word := 16#0502;
+        ERR_SPINDLE_HALT : Word := 16#0503;
+    END_VAR
+    // Severity constants for centralized error handling
+    VAR
+        SEV_INFO  : Byte := 0;
+        SEV_WARN  : Byte := 1;
+        SEV_ERROR : Byte := 2;
+        SEV_FATAL : Byte := 3;
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_Error - Centralized error snapshot for debugging (non-invasive to HMI)
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_Error"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Active    : Bool := FALSE;       // TRUE when an active error is present
+        Code      : Word := 0;           // Error code (matches DB_ErrorCodes)
+        Severity  : Byte := 0;           // 0=info,1=warn,2=error,3=fatal
+        Source    : String[20];          // Originating FB or category (e.g. 'Recipe', 'Safety')
+        Line      : Int := -1;           // Recipe line (if applicable) or -1
+        TimeStamp : DTL;                 // Timestamp captured with RD_SYS_T
+        Details   : String[80];          // Free text details / ActiveErrorText
+        // History ring buffer (last 10 errors) for post-mortem analysis
+        History_Code    : Array[1..10] of Word;
+        History_Time    : Array[1..10] of DTL;
+        History_Source  : Array[1..10] of String[20];
+        History_Details : Array[1..10] of String[80];
+        History_Index   : Int := 0;      // 1..10
+        History_Count   : Int := 0;      // Number of valid entries (<=10)
+        TotalErrorCount : DInt := 0;     // Lifetime error count (incremented on each new error)
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_ToolConfig - Tool changer configuration
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_ToolConfig"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Tool1_Position : Real := 0.0;     // Tool 1 angle/position
+        Tool2_Position : Real := 90.0;    // Tool 2 angle/position
+        Tool3_Position : Real := 180.0;   // Tool 3 angle/position
+        Tool4_Position : Real := 270.0;   // Tool 4 angle/position
+        ToolChangePos_X : Real := 0.0;    // Safe X position for tool change
+        ToolChangePos_Z : Real := 0.0;    // Safe Z position for tool change
+        // Mapping from external tool codes (e.g. T101) to physical tool slots (1..ToolCount).
+        // Default: common post-processor codes 101..104 map to slots 1..4.
+        ToolCode_List : Array[1..4] of Int := [101, 102, 103, 104];
+        CurrentTool : Int := 1;           // Currently selected tool
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_Spindle - Spindle configuration and status
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_Spindle"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.2
+NON_RETAIN
+    VAR
+        // Configuration
+        MinSpeed : Real := 100.0;         // Minimum spindle speed (RPM)
+        MaxSpeed : Real := 3000.0;        // Maximum spindle speed (RPM)
+        DefaultSpeed : Real := 1000.0;    // Default spindle speed (RPM)
+        SpeedTolerance : Real := 5.0;     // Speed tolerance for AtSpeed (%)
+        
+        // Commands (input from HMI/Program)
+        Cmd_SetSpeed : Real;              // Commanded speed
+        Cmd_Direction : Int;              // 1=CW, -1=CCW
+        SpeedOverride : Real := 100.0;    // Speed override (%)
+        
+        // Status (output)
+        IsRunning : Bool := FALSE;
+        AtSpeed : Bool := FALSE;
+        ActualSpeed : Real := 0.0;
+        CommandedSpeed : Real := 0.0;
+        Error : Bool := FALSE;
+        ErrorID : Word := 0;
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_Diagnostic - Runtime diagnostics and debugging
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_Diagnostic"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        // =========================================================
+        // PROCESS STATE
+        // States: 0=IDLE, 5=MANUAL, 10=HOMING, 12=PRE_SCAN,
+        //         15=ENABLE_DRIVES, 20=RUNNING, 30=TOOL_CHANGE,
+        //         40=PAUSED, 99=COMPLETE, 999=ERROR
+        // =========================================================
+        Process_State : Int;
+        Process_SafeToRun : Bool;
+        Process_DrivesEnable : Bool;
+        
+        // =========================================================
+        // RECIPE HANDLER STATE
+        // =========================================================
+        Recipe_CurrentProgram : Int;    // Active program number (1-5)
+        Recipe_CurrentLine : Int;       // Current line being executed
+        Recipe_TotalLines : Int;        // Total lines in program
+        Recipe_TargetX : Real;          // Current target X
+        Recipe_TargetZ : Real;          // Current target Z
+        Recipe_Velocity : Real;         // Current velocity
+        
+        // Pre-scan results
+        PreScan_Complete : Bool;
+        PreScan_Valid : Bool;           // No limit violations found
+        PreScan_ErrorLine : Int;        // Line with limit error (-1 if none)
+        
+        // =========================================================
+        // MOVE STATUS
+        // =========================================================
+        MoveX_Busy : Bool;
+        MoveX_Done : Bool;
+        MoveX_Error : Bool;
+        MoveZ_Busy : Bool;
+        MoveZ_Done : Bool;
+        MoveZ_Error : Bool;
+        bMoveX : Bool;                  // X axis needs to move
+        bMoveZ : Bool;                  // Z axis needs to move
+        
+        // =========================================================
+        // AXIS INFO
+        // =========================================================
+        Axis_X_Pos : Real;
+        Axis_Z_Pos : Real;
+        Axis_X_Enabled : Bool;
+        Axis_Z_Enabled : Bool;
+        Axis_X_Homed : Bool;
+        Axis_Z_Homed : Bool;
+        
+        // =========================================================
+        // ERROR CONTEXT
+        // =========================================================
+        Error_ProcessState : Int;
+        Error_Line : Int;
+        Error_Code : Word;
+        MoveX_ErrorID : Word;
+        MoveZ_ErrorID : Word;
+        Error_Text : String[40];
+        Error_Detail : String[60];
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_Manual - Manual mode control
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_Manual"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.3
+NON_RETAIN
+    VAR
+        ManualModeActive : Bool;
+        SelectedAxis : Int := 0;        // 0=X, 1=Z, 2=Tool, 3=Spindle
+        ActiveAxis : Int := -1;         // Currently active axis (-1 = none)
+        JogSpeed : Real := 10.0;        // mm/s
+        JogIncrement : Real := 1.0;     // mm per step
+        HomingMode : Int := 3;          // 0=Passive, 2=Active, 3=Active+Zero
+        HomePosition : Real := 0.0;     // Home position offset
+        
+        // Jog buttons (both naming conventions)
+        Btn_JogPlus : Bool;
+        Btn_JogMinus : Bool;
+        Jog_Plus : Bool;                // Alias
+        Jog_Minus : Bool;               // Alias
+        Btn_StepPlus : Bool;            // Incremental step +
+        Btn_StepMinus : Bool;           // Incremental step -
+        
+        // Homing buttons
+        Btn_Home : Bool;
+        Btn_HomeAxis : Bool;            // Alias for Btn_Home
+        Btn_HomeAll : Bool;             // Home all axes
+        Btn_GoSafe : Bool;
+        Btn_GoZero : Bool;
+        
+        // Absolute move
+        MoveToPosition : Real := 0.0;   // Target position
+        Btn_MoveAbsolute : Bool;        // Execute move
+        
+        // Tool step buttons
+        Btn_ToolStepCW : Bool;          // Tool step clockwise
+        Btn_ToolStepCCW : Bool;         // Tool step counter-clockwise
+        ToolStepAngle : Real := 90.0;   // Step angle (degrees)
+        ToolPosition : Real;            // Current tool position (degrees)
+        
+        // Spindle manual control
+        Btn_SpindleStart : Bool;        // Start spindle
+        Btn_SpindleStop : Bool;         // Stop spindle
+        Manual_SpindleSpeed : Real := 500.0;  // Spindle speed (RPM)
+        Manual_SpindleDir : Int := 1;   // 1=CW, -1=CCW
+        
+        // Status (multiple naming conventions for HMI compatibility)
+        JogBusy : Bool;
+        ManualBusy : Bool;              // Alias for JogBusy
+        JogError : Bool;
+        ManualError : Bool;             // Alias for JogError
+        JogErrorID : Word;
+        ManualErrorID : Word;           // Alias for JogErrorID
+        
+        // Selected axis info (output)
+        SelectedAxisName : String[10];
+        SelectedAxisPos : Real;
+        SelectedAxisHomed : Bool;
+        SelectedAxisReady : Bool;
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// DB_AlarmHistory and DB_HMI_Errors removed — use DB_Error and DB_Diagnostic for HMI mapping.
+
+// -----------------------------------------------------------------------------
+// DB_Production - Production counters and last cycles
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_Production"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        // Overall counters
+        TotalStarted  : DInt := 0;       // All cycles that entered PRE_SCAN
+        TotalOK       : DInt := 0;       // Completed successfully (STATE=100)
+        TotalNOK      : DInt := 0;       // Ended in ERROR (STATE=999)
+        TotalStopped  : DInt := 0;       // Stopped by operator (STOP sequence)
+        
+        // Current active cycle
+        CurrentActive    : Bool := FALSE;
+        CurrentProgram   : Int := 0;     // Active program number
+        CurrentStartTime : DTL;          // Cycle start timestamp
+        
+        // Last cycle summary
+        // 0=None, 1=OK, 2=NOK, 3=STOP
+        LastResult     : Byte := 0;
+        LastProgram    : Int := 0;
+        LastDuration_s : DInt := 0;      // Duration in seconds
+        LastErrorCode  : Word := 0;      // 0 if OK/STOP
+        LastErrorLine  : Int := -1;      // -1 if not applicable
+        LastEndTime    : DTL;            // End timestamp
+        
+        // History buffer (ring) - last 100 cycles
+        Hist_Index     : Int := 0;       // 1..100
+        Hist_Count     : Int := 0;       // Number of valid entries (<=100)
+        Hist_Result    : Array[1..100] of Byte;
+        Hist_Program   : Array[1..100] of Int;
+        Hist_Duration_s: Array[1..100] of DInt;
+        Hist_ErrorCode : Array[1..100] of Word;
+        Hist_ErrorLine : Array[1..100] of Int;
+        Hist_Time      : Array[1..100] of DTL;
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
