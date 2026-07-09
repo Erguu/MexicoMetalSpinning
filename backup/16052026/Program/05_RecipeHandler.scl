@@ -1,0 +1,929 @@
+// =============================================================================
+// Version_Recipe - 05_RecipeHandler.scl
+// Recipe-based motion handler with pre-scan validation
+// No string parsing - direct array access for maximum efficiency
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// FB_RecipePreScan - Pre-scan recipe for limit validation
+// DOC:
+//  purpose: Scan recipe lines before execution to compute bounding box and detect
+//           any soft-limit violations. Runs in batches to avoid long PLC scan times.
+//  inputs: Execute (rising edge), LineCount
+//  outputs: Done, Valid, ErrorLine (first offending line), MinX/MaxX, MinZ/MaxZ
+//  notes: Designed for non-blocking operation - processes N lines per PLC cycle.
+// -----------------------------------------------------------------------------
+FUNCTION_BLOCK "FB_RecipePreScan"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_INPUT
+        Execute : Bool;             // Rising edge starts pre-scan (level input)
+        LineCount : Int;            // Number of lines to scan
+    END_VAR
+    VAR_OUTPUT
+        Done : Bool;                // TRUE when pre-scan finished
+        Valid : Bool;               // TRUE if no limit violations found
+        ErrorLine : Int := -1;      // Line with first error (-1 = none)
+        ErrorDesc : String[60];     // Human-readable description of first violation
+        MinX : Real;                // Computed bounding box minimum X
+        MaxX : Real;                // Computed bounding box maximum X
+        MinZ : Real;                // Computed bounding box minimum Z
+        MaxZ : Real;                // Computed bounding box maximum Z
+        Progress : Real;            // Pre-scan progress 0-100% for HMI display
+    END_VAR
+    VAR_IN_OUT
+        Lines : Array[0..199] of "RecipeLine"; // Recipe lines storage (in/out DB reference)
+    END_VAR
+    VAR
+        state : Int;                // Local state machine
+        scanIndex : Int;            // Current scan index (next line to process)
+        scanEndIndex : Int;         // End index for current batch
+        rtExecute : Bool;           // Rising-edge start detection
+        prevExecute : Bool;         // Previous execute level (for edge)
+        // Temp vars for pre-scan checks (#4 feedrate/spindle, #5 tool mapping)
+        spindleRPM : Real;          // Decoded spindle RPM from Param byte
+        tmpToolCode : Int;          // Tool code from recipe Param
+        mapIndex : Int;             // Tool mapping loop index
+        mapFound : Bool;            // Tool mapping search result
+    END_VAR
+    CONST
+        // Recipe format: RecipeLine.Param encodes spindle speed as RPM ÷ 10.
+        // Range: 0–255 byte → 0–2550 RPM. Clamp to DB_Spindle.MaxSpeed at runtime.
+        // See PLC_Recipe_Format_Spec.md CMD_SPINDLE_ON.
+        SPINDLE_PARAM_TO_RPM : Real := 10.0;
+    END_CONST
+BEGIN
+    // -------------------------------------------------------------------------
+    // Rising edge detection -- start once when Execute level rises
+    // -------------------------------------------------------------------------
+    #rtExecute := #Execute AND NOT #prevExecute;
+    #prevExecute := #Execute;
+
+    // NOTE: PreScan processes 10 lines per PLC scan cycle to avoid long scan blocks.
+    // This preserves CPU responsiveness.
+    // ErrorLine: the first line with a limit violation -- helps operator locate the issue.
+
+    CASE #state OF
+
+        // -----------------------------------------------------------------
+        // === STATE_IDLE (0) ===
+        // -----------------------------------------------------------------
+        0: // IDLE -- waiting for Execute rising edge
+            #Done := FALSE;
+            #Progress := 0.0;
+            IF #rtExecute THEN
+                #scanIndex := 0;
+                #MinX := "DB_MachineConfig".SoftLimit_MaxX;
+                #MaxX := "DB_MachineConfig".SoftLimit_MinX;
+                #MinZ := "DB_MachineConfig".SoftLimit_MaxZ;
+                #MaxZ := "DB_MachineConfig".SoftLimit_MinZ;
+                #ErrorLine := -1;
+                #Valid := TRUE;
+                #state := 10;
+            END_IF;
+            
+        // -----------------------------------------------------------------
+        // === STATE_SCANNING (10) ===
+        // -----------------------------------------------------------------
+        10: // SCANNING -- 10 lines scanned per cycle (batch processing)
+            // Bounding box updated and soft limit checked for each G0/G1 line.
+            // Other commands (SpindleOn, ToolChange, Dwell, End) skipped -- contain no position.
+            #scanEndIndex := #scanIndex + 9;
+            IF #scanEndIndex > #LineCount - 1 THEN
+                #scanEndIndex := #LineCount - 1;
+            END_IF;
+            
+            FOR #scanIndex := #scanIndex TO #scanEndIndex DO
+                // Only check motion commands (G0=0, G1=1) for bounding box and limits
+                IF #Lines[#scanIndex].CMD <= 1 THEN
+                    // Update bounding box
+                    IF #Lines[#scanIndex].X < #MinX THEN #MinX := #Lines[#scanIndex].X; END_IF;
+                    IF #Lines[#scanIndex].X > #MaxX THEN #MaxX := #Lines[#scanIndex].X; END_IF;
+                    IF #Lines[#scanIndex].Z < #MinZ THEN #MinZ := #Lines[#scanIndex].Z; END_IF;
+                    IF #Lines[#scanIndex].Z > #MaxZ THEN #MaxZ := #Lines[#scanIndex].Z; END_IF;
+                    
+                    // Check limits -- records which axis/direction was violated
+                    IF #Lines[#scanIndex].X < "DB_MachineConfig".SoftLimit_MinX THEN
+                        IF #ErrorLine < 0 THEN
+                            #ErrorLine := #scanIndex;
+                            #ErrorDesc := CONCAT(IN1 := 'X below min (',
+                                          IN2 := CONCAT(IN1 := REAL_TO_STRING("DB_MachineConfig".SoftLimit_MinX),
+                                          IN2 := ')'));
+                        END_IF;
+                        #Valid := FALSE;
+                    ELSIF #Lines[#scanIndex].X > "DB_MachineConfig".SoftLimit_MaxX THEN
+                        IF #ErrorLine < 0 THEN
+                            #ErrorLine := #scanIndex;
+                            #ErrorDesc := CONCAT(IN1 := 'X above max (',
+                                          IN2 := CONCAT(IN1 := REAL_TO_STRING("DB_MachineConfig".SoftLimit_MaxX),
+                                          IN2 := ')'));
+                        END_IF;
+                        #Valid := FALSE;
+                    ELSIF #Lines[#scanIndex].Z < "DB_MachineConfig".SoftLimit_MinZ THEN
+                        IF #ErrorLine < 0 THEN
+                            #ErrorLine := #scanIndex;
+                            #ErrorDesc := CONCAT(IN1 := 'Z below min (',
+                                          IN2 := CONCAT(IN1 := REAL_TO_STRING("DB_MachineConfig".SoftLimit_MinZ),
+                                          IN2 := ')'));
+                        END_IF;
+                        #Valid := FALSE;
+                    ELSIF #Lines[#scanIndex].Z > "DB_MachineConfig".SoftLimit_MaxZ THEN
+                        IF #ErrorLine < 0 THEN
+                            #ErrorLine := #scanIndex;
+                            #ErrorDesc := CONCAT(IN1 := 'Z above max (',
+                                          IN2 := CONCAT(IN1 := REAL_TO_STRING("DB_MachineConfig".SoftLimit_MaxZ),
+                                          IN2 := ')'));
+                        END_IF;
+                        #Valid := FALSE;
+                    END_IF;
+                END_IF;
+
+                // #4 -- Feedrate check: G1 F-value above MaxVelocity (mm/min → mm/s for comparison)
+                IF #Lines[#scanIndex].CMD = 1 AND #Lines[#scanIndex].F > 0 THEN
+                    IF INT_TO_REAL(#Lines[#scanIndex].F) / "DB_MachineConfig".FeedrateConvFactor > "DB_MachineConfig".MaxVelocity THEN
+                        IF #ErrorLine < 0 THEN
+                            #ErrorLine := #scanIndex;
+                            #ErrorDesc := CONCAT(IN1 := 'F exceeds MaxVelocity (',
+                                          IN2 := CONCAT(IN1 := REAL_TO_STRING("DB_MachineConfig".MaxVelocity * "DB_MachineConfig".FeedrateConvFactor),
+                                          IN2 := ' mm/min)'));
+                        END_IF;
+                        #Valid := FALSE;
+                    END_IF;
+                END_IF;
+
+                // #4 -- Spindle speed check: CMD_SPINDLE_ON Param*10 RPM vs DB_Spindle.MaxSpeed
+                IF #Lines[#scanIndex].CMD = 20 THEN   // CMD_SPINDLE_ON
+                    #spindleRPM := INT_TO_REAL(BYTE_TO_INT(#Lines[#scanIndex].Param)) * SPINDLE_PARAM_TO_RPM;
+                    IF #spindleRPM > "DB_Spindle".MaxSpeed THEN
+                        IF #ErrorLine < 0 THEN
+                            #ErrorLine := #scanIndex;
+                            #ErrorDesc := CONCAT(IN1 := 'Spindle RPM exceeds max (',
+                                          IN2 := CONCAT(IN1 := REAL_TO_STRING("DB_Spindle".MaxSpeed),
+                                          IN2 := ' RPM)'));
+                        END_IF;
+                        #Valid := FALSE;
+                    END_IF;
+                END_IF;
+
+                // #5 -- Tool mapping check: CMD_TOOL_CHANGE Param must exist in ToolCode_List
+                // Skip if Bypass_ToolAxis=TRUE -- runtime also skips tool changes on bypass machines
+                IF #Lines[#scanIndex].CMD = 10 AND NOT "DB_MachineConfig".Bypass_ToolAxis THEN
+                    #tmpToolCode := BYTE_TO_INT(#Lines[#scanIndex].Param);
+                    #mapFound := FALSE;
+                    FOR #mapIndex := 1 TO "DB_MachineConfig".ToolCount DO
+                        IF "DB_ToolConfig".ToolCode_List[#mapIndex] = #tmpToolCode THEN
+                            #mapFound := TRUE;
+                        END_IF;
+                    END_FOR;
+                    IF NOT #mapFound THEN
+                        IF #ErrorLine < 0 THEN
+                            #ErrorLine := #scanIndex;
+                            #ErrorDesc := CONCAT(IN1 := 'Tool code not mapped: T',
+                                          IN2 := INT_TO_STRING(#tmpToolCode));
+                        END_IF;
+                        #Valid := FALSE;
+                    END_IF;
+                END_IF;
+
+            END_FOR;
+
+            // #13 -- Progress: updated each batch so HMI shows scanning progress
+            IF #LineCount > 0 THEN
+                #Progress := INT_TO_REAL(#scanIndex) / INT_TO_REAL(#LineCount) * 100.0;
+            END_IF;
+
+            // NOTE: FOR loop auto-increments #scanIndex, extra +1 removed
+
+            IF #scanIndex >= #LineCount THEN
+                #state := 99;
+            END_IF;
+            
+        // -----------------------------------------------------------------
+        // === STATE_DONE (99) ===
+        // -----------------------------------------------------------------
+        99: // DONE
+            #Done := TRUE;
+            #Progress := 100.0;
+            IF NOT #Execute THEN #state := 0; END_IF;
+    END_CASE;
+END_FUNCTION_BLOCK
+
+// -----------------------------------------------------------------------------
+// FB_RecipeHandler - Execute recipe program line by line
+// DOC:
+//  purpose: Main recipe execution engine. Reads Lines[] and issues axis/spindle/tool requests.
+//  inputs: Start/Stop/Pause/Reset control signals, LineCount
+//  outputs: Busy/Done/Error, CurrentLine, Tool/Spindle requests, ActiveFeedrate, Progress
+//  notes: No string parsing; recipe lines are pre-parsed into RecipeLine UDTs stored in DBs.
+//         Designed to be deterministic and yield frequently to PLC scan cycle.
+// -----------------------------------------------------------------------------
+FUNCTION_BLOCK "FB_RecipeHandler"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_INPUT
+        Start : Bool;               // Rising-edge or level to start/continue execution
+        Stop : Bool;                // Stop execution (controlled stop)
+        Pause : Bool;               // Pause execution (retain position)
+        Reset : Bool;               // Reset to beginning (clear internal state)
+        StartLine : Int := 0;       // First line to execute on next run (0 = beginning; use savedLineIndex for warm restart)
+        LineCount : Int;            // Total lines in program
+    END_VAR
+    VAR_OUTPUT
+        Busy : Bool;                // Execution in progress
+        Done : Bool;                // Program complete
+        Paused : Bool;              // Execution paused (SingleStep or Pause)
+        Error : Bool;               // Error occurred
+        ErrorID : Word;             // Error code (DB_ErrorCodes)
+        CurrentLine : Int;          // Current line index being executed
+        ToolChangeReq : Bool;       // Tool change requested by recipe
+        ToolReqNumber : Int;        // Requested tool number (from recipe Param)
+        SpindleReqStart : Bool;     // Spindle start request flag
+        SpindleReqStop : Bool;      // Spindle stop request flag
+        SpindleReqSpeed : Real;     // Spindle speed request (RPM)
+        ActiveFeedrate : Real;      // Current feedrate (mm/min) for HMI display
+        Progress : Real;            // Progress percentage 0-100
+    END_VAR
+    VAR_IN_OUT
+        Lines : Array[0..199] of "RecipeLine"; // Reference to recipe lines in DB
+        Axis_X : TO_PositioningAxis;           // Axis TO IN_OUT
+        Axis_Z : TO_PositioningAxis;
+    END_VAR
+    VAR
+        state : Int;                // Internal state machine
+        lineIndex : Int;           // Current executing line index
+        
+        // Current motion targets and feedback
+        targX : Real;               // Target X for current line
+        targZ : Real;               // Target Z for current line
+        currX : Real;               // Current X tracked by handler
+        currZ : Real;               // Current Z tracked by handler
+        velX : Real;                // Velocity command for X (mm/s)
+        velZ : Real;                // Velocity command for Z (mm/s)
+        
+        // Temporary calculation variables
+        deltaX : Real;
+        deltaZ : Real;
+        totalDist : Real;
+        feedrate : Real;            // Calculated feedrate (mm/s)
+        // Tool mapping helpers
+        tmpToolCode : Int;          // Raw tool code from recipe Param (e.g. 101)
+        mapIndex : Int;             // Loop index for mapping lookup
+        mapFound : Bool;            // TRUE if mapping found
+        
+        // Move control flags
+        bTrigMove : Bool;           // Trigger movement this cycle
+        bMoveX : Bool;              // X axis needs to move
+        bMoveZ : Bool;              // Z axis needs to move
+        bHaltTrig : Bool;           // Trigger halt (Stop)
+        
+        // Motion FB instances used by handler
+        fbMoveX : "FB_Axis_AbsPos";
+        fbMoveZ : "FB_Axis_AbsPos";
+        fbHaltX : "FB_Axis_Halt";
+        fbHaltZ : "FB_Axis_Halt";
+        
+        // Timers for move timeout and dwell
+        tonMoveTimeout : TON;
+        tonDwell : TON;             // Dwell timer for CMD_DWELL
+        tonAtSpeed : TON;           // Timeout timer for spindle at-speed wait (STATE_SPINDLE_WAIT)
+        dwellTime : Time;           // Calculated dwell duration
+        
+        // Edge detection for Start/StepNext
+        prevStart : Bool;           // previous Start level
+        rtStart : Bool;             // rising edge Start
+        prevStepNext : Bool;        // previous StepNext level
+        rtStepNext : Bool;          // rising edge StepNext
+        
+        // Override temporary
+        overridePercent : Real;     // Feedrate override percent (50..200)
+    END_VAR
+    
+    CONST
+        STATE_IDLE : Int := 0;
+        STATE_READ : Int := 10;
+        STATE_EXEC : Int := 20;
+        STATE_WAIT : Int := 30;
+        STATE_TOOL_REQ : Int := 40;
+        STATE_TOOL_WAIT : Int := 50;
+        STATE_SPINDLE : Int := 55;   // Spindle command processing
+        STATE_SPINDLE_WAIT : Int := 56;  // Wait for spindle AtSpeed after start command
+        STATE_DWELL : Int := 57;     // Dwell/wait timer
+        STATE_SPINDLE_STOP_WAIT : Int := 58;  // Wait for spindle to fully stop before proceeding
+        STATE_NEXT : Int := 60;
+        STATE_STEP_WAIT : Int := 65;  // Wait for StepNext in SingleStepMode
+        STATE_CYL_GOTO : Int := 70;   // Issue mandrel cylinder multi-setpoint command
+        STATE_CYL_WAIT : Int := 71;   // Wait for mandrel cylinder to reach target sensor
+        STATE_DONE : Int := 99;
+        STATE_PAUSED : Int := 800;
+        STATE_STOPPING : Int := 850;  // Halt triggered, waiting for axes to stop
+        STATE_ERROR : Int := 999;
+        
+        CMD_RAPID : Byte := 0;
+        CMD_LINEAR : Byte := 1;
+        CMD_TOOL_CHANGE : Byte := 10;
+        CMD_SPINDLE_ON : Byte := 20;
+        CMD_SPINDLE_OFF : Byte := 21;
+        CMD_DWELL : Byte := 30;
+        CMD_CYLINDER_GOTO : Byte := 40;     // Move mandrel cylinder to ruler level position (Mode 3)
+        CMD_END : Byte := 99;
+
+        // Recipe format: RecipeLine.Param encodes spindle speed as RPM ÷ 10.
+        // Range: 0–255 byte → 0–2550 RPM. Clamp to DB_Spindle.MaxSpeed at runtime.
+        // See PLC_Recipe_Format_Spec.md CMD_SPINDLE_ON.
+        SPINDLE_PARAM_TO_RPM : Real := 10.0;
+    END_CONST
+BEGIN
+    // =========================================================================
+    // FB_RecipeHandler -- Execution logic summary
+    // =========================================================================
+    // Called every PLC scan cycle.
+    // State machine:
+    //   IDLE(0) → READ(10) → EXEC(20) → WAIT(30) → NEXT(60) → READ(10) → ...
+    //   Special branches: TOOL_REQ(40)→TOOL_WAIT(50), SPINDLE(55), DWELL(57),
+    //                     STEP_WAIT(65), PAUSED(800), STOPPING(850), DONE(99), ERROR(999)
+    // All axis moves are performed via fbMoveX / fbMoveZ.
+    // Spindle and tool change requests are passed to FB_Process via flags (no direct drive access).
+    // =========================================================================
+
+    // Rising edge detection -- Start button
+    #rtStart := #Start AND NOT #prevStart;
+    #prevStart := #Start;
+
+    // NOTE: prevStart is cleared on Reset -- consecutive starts are reliably detected.
+
+    // SingleStep edge detection
+    #rtStepNext := "DB_HMI".StepNext AND NOT #prevStepNext;
+    #prevStepNext := "DB_HMI".StepNext;
+    
+    // -------------------------------------------------------------------------
+    // RESET -- Rewind program to beginning, clear all flags
+    // Can be applied while running; caller must stop axes first.
+    // -------------------------------------------------------------------------
+    IF #Reset THEN
+        #lineIndex := #StartLine;   // 0 = normal start; >0 = warm restart from saved line
+        #state := STATE_IDLE;
+        #Error := FALSE;
+        #ErrorID := 0;
+        #Busy := FALSE;
+        #Done := FALSE;
+        #Paused := FALSE;
+        #ToolChangeReq := FALSE;
+        // BUG FIX: Clear internal flags so rising-edge detection works on next Start
+        #prevStart := FALSE;
+        #bTrigMove := FALSE;
+        #bMoveX := FALSE;
+        #bMoveZ := FALSE;
+        #bHaltTrig := FALSE;
+        #SpindleReqStart := FALSE;
+        #SpindleReqStop := FALSE;
+        // Reset timers -- no stale ET remains on next run
+        #tonMoveTimeout(IN := FALSE, PT := T#30S);
+        #tonDwell(IN := FALSE, PT := T#0S);
+    END_IF;
+    
+    // -------------------------------------------------------------------------
+    // STOP -- Controlled, error-free stop sequence
+    // Halt triggered → waits in STATE_STOPPING until both axes fully stop
+    // → STATE_DONE. Error/ErrorID untouched (operator stop is not an error).
+    // -------------------------------------------------------------------------
+    IF #Stop AND #state <> STATE_IDLE AND #state <> STATE_ERROR
+              AND #state <> STATE_STOPPING AND #state <> STATE_DONE THEN
+        // User Stop = controlled, error-free stop
+        // Safely interrupt moves using FB_Axis_Halt.
+        // Waits in STATE_STOPPING until halt completes, then STATE_DONE.
+        #bHaltTrig := TRUE;
+        #Paused := FALSE;
+        #state := STATE_STOPPING;
+    END_IF;
+
+    // Move timeout timer -- only counts during STATE_WAIT (30 seconds)
+    // If axis does not return Done within 30s, error 16#0008 (Motion Timeout) is generated.
+    #tonMoveTimeout(IN := #state = STATE_WAIT, PT := T#300S);
+    
+    // State machine
+    CASE #state OF
+
+        // -----------------------------------------------------------------
+        // === STATE_IDLE (0) ===
+        // -----------------------------------------------------------------
+        0: // IDLE
+            #Busy := FALSE;
+            #Done := FALSE;
+            #Paused := FALSE;
+            #bTrigMove := FALSE;
+            #bHaltTrig := FALSE;
+            
+            IF #rtStart AND #LineCount > 0 THEN
+                #lineIndex := #StartLine;   // 0 = normal start; >0 = warm restart
+                #currX := #Axis_X.ActualPosition;
+                #currZ := #Axis_Z.ActualPosition;
+                #Busy := TRUE;
+                #state := STATE_READ;
+            END_IF;
+            
+        // -----------------------------------------------------------------
+        // === STATE_READ (10) ===
+        // -----------------------------------------------------------------
+        10: // READ - Read current line
+            IF #lineIndex >= #LineCount THEN
+                #state := STATE_DONE;
+            ELSE
+                // Read line data
+                #targX := #Lines[#lineIndex].X;
+                #targZ := #Lines[#lineIndex].Z;
+                
+                // Check command type
+                CASE #Lines[#lineIndex].CMD OF
+                    CMD_END:
+                        #state := STATE_DONE;
+                        
+                    CMD_TOOL_CHANGE:
+                        // Read raw tool code (supports post-processed codes like 101)
+                        #tmpToolCode := BYTE_TO_INT(#Lines[#lineIndex].Param);
+                        #mapFound := FALSE;
+                        // Try explicit mapping in DB_ToolConfig.ToolCode_List
+                        FOR #mapIndex := 1 TO "DB_MachineConfig".ToolCount DO
+                            IF "DB_ToolConfig".ToolCode_List[#mapIndex] = #tmpToolCode THEN
+                                #ToolReqNumber := #mapIndex;
+                                #mapFound := TRUE;
+                            END_IF;
+                        END_FOR;
+                        // If mapping not found -> report recipe tool number error (operator must map codes via HMI)
+                        IF NOT #mapFound THEN
+                            #ErrorID := 16#0308; // Recipe: Invalid tool number
+                            "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Tool code ', IN2 := INT_TO_STRING(#tmpToolCode));
+                            "DB_Diagnostic".Error_Line := #lineIndex;
+                            "DB_Diagnostic".Error_Code := #ErrorID;
+                            // Provide clear HMI guidance for operator: which code is missing and what to do
+                            "DB_HMI".ErrorText := CONCAT(IN1 := 'Tool code ', IN2 := INT_TO_STRING(#tmpToolCode));
+                            "DB_HMI".ErrorDetail := 'Not mapped. Open Tool Setup, enter slot code & Apply.';
+                            #state := STATE_ERROR;
+                        ELSE
+                            // Mapping found -> request tool change for mapped slot
+                            #state := STATE_TOOL_REQ;
+                        END_IF;
+                    
+                    CMD_SPINDLE_ON, CMD_SPINDLE_OFF:
+                        IF "DB_HMI".Bypass_Spindle THEN
+                            #state := STATE_NEXT;
+                        ELSE
+                            #state := STATE_SPINDLE;
+                        END_IF;
+                    
+                    CMD_DWELL:
+                        // Dwell = wait for Param * 100ms
+                        #dwellTime := INT_TO_TIME(BYTE_TO_INT(#Lines[#lineIndex].Param) * 100);
+                        #tonDwell(IN := FALSE, PT := #dwellTime); // Reset timer
+                        #state := STATE_DWELL;
+
+                    CMD_CYLINDER_GOTO:
+                        // Move mandrel cylinder to ruler level position (Param = level 1-5)
+                        #state := STATE_CYL_GOTO;
+
+                    CMD_RAPID, CMD_LINEAR:
+                        #state := STATE_EXEC;
+                        
+                    ELSE
+                        // Unknown command - skip
+                        #state := STATE_NEXT;
+                END_CASE;
+            END_IF;
+            
+        // -----------------------------------------------------------------
+        // === STATE_EXEC (20) ===
+        // -----------------------------------------------------------------
+        20: // EXEC -- Calculate motion parameters and start move
+            // Linear interpolation: both axes start and finish simultaneously.
+            // velX/velZ split proportionally over total distance.
+            // This ensures X and Z reach target in the same time (true linear path).
+            #deltaX := ABS(#targX - #currX);
+            #deltaZ := ABS(#targZ - #currZ);
+            #totalDist := SQRT(#deltaX * #deltaX + #deltaZ * #deltaZ);
+            
+            // Determine which axes need to move
+            #bMoveX := #deltaX > 0.01;  // 0.01mm threshold
+            #bMoveZ := #deltaZ > 0.01;
+            
+            // Calculate velocity
+            IF #Lines[#lineIndex].CMD = CMD_RAPID OR #Lines[#lineIndex].F = 0 THEN
+                // Rapid move - use max velocity with RapidOverride
+                #feedrate := "DB_MachineConfig".RapidVelocity;
+                #overridePercent := "DB_HMI".RapidOverride;
+            ELSE
+                // Linear move - convert mm/min to mm/s with FeedrateOverride
+                #feedrate := INT_TO_REAL(#Lines[#lineIndex].F) / "DB_MachineConfig".FeedrateConvFactor;
+                #overridePercent := "DB_HMI".FeedrateOverride;
+            END_IF;
+            
+            // Apply override (clamp to 50-200%)
+            IF #overridePercent < 50.0 THEN #overridePercent := 50.0; END_IF;
+            IF #overridePercent > 200.0 THEN #overridePercent := 200.0; END_IF;
+            #feedrate := #feedrate * (#overridePercent / 100.0);
+            
+            // Clamp velocity to limits
+            IF #feedrate > "DB_MachineConfig".MaxVelocity THEN
+                #feedrate := "DB_MachineConfig".MaxVelocity;
+            ELSIF #feedrate < "DB_MachineConfig".MinVelocity THEN
+                #feedrate := "DB_MachineConfig".MinVelocity;
+            END_IF;
+            
+            // Calculate axis velocities for linear interpolation
+            IF #totalDist > 0.01 THEN
+                #velX := #feedrate * #deltaX / #totalDist;
+                #velZ := #feedrate * #deltaZ / #totalDist;
+            ELSE
+                #velX := #feedrate;
+                #velZ := #feedrate;
+            END_IF;
+            
+            // Ensure minimum velocity
+            IF #bMoveX AND #velX < "DB_MachineConfig".MinVelocity THEN 
+                #velX := "DB_MachineConfig".MinVelocity; 
+            END_IF;
+            IF #bMoveZ AND #velZ < "DB_MachineConfig".MinVelocity THEN 
+                #velZ := "DB_MachineConfig".MinVelocity; 
+            END_IF;
+            
+            // Skip if no movement needed
+            IF NOT #bMoveX AND NOT #bMoveZ THEN
+                #state := STATE_NEXT;
+            ELSE
+                // Trigger movement
+                #bTrigMove := TRUE;
+                #tonMoveTimeout(IN := FALSE, PT := T#300S);
+                #state := STATE_WAIT;
+            END_IF;
+            
+        // -----------------------------------------------------------------
+        // === STATE_WAIT (30) ===
+        // -----------------------------------------------------------------
+        30: // WAIT - Wait for motion complete
+            #bTrigMove := FALSE;
+            
+            // Pause handling
+            IF #Pause THEN
+                #bHaltTrig := TRUE;
+                #state := STATE_PAUSED;
+            ELSE
+                // Check completion based on which axes are moving
+                IF (#bMoveX AND #bMoveZ) THEN
+                    IF #fbMoveX.Done AND #fbMoveZ.Done THEN
+                        #currX := #targX;
+                        #currZ := #targZ;
+                        #state := STATE_NEXT;
+                    END_IF;
+                ELSIF #bMoveX THEN
+                    IF #fbMoveX.Done THEN
+                        #currX := #targX;
+                        #state := STATE_NEXT;
+                    END_IF;
+                ELSIF #bMoveZ THEN
+                    IF #fbMoveZ.Done THEN
+                        #currZ := #targZ;
+                        #state := STATE_NEXT;
+                    END_IF;
+                ELSE
+                    #state := STATE_NEXT;
+                END_IF;
+                
+                // Error check -- TO/drive error or mechanical blockage
+                // TO ErrorID: Siemens TO diagnostics code -- converted to readable text via FC_TO_ErrorText.
+                // DB_Diagnostic.MoveX/Z_ErrorID: readable directly on HMI diagnostic page.
+                IF (#bMoveX AND #fbMoveX.Error) OR (#bMoveZ AND #fbMoveZ.Error) THEN
+                    IF #bMoveX AND #fbMoveX.Error THEN
+                        #ErrorID := 16#0001;
+                        "DB_Diagnostic".MoveX_ErrorID := #fbMoveX.ErrorID;
+                        "DB_Diagnostic".TO_ErrorText  := "FC_TO_ErrorText"(Code := #fbMoveX.ErrorID);
+                        "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'X Move Failed: ', IN2 := "DB_Diagnostic".TO_ErrorText);
+                        "DB_HMI".ErrorText   := 'X axis move failed';
+                        "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                                IN1 := INT_TO_STRING(#lineIndex), IN2 := CONCAT(
+                                                IN1 := ' TO:', IN2 := "DB_Diagnostic".TO_ErrorText)));
+                    ELSE
+                        #ErrorID := 16#0002;
+                        "DB_Diagnostic".MoveZ_ErrorID := #fbMoveZ.ErrorID;
+                        "DB_Diagnostic".TO_ErrorText  := "FC_TO_ErrorText"(Code := #fbMoveZ.ErrorID);
+                        "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Z Move Failed: ', IN2 := "DB_Diagnostic".TO_ErrorText);
+                        "DB_HMI".ErrorText   := 'Z axis move failed';
+                        "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                                IN1 := INT_TO_STRING(#lineIndex), IN2 := CONCAT(
+                                                IN1 := ' TO:', IN2 := "DB_Diagnostic".TO_ErrorText)));
+                    END_IF;
+                    "DB_Diagnostic".Error_Line := #lineIndex;
+                    "DB_Diagnostic".Error_Code := #ErrorID;
+                    #state := STATE_ERROR;
+                ELSIF #tonMoveTimeout.Q THEN
+                    // Axis did not return Done within 30s -- mechanical blockage, drive fault or TO issue
+                    #ErrorID := 16#0008;
+                    "DB_Diagnostic".Error_Line := #lineIndex;
+                    "DB_Diagnostic".Error_Code := #ErrorID;
+                    // Determine which axis is stuck (based on bMoveX/Z state)
+                    IF #bMoveX AND #bMoveZ THEN
+                        "DB_Diagnostic".Error_Text := 'Motion Timeout: X+Z axes';
+                        "DB_HMI".ErrorText   := 'Motion timeout: X+Z';
+                    ELSIF #bMoveX THEN
+                        "DB_Diagnostic".Error_Text := 'Motion Timeout: X axis';
+                        "DB_HMI".ErrorText   := 'Motion timeout: X axis';
+                    ELSE
+                        "DB_Diagnostic".Error_Text := 'Motion Timeout: Z axis';
+                        "DB_HMI".ErrorText   := 'Motion timeout: Z axis';
+                    END_IF;
+                    "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                           IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (30s limit)'));
+                    #state := STATE_ERROR;
+                END_IF;
+            END_IF;
+            
+        // -----------------------------------------------------------------
+        // === STATE_TOOL_REQ (40) ===
+        // -----------------------------------------------------------------
+        40: // TOOL_REQ
+            #ToolChangeReq := TRUE;
+            #state := STATE_TOOL_WAIT;
+            
+        // -----------------------------------------------------------------
+        // === STATE_TOOL_WAIT (50) ===
+        // -----------------------------------------------------------------
+        50: // TOOL_WAIT
+            // Wait for external tool change completion from FB_Process
+            // FB_Process sets ToolChangeReq := FALSE when done
+            // BUG FIX: also wait for Start (bStartSeq) to be TRUE before advancing.
+            // Without this, the recipe races ahead through READ→SPINDLE while the machine
+            // is still in STATE_LOCK_EXTEND_WAIT (17) where bStartSeq=FALSE.
+            // The spindle-start latch is only checked in CASE 20 (RUNNING), so any
+            // SpindleReqStart pulse that fires in state 17 is silently missed.
+            IF NOT #ToolChangeReq AND #Start THEN
+                #state := STATE_NEXT;
+            END_IF;
+            
+        // -----------------------------------------------------------------
+        // === STATE_SPINDLE (55) ===
+        // -----------------------------------------------------------------
+        55: // SPINDLE -- Forward spindle command to FB_Process (via flag)
+            IF #Lines[#lineIndex].CMD = CMD_SPINDLE_ON THEN
+                #SpindleReqStart := TRUE;
+                #SpindleReqStop := FALSE;
+                #SpindleReqSpeed := INT_TO_REAL(BYTE_TO_INT(#Lines[#lineIndex].Param)) * SPINDLE_PARAM_TO_RPM;
+                #tonAtSpeed(IN := FALSE, PT := T#10S);  // reset timer before waiting
+                #state := STATE_SPINDLE_WAIT;           // wait for AtSpeed before next motion
+            ELSE
+                #SpindleReqStart := FALSE;
+                #SpindleReqStop := TRUE;
+                #SpindleReqSpeed := 0.0;
+                #tonAtSpeed(IN := FALSE, PT := T#15S);  // reset timer for stop wait
+                #state := STATE_SPINDLE_STOP_WAIT;      // wait for full stop before tool change / next motion
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_SPINDLE_WAIT (56) ===
+        // -----------------------------------------------------------------
+        56: // SPINDLE_WAIT -- Wait for spindle to reach commanded speed (AtSpeed)
+            // DB_Spindle.AtSpeed = TRUE when actual speed is within SpeedTolerance % of commanded.
+            // Timeout 10s: error 16#030A. Adjust DB_Spindle.SpeedTolerance if triggering too early.
+            // BUG FIX: Clear SpindleReqStart here (one scan after state 55 set it) so it is a
+            // true one-shot flag. Without this, FB_Process re-sets bSpindleStart=TRUE every scan
+            // because SpindleReqStart was never cleared, preventing FB_SpindleControl from ever
+            // seeing a FALSE on its Start input and therefore never generating a rising startEdge.
+            #SpindleReqStart := FALSE;
+            #tonAtSpeed(IN := TRUE, PT := T#10S);
+            IF "DB_Spindle".AtSpeed OR "DB_Spindle".Bypass_AtSpeed THEN
+                #tonAtSpeed(IN := FALSE, PT := T#10S);  // reset for next use
+                #state := STATE_NEXT;
+            ELSIF #tonAtSpeed.Q THEN
+                #tonAtSpeed(IN := FALSE, PT := T#10S);  // reset
+                #ErrorID := 16#030A;
+                "DB_Diagnostic".Error_Text := 'Spindle did not reach target speed (timeout)';
+                "DB_Diagnostic".Error_Line := #lineIndex;
+                "DB_Diagnostic".Error_Code := #ErrorID;
+                "DB_HMI".ErrorText   := 'Spindle at-speed timeout';
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                        IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (10s limit)'));
+                #state := STATE_ERROR;
+            ELSIF #Pause THEN
+                #tonAtSpeed(IN := FALSE, PT := T#10S);
+                #bHaltTrig := TRUE;
+                #state := STATE_PAUSED;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_DWELL (57) ===
+        // -----------------------------------------------------------------
+        57: // DWELL -- Wait Param*100ms (equivalent to G4 command)
+            // Example: Param=10 → 1000ms (1 second) wait.
+            // No axis movement during dwell; spindle continues running.
+            IF #Pause THEN
+                // Pause pressed -- stop timer and go to PAUSED state
+                #tonDwell(IN := FALSE, PT := #dwellTime);
+                #bHaltTrig := TRUE;
+                #state := STATE_PAUSED;
+            ELSE
+                #tonDwell(IN := TRUE, PT := #dwellTime);
+                IF #tonDwell.Q THEN
+                    #tonDwell(IN := FALSE, PT := #dwellTime); // Reset timer
+                    #state := STATE_NEXT;
+                END_IF;
+            END_IF;
+            
+        // -----------------------------------------------------------------
+        // === STATE_SPINDLE_STOP_WAIT (58) ===
+        // -----------------------------------------------------------------
+        58: // SPINDLE_STOP_WAIT -- Wait for spindle to fully stop before continuing.
+            // Prevents a tool change (or next motion line) while spindle is still coasting.
+            // DB_Spindle.IsRunning goes FALSE when FB_SpindleControl reaches idle state.
+            // Timeout 15s → error 16#030B.
+            // BUG FIX: Clear SpindleReqStop here (one scan after state 55 set it) so it is a
+            // true one-shot flag. Mirrors the SpindleReqStart fix in state 56.
+            #SpindleReqStop := FALSE;
+            #tonAtSpeed(IN := TRUE, PT := T#15S);
+            IF NOT "DB_Spindle".IsRunning THEN
+                #tonAtSpeed(IN := FALSE, PT := T#15S);
+                #state := STATE_NEXT;
+            ELSIF #tonAtSpeed.Q THEN
+                #tonAtSpeed(IN := FALSE, PT := T#15S);
+                #ErrorID := 16#030B;
+                "DB_Diagnostic".Error_Text := 'Spindle did not stop (timeout)';
+                "DB_Diagnostic".Error_Line := #lineIndex;
+                "DB_Diagnostic".Error_Code := #ErrorID;
+                "DB_HMI".ErrorText   := 'Spindle stop timeout';
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                        IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (15s limit)'));
+                #state := STATE_ERROR;
+            ELSIF #Pause THEN
+                #tonAtSpeed(IN := FALSE, PT := T#15S);
+                #bHaltTrig := TRUE;
+                #state := STATE_PAUSED;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_CYL_GOTO (70) ===
+        // -----------------------------------------------------------------
+        70: // CYL_GOTO -- Move BackSupport and SheetHolder to CMD=40 calculated positions
+            // TargetPos = Param × Cmd40_Gain (mm) -- each cylinder uses its own gain.
+            // Mode 3: extends until RulerValue >= TargetPos, solenoid cuts immediately.
+            // Both cylinders start simultaneously; CYL_WAIT waits for both to confirm.
+            "DB_Cylinder_BackSupport".TargetPos  := INT_TO_REAL(BYTE_TO_INT(#Lines[#lineIndex].Param)) * "DB_Cylinder_BackSupport".Cmd40_Gain;
+            "DB_Cylinder_BackSupport".Cmd_Extend := TRUE;
+            "DB_Cylinder_SheetHolder".TargetPos  := INT_TO_REAL(BYTE_TO_INT(#Lines[#lineIndex].Param)) * "DB_Cylinder_SheetHolder".Cmd40_Gain;
+            "DB_Cylinder_SheetHolder".Cmd_Extend := TRUE;
+            #state := STATE_CYL_WAIT;
+
+        // -----------------------------------------------------------------
+        // === STATE_CYL_WAIT (71) ===
+        // -----------------------------------------------------------------
+        71: // CYL_WAIT -- Wait for BackSupport AND SheetHolder to reach target (AtSetpoint=TRUE)
+            IF "DB_Cylinder_BackSupport".AtSetpoint AND "DB_Cylinder_SheetHolder".AtSetpoint THEN
+                // Both at target: release Cmd_Extend (5/3 mechanical lock holds position)
+                "DB_Cylinder_BackSupport".Cmd_Extend := FALSE;
+                "DB_Cylinder_SheetHolder".Cmd_Extend := FALSE;
+                #state := STATE_NEXT;
+            ELSIF "DB_Cylinder_BackSupport".Error THEN
+                "DB_Cylinder_BackSupport".Cmd_Extend := FALSE;
+                "DB_Cylinder_SheetHolder".Cmd_Extend := FALSE;
+                #ErrorID := 16#0309;
+                "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'CMD40 BackSupport cyl error, Param=',
+                                              IN2 := INT_TO_STRING(BYTE_TO_INT(#Lines[#lineIndex].Param)));
+                "DB_Diagnostic".Error_Line := #lineIndex;
+                "DB_Diagnostic".Error_Code := #ErrorID;
+                "DB_HMI".ErrorText   := 'BackSupport cyl error';
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                        IN1 := INT_TO_STRING(#lineIndex), IN2 := ' target not reached'));
+                #state := STATE_ERROR;
+            ELSIF "DB_Cylinder_SheetHolder".Error THEN
+                "DB_Cylinder_BackSupport".Cmd_Extend := FALSE;
+                "DB_Cylinder_SheetHolder".Cmd_Extend := FALSE;
+                #ErrorID := 16#0309;
+                "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'CMD40 SheetHolder cyl error, Param=',
+                                              IN2 := INT_TO_STRING(BYTE_TO_INT(#Lines[#lineIndex].Param)));
+                "DB_Diagnostic".Error_Line := #lineIndex;
+                "DB_Diagnostic".Error_Code := #ErrorID;
+                "DB_HMI".ErrorText   := 'SheetHolder cyl error';
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                        IN1 := INT_TO_STRING(#lineIndex), IN2 := ' target not reached'));
+                #state := STATE_ERROR;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_NEXT (60) ===
+        // -----------------------------------------------------------------
+        60: // NEXT
+            #lineIndex := #lineIndex + 1;
+            // SingleStepMode: wait for user to press StepNext before continuing
+            IF "DB_HMI".SingleStepMode THEN
+                #state := STATE_STEP_WAIT;
+            ELSE
+                #state := STATE_READ;
+            END_IF;
+            
+        // -----------------------------------------------------------------
+        // === STATE_STEP_WAIT (65) ===
+        // -----------------------------------------------------------------
+        65: // STEP_WAIT - Wait for StepNext pulse in SingleStep mode
+            #Paused := TRUE;  // Show as paused in HMI
+            IF #rtStepNext THEN
+                // User pressed StepNext, continue to next line
+                #Paused := FALSE;
+                #state := STATE_READ;
+            ELSIF NOT "DB_HMI".SingleStepMode THEN
+                // SingleStepMode turned off, continue normally
+                #Paused := FALSE;
+                #prevStepNext := FALSE;  // Clear stale edge -- prevents false trigger when mode re-enabled
+                #state := STATE_READ;
+            END_IF;
+            
+        // -----------------------------------------------------------------
+        // === STATE_DONE (99) ===
+        // -----------------------------------------------------------------
+        99: // DONE
+            #Busy := FALSE;
+            #Done := TRUE;
+            #ToolChangeReq := FALSE;
+            
+        // -----------------------------------------------------------------
+        // === STATE_PAUSED (800) ===
+        // -----------------------------------------------------------------
+        800: // PAUSED -- Two-phase: first fully stop axis, then wait for resume
+            #Paused := TRUE;
+            IF NOT (#fbHaltX.Done OR NOT #bMoveX) OR NOT (#fbHaltZ.Done OR NOT #bMoveZ) THEN
+                // Axes not yet stopped -- hold halt command
+                #bHaltTrig := TRUE;
+            ELSE
+                // Axes stopped -- release halt, wait for resume
+                #bHaltTrig := FALSE;
+                IF NOT #Pause THEN
+                    #Paused := FALSE;
+                    #currX := #Axis_X.ActualPosition;
+                    #currZ := #Axis_Z.ActualPosition;
+                    #state := STATE_EXEC;
+                END_IF;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_STOPPING (850) ===
+        // -----------------------------------------------------------------
+        850: // STOPPING -- Halt active, waiting for both axes to fully stop
+            // fbHaltX and fbHaltZ continue to be called with Execute=TRUE.
+            // When both return Done, bHaltTrig=FALSE and STATE_DONE is entered.
+            // This allows STATE_STOPPING (18) in FB_Process to safely see Busy=FALSE.
+            #bHaltTrig := TRUE;
+            IF #fbHaltX.Done AND #fbHaltZ.Done THEN
+                #bHaltTrig := FALSE;
+                #Busy  := FALSE;
+                #Done  := TRUE;
+                #Paused := FALSE;
+                #state := STATE_DONE;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_ERROR (999) ===
+        // -----------------------------------------------------------------
+        999: // ERROR
+            #Error := TRUE;
+            #Busy := FALSE;
+            #ToolChangeReq := FALSE;
+            #bTrigMove := FALSE;  // Stop move commands -- prevent other axis from running free
+            #bMoveX := FALSE;
+            #bMoveZ := FALSE;
+            #bHaltTrig := TRUE;   // Safely stop both axes (was FALSE -- BUG FIX)
+            // Ensure diagnostic block contains the latest recipe error context
+            "DB_Diagnostic".Error_ProcessState := #state;
+            "DB_Diagnostic".Error_Code := #ErrorID;
+            "DB_Diagnostic".Error_Line := #lineIndex;
+    END_CASE;
+    
+    // -------------------------------------------------------------------------
+    // Motion FB calls -- run at end of every scan (after state machine)
+    // bTrigMove AND bMoveX/Z: active only in EXEC state and when axis is needed
+    // bHaltTrig: TRUE in STOPPING and PAUSED states -- decelerates axis to stop
+    // -------------------------------------------------------------------------
+    #fbMoveX(Execute := #bTrigMove AND #bMoveX, Position := #targX, Velocity := #velX, Axis := #Axis_X);
+    #fbMoveZ(Execute := #bTrigMove AND #bMoveZ, Position := #targZ, Velocity := #velZ, Axis := #Axis_Z);
+    #fbHaltX(Execute := #bHaltTrig, Axis := #Axis_X);
+    #fbHaltZ(Execute := #bHaltTrig, Axis := #Axis_Z);
+    
+    // Calculate progress
+    IF #LineCount > 0 THEN
+        #Progress := INT_TO_REAL(#lineIndex) / INT_TO_REAL(#LineCount) * 100.0;
+    ELSE
+        #Progress := 0.0;
+    END_IF;
+    
+    // Update active feedrate for HMI (convert mm/s back to mm/min using same factor as forward conversion)
+    #ActiveFeedrate := #feedrate * "DB_MachineConfig".FeedrateConvFactor;
+    
+    // Outputs
+    #CurrentLine := #lineIndex;
+    
+    // Diagnostics
+    "DB_Diagnostic".Recipe_CurrentLine := #lineIndex;
+    "DB_Diagnostic".Recipe_TargetX := #targX;
+    "DB_Diagnostic".Recipe_TargetZ := #targZ;
+    "DB_Diagnostic".Recipe_Velocity := #velX;
+    "DB_Diagnostic".bMoveX := #bMoveX;
+    "DB_Diagnostic".bMoveZ := #bMoveZ;
+    "DB_Diagnostic".MoveX_Busy := #fbMoveX.Busy;
+    "DB_Diagnostic".MoveX_Done := #fbMoveX.Done;
+    "DB_Diagnostic".MoveX_Error := #fbMoveX.Error;
+    "DB_Diagnostic".MoveZ_Busy := #fbMoveZ.Busy;
+    "DB_Diagnostic".MoveZ_Done := #fbMoveZ.Done;
+    "DB_Diagnostic".MoveZ_Error := #fbMoveZ.Error;
+END_FUNCTION_BLOCK

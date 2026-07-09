@@ -1,0 +1,397 @@
+// =============================================================================
+// Version_Recipe -- 00_Configuration.scl
+// Central machine configuration -- called ONCE by OB100 (Startup) on every
+// PLC power-up or program download.
+//
+// This file writes physical machine parameters (speed, limits, calibration, etc.)
+// to DBs at PLC startup. Parameters that can be changed at runtime from HMI
+// are NOT written here -- they remain as the DB initial values and revert to
+// their initial values on warm-restart (NON_RETAIN DB).
+//
+// ─── WHERE TO LOOK ───────────────────────────────────────────────────────────
+//   Maximum axis velocity        → Section 1: MaxVelocity, RapidVelocity
+//   Homing speed and mode        → Section 2: HomeVelocity, HomingMode
+//   Tool slot and angle settings → Section 3: ToolCount, AutoCalcAngles
+//   Spindle min/max RPM          → Section 4: MinSpeed, MaxSpeed
+//   Jog speed and step size      → Section 5: JogSpeed, JogIncrement
+//   Linear ruler stroke          → Section 6: Phys_Max
+//   Cylinder config reference    → Section 7: see 02_DataBlocks.scl DB_Cylinder1
+//   HMI initial values           → Section 8: FeedrateOverride, ProductSelect
+//   Test/commissioning bypass    → Section 9: Bypass_EStop, Bypass_Door...
+//
+// ─── HMI SCREEN MAP ──────────────────────────────────────────────────────────
+// Lists which tags are used on which HMI screen.
+// "(→PLC)" = HMI writes, PLC reads  |  "(PLC→)" = PLC writes, HMI reads (read-only)
+//
+// ┌─ MAIN SCREEN / STATUS LAMPS ────────────────────────────────────────────┐
+// │  DB_HMI.StatusMsg          (String[50])  PLC→  "Running/Stopped/Error…"│
+// │  DB_HMI.IsRunning          (Bool)        PLC→  Green lamp               │
+// │  DB_HMI.IsPaused           (Bool)        PLC→  Yellow lamp              │
+// │  DB_HMI.HasError           (Bool)        PLC→  Red lamp                 │
+// │  DB_HMI.ActualX            (Real, mm)    PLC→  X axis current position  │
+// │  DB_HMI.ActualZ            (Real, mm)    PLC→  Z axis current position  │
+// │  DB_HMI.CurrentLine        (Int)         PLC→  Active recipe line       │
+// │  DB_HMI.ProgressPercent    (Real, %)     PLC→  Progress bar             │
+// │  DB_HMI.ElapsedSeconds     (DInt, s)     PLC→  Cycle elapsed time       │
+// │  DB_HMI.CycleCount         (Int)         PLC→  Completed cycle count    │
+// └──────────────────────────────────────────────────────────────────────────┘
+//
+// ┌─ MAIN SCREEN / BUTTONS ──────────────────────────────────────────────────┐
+// │  DB_HMI.Btn_Start          (Bool)        →PLC  Start (rising edge)      │
+// │  DB_HMI.Btn_Stop           (Bool)        →PLC  Stop (controlled stop)   │
+// │  DB_HMI.Btn_Pause          (Bool)        →PLC  Pause                    │
+// │  DB_HMI.Btn_Continue       (Bool)        →PLC  Resume from pause        │
+// │  DB_HMI.Btn_AckError       (Bool)        →PLC  Acknowledge error + STOP │
+// │  DB_HMI.Btn_Reset          (Bool)        →PLC  Full reset + STOPPED     │
+// │  DB_HMI.ProductSelect      (Int, 1-5)    →PLC  Which program to run     │
+// │  DB_HMI.FeedrateOverride   (Real, %)     →PLC  G1 speed multiplier      │
+// │  DB_HMI.RapidOverride      (Real, %)     →PLC  G0 speed multiplier      │
+// │  DB_HMI.SingleStepMode     (Bool)        →PLC  Line-by-line execution   │
+// └──────────────────────────────────────────────────────────────────────────┘
+//
+// ┌─ ERROR / ALARM SCREEN ───────────────────────────────────────────────────┐
+// │  DB_Error.Active           (Bool)        PLC→  Is there an active error? │
+// │  DB_Error.Code             (Word, hex)   PLC→  Error code (e.g. 0x0401) │
+// │  DB_Error.Details          (String[80])  PLC→  Error description text   │
+// │  DB_Error.Severity         (Byte)        PLC→  3=fatal, 2=error, 1=warn │
+// │  DB_Error.Source           (String[20])  PLC→  "Safety"/"Axis"/"Limit"  │
+// │  DB_Error.TimeStamp        (DTL)         PLC→  Error timestamp          │
+// │  -- Alarm History (last 10) ────────────────────────────────────────────│
+// │  DB_Error.History_Code[1..10]   (Word)   PLC→  Last 10 error codes      │
+// │  DB_Error.History_Details[1..10](String) PLC→  Last 10 error details    │
+// │  DB_Error.History_Time[1..10]   (DTL)    PLC→  Last 10 error timestamps │
+// └──────────────────────────────────────────────────────────────────────────┘
+//
+// ┌─ MANUAL SCREEN / MOTION ─────────────────────────────────────────────────┐
+// │  DB_Manual.ManualModeActive (Bool)       →PLC  Enable/disable manual mode│
+// │  DB_Manual.SelectedAxis    (Int, 0-3)    →PLC  0=X 1=Z 2=Tool 3=Spindle │
+// │  DB_Manual.Btn_JogPlus     (Bool)        →PLC  Positive direction jog   │
+// │  DB_Manual.Btn_JogMinus    (Bool)        →PLC  Negative direction jog   │
+// │  DB_Manual.JogSpeed        (Real, mm/s)  →PLC  Jog speed                │
+// │  DB_Manual.Btn_StepPlus    (Bool)        →PLC  +JogIncrement step       │
+// │  DB_Manual.Btn_StepMinus   (Bool)        →PLC  -JogIncrement step       │
+// │  DB_Manual.JogIncrement    (Real, mm)    →PLC  Step size                │
+// │  DB_Manual.MoveToPosition  (Real, mm)    →PLC  Target absolute position │
+// │  DB_Manual.Btn_MoveAbsolute(Bool)        →PLC  Start absolute move      │
+// │  DB_Manual.Btn_HomeAll     (Bool)        →PLC  Home all axes             │
+// │  DB_Manual.Btn_GoSafe      (Bool)        →PLC  Move to safe position    │
+// │  DB_Manual.Btn_GoZero      (Bool)        →PLC  Move to zero position    │
+// │  DB_Manual.SelectedAxisPos (Real, mm)    PLC→  Selected axis position   │
+// │  DB_Manual.SelectedAxisName(String)      PLC→  "X" / "Z" / "Tool"      │
+// │  DB_Manual.JogBusy         (Bool)        PLC→  Motion in progress       │
+// └──────────────────────────────────────────────────────────────────────────┘
+//
+// ┌─ MANUAL SCREEN / SPINDLE ────────────────────────────────────────────────┐
+// │  DB_Manual.Btn_SpindleStart(Bool)        →PLC  Start spindle            │
+// │  DB_Manual.Btn_SpindleStop (Bool)        →PLC  Stop spindle             │
+// │  DB_Manual.Manual_SpindleSpeed (Real,RPM)→PLC  Manual spindle speed     │
+// │  DB_Manual.Manual_SpindleDir   (Int)     →PLC  1=CW, -1=CCW            │
+// │  DB_Spindle.IsRunning      (Bool)        PLC→  Spindle running          │
+// │  DB_Spindle.AtSpeed        (Bool)        PLC→  Speed stable             │
+// │  DB_Spindle.ActualSpeed    (Real, RPM)   PLC→  Current spindle speed    │
+// └──────────────────────────────────────────────────────────────────────────┘
+//
+// ┌─ MANUAL SCREEN / MANAGE (Drive Management) ─────────────────────────────┐
+// │  DB_HMI.Btn_Contactor_X    (Bool)        →PLC  X drive contactor        │
+// │  DB_HMI.Btn_Contactor_Z    (Bool)        →PLC  Z drive contactor        │
+// │  DB_HMI.Btn_Contactor_Tool (Bool)        →PLC  Tool drive contactor     │
+// │  DB_HMI.Btn_Enable_X       (Bool)        →PLC  X drive enable signal    │
+// │  DB_HMI.Btn_Enable_Z       (Bool)        →PLC  Z drive enable signal    │
+// │  DB_HMI.Contactor_X_On     (Bool)        PLC→  X contactor feedback     │
+// │  DB_HMI.Contactor_Z_On     (Bool)        PLC→  Z contactor feedback     │
+// │  DB_HMI.Enable_X_On        (Bool)        PLC→  X enable feedback        │
+// │  NOTE: Contactor and Enable must be toggle buttons (maintained),         │
+// │        NOT momentary.                                                    │
+// └──────────────────────────────────────────────────────────────────────────┘
+//
+// ┌─ TOOL PAGE ──────────────────────────────────────────────────────────────┐
+// │  DB_MachineConfig.ToolCount         (Int, 1-4)  →PLC  Slot count        │
+// │  DB_ToolConfig.AutoCalcAngles       (Bool)       →PLC  Auto angle calc  │
+// │  DB_ToolConfig.ToolStepAngle_Calc   (Real, °)   PLC→  Calculated step   │
+// │  DB_ToolConfig.Tool1_Position       (Real, °)   PLC→  Slot 1 angle      │
+// │  DB_ToolConfig.Tool2_Position       (Real, °)   PLC→  Slot 2 angle      │
+// │  DB_ToolConfig.Tool3_Position       (Real, °)   PLC→  Slot 3 angle      │
+// │  DB_ToolConfig.Tool4_Position       (Real, °)   PLC→  Slot 4 angle      │
+// │  DB_HMI.ToolSlotCode[1..4]          (Int)        →PLC  Slot code input  │
+// │  DB_HMI.Btn_ApplyToolConfig         (Bool)       →PLC  Apply code       │
+// │  DB_ToolConfig.ToolCode_List[1..4]  (Int)        PLC→  Active slot code │
+// │  NOTE: While AutoCalcAngles=TRUE, tool angles cannot be changed from     │
+// │        HMI -- they are overwritten every scan. Set FALSE for manual angles│
+// └──────────────────────────────────────────────────────────────────────────┘
+//
+// ┌─ CYLINDER PAGE ──────────────────────────────────────────────────────────┐
+// │  DB_Cylinder1.ValveType    (Byte)        →PLC  1=5/2  2=5/3_blocked     │
+// │  DB_Cylinder1.Cmd_Extend   (Bool)        →PLC  Extend: move to setpoint │
+// │  DB_Cylinder1.Cmd_ExtendFull(Bool)       →PLC  Extend: full stroke      │
+// │  DB_Cylinder1.Cmd_Retract  (Bool)        →PLC  Retract                  │
+// │  DB_Cylinder1.Timeout_Extend(Time)       →PLC  Extend timeout (T#5S)    │
+// │  DB_Cylinder1.Timeout_Retract(Time)      →PLC  Retract timeout (T#5S)   │
+// │  DB_Cylinder1.State        (Int)         PLC→  -1=EStop 0=Idle          │
+// │                                                  1=Extending 2=Retracting│
+// │                                                  3=AtSetpoint 4=AtRetract│
+// │                                                 10=ERROR                 │
+// │  DB_Cylinder1.StateText    (String[14])  PLC→  State text               │
+// │  DB_Cylinder1.AtSetpoint   (Bool)        PLC→  Locked at setpoint       │
+// │  DB_Cylinder1.AtRetract    (Bool)        PLC→  At retract end           │
+// │  DB_Cylinder1.Error        (Bool)        PLC→  Active error             │
+// │  DB_Cylinder1.ErrorID      (Word)        PLC→  0x0501/0502/0503         │
+// │  DB_LinearRuler1.Value      (Real, mm)    PLC→  Ruler position           │
+// │  DB_LinearRuler1.Valid       (Bool)        PLC→  Sensor healthy?         │
+// │  NOTE: Cmd_Extend AND Cmd_Retract TRUE simultaneously → Hold (conflict  │
+// │        protection). Purchase BLOCKED CENTER valve -- cylinder is          │
+// │        mechanically locked in hold. Do NOT use EXHAUST CENTER.          │
+// └──────────────────────────────────────────────────────────────────────────┘
+//
+// ┌─ RULER CALIBRATION (Setup Screen) ──────────────────────────────────────┐
+// │  DB_LinearRuler1.Raw_Min      (Int)       →PLC  AI raw min value         │
+// │  DB_LinearRuler1.Raw_Max      (Int)       →PLC  AI raw max value         │
+// │  DB_LinearRuler1.Phys_Min     (Real, mm)  →PLC  Physical ref at Raw_Min  │
+// │  DB_LinearRuler1.Phys_Max     (Real, mm)  →PLC  Physical ref at Raw_Max  │
+// │  DB_LinearRuler1.InvertSignal (Bool)      →PLC  TRUE=0V→high physical    │
+// │  DB_LinearRuler1.Value        (Real, mm)  PLC→  Scaled position (mm)     │
+// │  DB_LinearRuler1.Valid        (Bool)      PLC→  Sensor within range?     │
+// │  NOTE: S7-1200 standard AI: 0V=0, 10V=27648 (4-20mA: 4mA=5530,20mA=27648│
+// └──────────────────────────────────────────────────────────────────────────┘
+//
+// ┌─ MACHINE LIMITS (Setup Screen) ─────────────────────────────────────────┐
+// │  DB_MachineConfig.SoftLimit_MinX  (Real, mm)  →PLC  X software min      │
+// │  DB_MachineConfig.SoftLimit_MaxX  (Real, mm)  →PLC  X software max      │
+// │  DB_MachineConfig.SoftLimit_MinZ  (Real, mm)  →PLC  Z software min      │
+// │  DB_MachineConfig.SoftLimit_MaxZ  (Real, mm)  →PLC  Z software max      │
+// │  DB_MachineConfig.HomeVelocity    (Real, mm/s)→PLC  Homing speed        │
+// │  DB_MachineConfig.SafePos_X/Z     (Real, mm)  →PLC  "Go Safe" target    │
+// │  NOTE: These values are not written by FC_LoadConfig. Use DB initial     │
+// │        values or change from HMI. Reverts to DB initial on PLC restart. │
+// └──────────────────────────────────────────────────────────────────────────┘
+//
+// ┌─ PRODUCTION COUNTERS ────────────────────────────────────────────────────┐
+// │  DB_Production.TotalOK     (DInt)        PLC→  Successful cycle count   │
+// │  DB_Production.TotalNOK    (DInt)        PLC→  Failed cycle count       │
+// │  DB_Production.TotalStopped(DInt)        PLC→  Operator stop count      │
+// │  DB_Production.LastResult  (Byte)        PLC→  1=OK, 2=NOK, 3=STOP      │
+// │  DB_Production.LastErrorCode(Word)       PLC→  Last error code          │
+// │  DB_HMI.Btn_ProdReset      (Bool)        →PLC  Reset counters           │
+// └──────────────────────────────────────────────────────────────────────────┘
+//
+// ┌─ BYPASS / TEST MODE ─────────────────────────────────────────────────────┐
+// │  DB_HMI.Bypass_EStop       (Bool)        →PLC  ⚠️ TEST ONLY             │
+// │  DB_HMI.Bypass_Door        (Bool)        →PLC  ⚠️ TEST ONLY             │
+// │  DB_HMI.Bypass_AirPressure (Bool)        →PLC  ⚠️ TEST ONLY             │
+// │  DB_HMI.Bypass_Drives      (Bool)        →PLC  ⚠️ TEST ONLY             │
+// │  ⚠️ The PLC does NOT clear bypasses while active. The operator must      │
+// │     turn them off manually. Verify before going into production.         │
+// │  NOTE: DB_HMI.Bypass_Spindle and Bypass_ToolChanger are defined but     │
+// │        not used in the safety monitor -- do not connect them.            │
+// └──────────────────────────────────────────────────────────────────────────┘
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// FC_LoadConfig -- Runs once at PLC startup (called by OB100)
+// Values here can be thought of as the PLC "factory defaults".
+// Parameters that can be changed at runtime from HMI are NOT written here --
+// the initial value in the DB definition applies.
+// -----------------------------------------------------------------------------
+FUNCTION "FC_LoadConfig" : Void
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.2
+BEGIN
+
+    // =========================================================================
+    // SECTION 1 -- AXIS VELOCITY LIMITS (mm/s)
+    // ─────────────────────────────────────────────────────────────────────────
+    // ⚠️ These values MUST match the Technology Object (TO) settings in TIA Portal.
+    //    If the TO has a different limit, the PLC may report an error.
+    //    Should not be changed from HMI -- edit here instead.
+    // ─────────────────────────────────────────────────────────────────────────
+    //  MaxVelocity   : Must match "Maximum velocity" in TO
+    //  RapidVelocity : Used for G0 command (in recipe)
+    //  MinVelocity   : Must match "Minimum velocity" in TO
+    // =========================================================================
+    "DB_MachineConfig".MaxVelocity        := 40.0;   // mm/s -- match TO max velocity
+    "DB_MachineConfig".RapidVelocity      := 30.0;   // mm/s -- G0 (rapid move) speed
+    "DB_MachineConfig".MinVelocity        := 1.0;    // mm/s -- match TO min velocity
+    "DB_MachineConfig".FeedrateConvFactor := 60.0;    // divisor: recipe F (mm/min) / this = axis velocity (mm/s)
+                                                      // Standard mm/min→mm/s = divide by 60; adjust if TO uses different units
+
+    // =========================================================================
+    // SECTION 2 -- HOMING (REFERENCE SEEK)
+    // ─────────────────────────────────────────────────────────────────────────
+    //  HomingMode:
+    //    0 = Passive  → Motor does not move, encoder is zeroed at current position
+    //    2 = Active   → Moves to reference switch, encoder is zeroed
+    //    3 = Active+Zero → Moves to reference switch, set to HomeOffset_X/Z value
+    //                    (recommended mode for production)
+    //
+    //  HomeVelocity and HomeOffset_X/Z are defined as initial values in
+    //  DB_MachineConfig and can be edited from the HMI Machine Limits screen.
+    //  Writing here will always reset to the same value on restart.
+    // =========================================================================
+    "DB_Manual".HomingMode := 3;   // 0=Passive | 2=Active | 3=Active+Zero (recommended)
+    "DB_MachineConfig".PostHome_Clearance := 0.0;  // mm -- clearance distance from PNP zone after homing
+    "DB_MachineConfig".HomeVelocity := 5.0;         // mm/s -- speed for pre/post-homing clearance move
+                                                     // NOTE: MC_Home search speed comes from TO, PLC cannot change it
+    "DB_MachineConfig".AlwaysHomeOnAutoStart := TRUE; // Home all axes on every auto start (set FALSE for fast test cycles)
+
+    // =========================================================================
+    // SECTION 3 -- TOOL CHANGER
+    // ─────────────────────────────────────────────────────────────────────────
+    //  ToolCount: How many slots are physically installed (1-4)
+    //    → FC_ToolAngleCalc automatically calculates angles based on this value
+    //    → Can also be changed on the HMI Tool page (runtime)
+    //
+    //  AutoCalcAngles = TRUE  → Equally spaced angles based on ToolCount
+    //                           (2 slots: 0°/180°, 3 slots: 0°/120°/240°, etc.)
+    //  AutoCalcAngles = FALSE → Tool1..4_Position can be entered manually from HMI
+    //                           (use when unequal angles are needed)
+    //
+    //  CurrentTool: Which slot is active at startup (usually 1)
+    // =========================================================================
+    "DB_MachineConfig".ToolCount        := 3;     // Physical slot count
+    "DB_ToolConfig".AutoCalcAngles      := TRUE;  // Automatic angle calculation
+    "DB_ToolConfig".CurrentTool         := 1;     // Initial active slot
+
+    // =========================================================================
+    // SECTION 4 -- SPINDLE SPEED
+    // ─────────────────────────────────────────────────────────────────────────
+    //  MinSpeed      : Commands below this value are clamped to this value
+    //  MaxSpeed      : Commands above this value are clamped to this value
+    //  DefaultSpeed  : Default speed in manual mode (initial Manual_SpindleSpeed)
+    //  SpeedTolerance: Tolerance for "AtSpeed" decision -- keep small (±5% recommended)
+    //  SpeedOverride : 100% = normal, can be changed at runtime from HMI
+    //
+    //  ⚠️ MaxSpeed must not exceed motor or coupling component ratings
+    // =========================================================================
+    "DB_Spindle".MinSpeed       := 100.0;   // RPM -- lower limit
+    "DB_Spindle".MaxSpeed       := 3000.0;  // RPM -- upper limit (do not exceed motor max)
+    "DB_Spindle".DefaultSpeed   := 1000.0;  // RPM -- manual mode initial value
+    "DB_Spindle".SpeedTolerance := 5.0;     // % -- AtSpeed tolerance
+    "DB_Spindle".SpeedOverride  := 100.0;   // % -- 100% at startup (normal)
+
+    // =========================================================================
+    // SECTION 5 -- MANUAL MODE DEFAULTS
+    // ─────────────────────────────────────────────────────────────────────────
+    //  JogSpeed      : Speed used when jog button is pressed
+    //                  Can be connected to a slider/input field on HMI Manual screen
+    //  JogIncrement  : Distance traveled per press on "Step" button
+    //  ToolStepAngle : Rotation angle for CW/CCW buttons on Manual Tool screen
+    //                  (e.g. 90° can be used to step slot-to-slot)
+    //  Manual_SpindleSpeed: Initial speed on manual spindle screen
+    //  Manual_SpindleDir  : 1=CW (clockwise), -1=CCW (counter-clockwise)
+    // =========================================================================
+    "DB_Manual".JogSpeed            := 30.0;   // mm/s
+    "DB_Manual".JogIncrement        := 1.0;    // mm -- step size
+    "DB_Manual".ToolStepAngle       := 120.0;   // degrees -- tool step angle
+    "DB_Manual".Manual_SpindleSpeed := 500.0;  // RPM
+    "DB_Manual".Manual_SpindleDir   := 1;      // 1=CW | -1=CCW
+
+    // =========================================================================
+    // SECTION 6 -- LINEAR RULER CALIBRATION
+    // ─────────────────────────────────────────────────────────────────────────
+    //  S7-1200 AI module standard output values:
+    //    0 V  (or 4  mA) → Raw_Min  (typically 0 or 5530)
+    //    10 V (or 20 mA) → Raw_Max  (typically 27648)
+    //
+    //  Phys_Min / Phys_Max: Mechanical stroke limits of the sensor (mm)
+    //    Example: For a ruler with 0-200 mm stroke: Phys_Min=0, Phys_Max=200
+    //
+    //  ⚠️ Always update Phys_Max according to the sensor stroke.
+    //  These values revert here on restart -- for permanent changes write here,
+    //  changes made only from HMI will be lost on restart.
+    // =========================================================================
+    "DB_Cylinder_LinearRuler_BackSupport".Raw_Min      := 0;       // AI at full extend (~0V)
+    "DB_Cylinder_LinearRuler_BackSupport".Raw_Max      := 31433;   // AI at full retract (measured; update once hardware is within 0-10V)
+    "DB_Cylinder_LinearRuler_BackSupport".Phys_Min     := 0.0;     // mm physical reference at Raw_Min end
+    "DB_Cylinder_LinearRuler_BackSupport".Phys_Max     := 300.0;   // mm physical reference at Raw_Max end (full stroke)
+    "DB_Cylinder_LinearRuler_BackSupport".InvertSignal := TRUE;    // Sensor wired reverse: 0V = full extend (300mm), ~10V = retracted (0mm)
+
+    // ── CMD=40 gain defaults ──────────────────────────────────────────────────
+    // TargetPos = Param × Cmd40_Gain (mm). Default 1.0 (no scaling).
+    // Tune on-site: measure how far BackSupport travels per Param unit and update.
+    // Example: if Param=20 should send BackSupport to 200mm → Cmd40_Gain = 10.0
+    "DB_Cylinder_BackSupport".Cmd40_Gain  := 1.0;   // BackSupport: mm per CMD=40 Param unit
+
+    // =========================================================================
+    // SECTION 7 -- PNEUMATIC CYLINDER CONFIGURATION REFERENCE
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Cylinder parameters (ValveType, MaxPos, TargetPos, Timeout, UseRulerPos)
+    //  are VAR_INPUT in FB_CylinderControl. In optimized S7 blocks VAR_INPUT
+    //  fields cannot be written from an FC at runtime. Factory defaults must be
+    //  set in the BEGIN section of DB_Cylinder1 in 02_DataBlocks.scl.
+    //
+    //  Current Cylinder 1 factory defaults (02_DataBlocks.scl → DB_Cylinder1):
+    //    ValveType       = 3       (5/3 blocked center -- piston locked in hold)
+    //    UseRulerPos     = TRUE    (analog position control via DB_LinearRuler)
+    //    TargetPos       = 300.0   (mm -- default: full extend)
+    //    MaxPos          = 300.0   (mm -- software extend clamp)
+    //    ExtendOffset    = 5.0     (mm -- tune on site)
+    //    RetractOffset   = 5.0     (mm -- tune on site)
+    //    Tolerance       = 2.0     (mm -- AtTarget window)
+    //    Timeout_Extend  = T#5S
+    //    Timeout_Retract = T#5S
+    //
+    //  ⚠️ VALVE TYPE SELECTION IS CRITICAL:
+    //    ValveType=2 BLOCKED CENTER → Piston mechanically locked in hold. ✅ USE THIS
+    //    ValveType=3 EXHAUST CENTER → Piston free to move in hold.        ❌ Do not use
+    // =========================================================================
+    // (No runtime writes here -- edit 02_DataBlocks.scl DB_Cylinder1 BEGIN section)
+
+    // =========================================================================
+    // SECTION 8 -- HMI INITIAL VALUES
+    // ─────────────────────────────────────────────────────────────────────────
+    //  FeedrateOverride: Speed multiplier for recipe G1 moves.
+    //    100% = normal speed, 50% = half speed, 200% = double speed
+    //    HMI slider should be connected to this tag (recommend min 50, max 200)
+    //  RapidOverride: Same logic for G0 rapid moves
+    //  ProductSelect: Which program is active at startup (1-5)
+    // =========================================================================
+    "DB_HMI".FeedrateOverride := 100.0;   // % -- initial feed rate multiplier
+    "DB_HMI".RapidOverride    := 100.0;   // % -- initial rapid rate multiplier
+    "DB_HMI".SingleStepMode   := FALSE;   // Line-by-line mode off
+    "DB_HMI".ProductSelect    := 1;       // Initial program selection
+
+    // =========================================================================
+    // SECTION 9 -- SAFETY BYPASSES
+    // ─────────────────────────────────────────────────────────────────────────
+    //  ⚠️⚠️ WARNING: These bypasses are for commissioning and testing only!
+    //  Verify that ALL are FALSE before production.
+    //
+    //  PLC resets these to FALSE on every restart (safe default).
+    //  Show a warning on HMI when any bypass is active (AnyBypassActive tag recommended).
+    //
+    //  Bypass_EStop       : Ignore physical E-Stop circuit
+    //  Bypass_Door        : Ignore safety door sensor
+    //  Bypass_AirPressure : Ignore air pressure sensor
+    //  Bypass_Drives      : Ignore drive ready signal
+    //
+    //  Bypass_ToolAxis    : This bypass is DIFFERENT -- set TRUE if the tool axis
+    //    (turret) is NOT physically connected to this machine.
+    //    This is a hardware presence flag, not a safety bypass.
+    //
+    //  ⚠️ NOTE: DB_HMI.Bypass_Spindle and DB_HMI.Bypass_ToolChanger are defined
+    //    but not used in the safety monitor. Do not connect them to HMI.
+    // =========================================================================
+    "DB_HMI".Bypass_EStop        := FALSE;
+    "DB_HMI".Bypass_Door         := TRUE; // NOT USED -- reserved for future use
+    "DB_HMI".Bypass_AirPressure  := TRUE; // NOT USED -- reserved for future use
+    "DB_HMI".Bypass_Drives       := FALSE;
+    "DB_HMI".Bypass_Spindle      := FALSE;   
+    "DB_HMI".Bypass_ToolChanger  := FALSE;   
+    "DB_MachineConfig".Bypass_ToolAxis := FALSE;   // Set TRUE if tool axis is not connected
+
+END_FUNCTION
+
+// -----------------------------------------------------------------------------
+// OB100 -- Startup Organization Block
+// Runs ONCE on PLC power-up, transition to RUN mode, or program download.
+// Calls FC_LoadConfig -- do not add anything else here; keep everything inside FC.
+// -----------------------------------------------------------------------------
+ORGANIZATION_BLOCK "Startup"
+TITLE = "PLC Startup - Load Configuration"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+    VAR_TEMP
+        tempRetVal : Int;
+    END_VAR
+BEGIN
+    "FC_LoadConfig"();
+END_ORGANIZATION_BLOCK

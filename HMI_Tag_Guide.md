@@ -25,7 +25,7 @@
 
 | HMI Object | PLC Address | Type | Range | Description |
 |------------|-------------|------|-------|-------------|
-| **Mode Switch** | `DB_HMI.UseTextParser` | Bool | - | TRUE=Text, FALSE=Recipe |
+| **Mode Switch** | `DB_HMI.UseTextParser` | Bool | - | Not used — leave FALSE |
 | **Recipe Selector** | `DB_HMI.ProductSelect` | Int | 1-5 | Which recipe to use |
 | **Feedrate Override** | `DB_HMI.FeedrateOverride` | Real | 50-200 | G1 speed % (100=normal) |
 | **Rapid Override** | `DB_HMI.RapidOverride` | Real | 50-200 | G0 speed % (100=normal) |
@@ -47,7 +47,7 @@
 
 | HMI Object | PLC Address | Type | Description |
 |------------|-------------|------|-------------|
-| **Status Message** | `DB_HMI.StatusMsg` | String[50] | Text message |
+| **Status Message** | `DB_HMI.StatusMsg` | String[50] | Text message (English) |
 | **Current Line** | `DB_HMI.CurrentLine` | Int | Which step/line |
 | **Total Lines** | `DB_HMI.TotalLines` | Int | Total program lines |
 | **Progress** | `DB_HMI.ProgressPercent` | Real | Progress 0-100% |
@@ -58,7 +58,19 @@
 | **Elapsed Seconds** | `DB_HMI.ElapsedSeconds` | Int | Run time in seconds |
 | **Cycle Count** | `DB_HMI.CycleCount` | Int | Completed programs |
 | **Error Code** | `DB_HMI.ErrorID` | Word | Error number (0=OK) |
-| **Error Text** | `DB_HMI.ErrorText` | String[40] | Error description |
+| **Error Text** | `DB_HMI.ErrorText` | String[50] | Error description (English) |
+
+### Spanish Language Mirrors (Output)
+
+Connect these to a second HMI screen or behind a language-toggle switch.
+PLC writes them every scan alongside the English equivalents.
+
+| HMI Object | PLC Address | Type | Description |
+|------------|-------------|------|-------------|
+| **Estado** | `DB_HMI.StatusMsg_ES` | String[50] | Estado actual (Español) |
+| **Texto de Error** | `DB_HMI.ErrorText_ES` | String[50] | Descripcion de error (Español) |
+| **Detalle de Error** | `DB_HMI.ErrorDetail_ES` | String[70] | Detalle adicional (Español) |
+| **Advertencia** | `DB_HMI.WarningText_ES` | String[70] | Texto de advertencia (Español) |
 
 ---
 
@@ -72,31 +84,52 @@
 
 ---
 
-## SAFETY STATUS (Output - from DB_Diagnostics)
+## SAFETY STATUS (Output - from DB_Diagnostic)
 
 | HMI Object | PLC Address | Type | Description |
 |------------|-------------|------|-------------|
-| **Safe to Run** | `DB_Diagnostics.SafeToRun` | Bool | All safety OK for auto run |
-| **Safe to Jog** | `DB_Diagnostics.SafeToJog` | Bool | Safe for manual jog |
-| **E-Stop OK** | `DB_Diagnostics.EStop_OK` | Bool | E-Stop not pressed |
-| **Door Closed** | `DB_Diagnostics.Door_Closed` | Bool | Safety door closed |
-| **Air Pressure OK** | `DB_Diagnostics.AirPressure_OK` | Bool | Air pressure sufficient |
-| **Drives Ready** | `DB_Diagnostics.DrivesReady` | Bool | All drives ready |
-| **Safety Error Code** | `DB_Diagnostics.SafetyErrorCode` | Word | Active safety error |
+| **Safe to Run** | `DB_Diagnostic.Process_SafeToRun` | Bool | All safety OK for auto run |
+| **Drives Enabled** | `DB_Diagnostic.Process_DrivesEnable` | Bool | Drives powered on |
+| **Safety Error Code** | `DB_Error.Code` | Word | Active safety error code |
+| **Safety Error Text** | `DB_Error.Details` | String | Active safety error text |
 
 ---
 
-## ALARM HISTORY (Output - from DB_AlarmHistory)
+## ALARM HISTORY RING BUFFER (Output - from DB_AlarmHistory) — ITEM-26
+
+20-entry ring buffer. Survives `Cmd_Reset`. Cleared only on PLC power cycle or manual `Hist_Clear`.
+
+**Change detection:** Poll `Hist_SeqNum` (DInt, increments on each new alarm). Only read the full table when it changes.
 
 | HMI Object | PLC Address | Type | Description |
 |------------|-------------|------|-------------|
-| **Active Error Code** | `DB_AlarmHistory.ActiveError` | Word | Current error |
-| **Active Error Text** | `DB_AlarmHistory.ActiveErrorText` | String[50] | Error description |
-| **Total Error Count** | `DB_AlarmHistory.TotalErrorCount` | DInt | All-time errors |
-| **History Code 1** | `DB_AlarmHistory.History_Code[1]` | Word | Most recent error |
-| **History Code 2** | `DB_AlarmHistory.History_Code[2]` | Word | 2nd most recent |
-| **History Time 1** | `DB_AlarmHistory.History_Time[1]` | Date_And_Time | Timestamp of most recent |
-| ... | ... | ... | Up to 10 |
+| **Sequence number** | `DB_AlarmHistory.Hist_SeqNum` | DInt | Increment-on-write; poll for new entries |
+| **Valid entry count** | `DB_AlarmHistory.Hist_Count` | Int | 0..20 |
+| **Clear button** | `DB_AlarmHistory.Hist_Clear` | Bool | Write TRUE to wipe; auto-resets next scan |
+| **Entry timestamp** | `DB_AlarmHistory.Hist_Log[0..19].Timestamp` | DTL | Time of alarm |
+| **Entry error code** | `DB_AlarmHistory.Hist_Log[0..19].ErrorCode` | Word | 16#xxxx |
+| **Entry program** | `DB_AlarmHistory.Hist_Log[0..19].ProgramNum` | Int | Recipe program active (0=none) |
+| **Entry line** | `DB_AlarmHistory.Hist_Log[0..19].LineNum` | Int | Recipe line active (-1=outside recipe) |
+| **Entry text** | `DB_AlarmHistory.Hist_Log[0..19].ErrorText` | String[40] | English error text |
+
+**HMI table setup:** Connect all 20 rows to `Hist_Log[0..19]`. Sort by `.Timestamp` descending to show newest first. Show `Hist_Count` as a badge. `Hist_Head - 1 MOD 20` is the most recent entry index.
+
+---
+
+## ALARM HISTORY (Output - from DB_Error)
+
+| HMI Object | PLC Address | Type | Description |
+|------------|-------------|------|-------------|
+| **Active Error** | `DB_Error.Active` | Bool | TRUE when error is active |
+| **Active Error Code** | `DB_Error.Code` | Word | Current error code |
+| **Active Error Text** | `DB_Error.Details` | String[80] | Error description |
+| **Error Severity** | `DB_Error.Severity` | Byte | Priority tier: 1=warning, 2=project, 3=motion/TO, 4=safety (higher tier preempts lower on the display) |
+| **Error Source** | `DB_Error.Source` | String[20] | Error category |
+| **Total Error Count** | `DB_Error.TotalErrorCount` | DInt | All-time errors |
+| **History Code 1** | `DB_Error.History_Code[1]` | Word | Most recent error |
+| **History Code 2** | `DB_Error.History_Code[2]` | Word | 2nd most recent |
+| **History Time 1** | `DB_Error.History_Time[1]` | DTL | Timestamp of most recent |
+| ... | ... | ... | Up to History_Code[10] |
 
 ---
 
@@ -155,44 +188,38 @@
 
 ---
 
-## LIMIT STATUS (Output - from DB_Diagnostics)
+## LIMIT STATUS (Output - from DB_HMI_Errors)
 
-For diagnostics screen:
+For diagnostics screen — use DB_HMI_Errors.Err_* bool flags:
 
 | HMI Object | PLC Address | Type | Description |
 |------------|-------------|------|-------------|
-| **Limit Error** | `DB_Diagnostics.LimitError` | Bool | Any limit violated |
-| **Limit Error Code** | `DB_Diagnostics.LimitErrorCode` | Word | Specific limit error |
-| **Soft Limit X Min** | `DB_Diagnostics.SoftLimit_X_Min_Active` | Bool | At X min limit |
-| **Soft Limit X Max** | `DB_Diagnostics.SoftLimit_X_Max_Active` | Bool | At X max limit |
-| **Soft Limit Z Min** | `DB_Diagnostics.SoftLimit_Z_Min_Active` | Bool | At Z min limit |
-| **Soft Limit Z Max** | `DB_Diagnostics.SoftLimit_Z_Max_Active` | Bool | At Z max limit |
-| **HW Limit X Min** | `DB_Diagnostics.HardLimit_X_Min_Active` | Bool | Hit X min switch |
-| **HW Limit X Max** | `DB_Diagnostics.HardLimit_X_Max_Active` | Bool | Hit X max switch |
-| **HW Limit Z Min** | `DB_Diagnostics.HardLimit_Z_Min_Active` | Bool | Hit Z min switch |
-| **HW Limit Z Max** | `DB_Diagnostics.HardLimit_Z_Max_Active` | Bool | Hit Z max switch |
-| **Warning X Min** | `DB_Diagnostics.Warning_X_Min` | Bool | Approaching X min |
-| **Warning X Max** | `DB_Diagnostics.Warning_X_Max` | Bool | Approaching X max |
-| **Warning Z Min** | `DB_Diagnostics.Warning_Z_Min` | Bool | Approaching Z min |
-| **Warning Z Max** | `DB_Diagnostics.Warning_Z_Max` | Bool | Approaching Z max |
-| **Any Warning** | `DB_Diagnostics.AnyWarning` | Bool | Any warning active |
+| **Any Limit Error** | `DB_HMI_Errors.AnyLimitError` | Bool | Any limit violated |
+| **Soft Limit X Min** | `DB_HMI_Errors.Err_SoftLimit_X_Min` | Bool | X below soft limit |
+| **Soft Limit X Max** | `DB_HMI_Errors.Err_SoftLimit_X_Max` | Bool | X above soft limit |
+| **Soft Limit Z Min** | `DB_HMI_Errors.Err_SoftLimit_Z_Min` | Bool | Z below soft limit |
+| **Soft Limit Z Max** | `DB_HMI_Errors.Err_SoftLimit_Z_Max` | Bool | Z above soft limit |
+| **HW Limit X Min** | `DB_HMI_Errors.Err_HWLimit_X_Min` | Bool | Hit X min switch |
+| **HW Limit X Max** | `DB_HMI_Errors.Err_HWLimit_X_Max` | Bool | Hit X max switch |
+| **HW Limit Z Min** | `DB_HMI_Errors.Err_HWLimit_Z_Min` | Bool | Hit Z min switch |
+| **HW Limit Z Max** | `DB_HMI_Errors.Err_HWLimit_Z_Max` | Bool | Hit Z max switch |
 
 ---
 
-## AXIS STATUS (Output - from DB_Diagnostics)
+## AXIS STATUS (Output - from DB_Diagnostic)
 
 | HMI Object | PLC Address | Type | Description |
 |------------|-------------|------|-------------|
-| **X Position** | `DB_Diagnostics.Axis_X_Position` | Real | Current X in mm |
-| **Z Position** | `DB_Diagnostics.Axis_Z_Position` | Real | Current Z in mm |
-| **X Homed** | `DB_Diagnostics.Axis_X_Homed` | Bool | X axis homing done |
-| **Z Homed** | `DB_Diagnostics.Axis_Z_Homed` | Bool | Z axis homing done |
-| **X Drive Ready** | `DB_Diagnostics.Axis_X_DriveReady` | Bool | X drive enabled |
-| **Z Drive Ready** | `DB_Diagnostics.Axis_Z_DriveReady` | Bool | Z drive enabled |
-| **Current Tool** | `DB_Diagnostics.CurrentTool` | Int | Active tool (1-4) |
-| **Tool Change Busy** | `DB_Diagnostics.ToolChangeBusy` | Bool | Tool change active |
-| **Manual Mode Active** | `DB_Diagnostics.ManualModeActive` | Bool | In manual mode |
-| **Manual Axis Selected** | `DB_Diagnostics.ManualAxisSelected` | Int | Selected axis (0-3) |
+| **X Position** | `DB_Diagnostic.Axis_X_Pos` | Real | Current X in mm |
+| **Z Position** | `DB_Diagnostic.Axis_Z_Pos` | Real | Current Z in mm |
+| **X Homed** | `DB_Diagnostic.Axis_X_Homed` | Bool | X axis homing done |
+| **Z Homed** | `DB_Diagnostic.Axis_Z_Homed` | Bool | Z axis homing done |
+| **X Enabled** | `DB_Diagnostic.Axis_X_Enabled` | Bool | X drive enabled |
+| **Z Enabled** | `DB_Diagnostic.Axis_Z_Enabled` | Bool | Z drive enabled |
+| **Move X Busy** | `DB_Diagnostic.MoveX_Busy` | Bool | X axis moving |
+| **Move Z Busy** | `DB_Diagnostic.MoveZ_Busy` | Bool | Z axis moving |
+| **Recipe Line** | `DB_Diagnostic.Recipe_CurrentLine` | Int | Currently executing line |
+| **Process State** | `DB_Diagnostic.Process_State` | Int | State machine state ID |
 
 ---
 
@@ -232,6 +259,25 @@ For diagnostics screen:
 | **Go Safe** | `DB_Manual.Btn_GoSafe` | Bool | Move to safe position |
 | **Go Zero** | `DB_Manual.Btn_GoZero` | Bool | Move to machine zero |
 
+### Manual Spindle Control (Input)
+
+| HMI Object | PLC Address | Type | Description |
+|------------|-------------|------|-------------|
+| **Spindle Start** | `DB_Manual.Btn_SpindleStart` | Bool | Hold TRUE to run spindle |
+| **Spindle Stop** | `DB_Manual.Btn_SpindleStop` | Bool | Hold TRUE to stop spindle |
+| **Spindle Speed** | `DB_Manual.Manual_SpindleSpeed` | Real | Speed in RPM (e.g. 500.0) |
+| **Spindle Direction** | `DB_Manual.Manual_SpindleDir` | Int | 1 = CW, -1 = CCW |
+| **Ack Spindle Error** | `DB_Manual.Btn_SpindleAckError` | Bool | Clear spindle fault without full reset |
+
+### Manual Spindle Status (Output)
+
+| HMI Object | PLC Address | Type | Description |
+|------------|-------------|------|-------------|
+| **Spindle Running** | `DB_Spindle.IsRunning` | Bool | TRUE while spindle is running |
+| **Spindle At Speed** | `DB_Spindle.AtSpeed` | Bool | TRUE when speed reached target |
+| **Spindle Actual RPM** | `DB_Spindle.ActualSpeed` | Real | Measured speed in RPM |
+| **Spindle Error** | `DB_Spindle.CommandedSpeed` | Real | Override-applied target RPM |
+
 ### Manual Status (Output)
 
 | HMI Object | PLC Address | Type | Description |
@@ -246,16 +292,50 @@ For diagnostics screen:
 
 ---
 
-## MACHINE CONFIG (Input - Settings screen)
+## MACHINE LIMITS SCREEN (Read/Write — DB_MachineConfig)
 
-| HMI Object | PLC Address | Type | Default | Description |
-|------------|-------------|------|---------|-------------|
-| **Soft Limit X Min** | `DB_MachineConfig.SoftLimit_MinX` | Real | 0.0 | mm |
-| **Soft Limit X Max** | `DB_MachineConfig.SoftLimit_MaxX` | Real | 350.0 | mm |
-| **Soft Limit Z Min** | `DB_MachineConfig.SoftLimit_MinZ` | Real | -200.0 | mm |
-| **Soft Limit Z Max** | `DB_MachineConfig.SoftLimit_MaxZ` | Real | 200.0 | mm |
-| **Rapid Velocity** | `DB_MachineConfig.RapidVelocity` | Real | 500.0 | mm/min |
-| **Default Feedrate** | `DB_MachineConfig.DefaultFeedrate` | Real | 100.0 | mm/min |
+> **Note:** Values revert to factory defaults on PLC program download (not on warm restart).
+> Set correct values during initial commissioning.
+
+### Axis Soft Limits (mm)
+
+| HMI Object | PLC Address | Type | Factory Default | Description |
+|------------|-------------|------|-----------------|-------------|
+| **X Min Limit** | `DB_MachineConfig.SoftLimit_MinX` | Real | 0.0 | X home position (minimum) |
+| **X Max Limit** | `DB_MachineConfig.SoftLimit_MaxX` | Real | 170.0 | X maximum travel (mm) |
+| **Z Min Limit** | `DB_MachineConfig.SoftLimit_MinZ` | Real | 0.0 | Z home position (minimum) |
+| **Z Max Limit** | `DB_MachineConfig.SoftLimit_MaxZ` | Real | 200.0 | Z maximum forming depth (mm) |
+
+### Safe Positions (mm)
+
+| HMI Object | PLC Address | Type | Factory Default | Description |
+|------------|-------------|------|-----------------|-------------|
+| **Safe X** | `DB_MachineConfig.SafePos_X` | Real | 10.0 | Target X for "Go Safe" button |
+| **Safe Z** | `DB_MachineConfig.SafePos_Z` | Real | 10.0 | Target Z for "Go Safe" button |
+
+### Pause Retract (mm / mm/s)
+
+On **Pause**, X and Z jog by these signed offsets to pull the tool clear (spindle keeps running); on **Continue** they return to the exact interruption point before the recipe resumes. Targets are clamped to the soft limits, so a pause near home cannot fault. Offset `0` on an axis = that axis does not move on pause.
+
+| HMI Object | PLC Address | Type | Factory Default | Description |
+|------------|-------------|------|-----------------|-------------|
+| **Pause Retract X** | `DB_MachineConfig.PauseRetract_X` | Real | -10.0 | Signed X offset applied on pause (mm) |
+| **Pause Retract Z** | `DB_MachineConfig.PauseRetract_Z` | Real | -10.0 | Signed Z offset applied on pause (mm) |
+| **Pause Retract Vel** | `DB_MachineConfig.PauseRetract_Vel` | Real | 20.0 | Retract/return velocity (mm/s) |
+
+### Homing Parameters
+
+| HMI Object | PLC Address | Type | Factory Default | Description |
+|------------|-------------|------|-----------------|-------------|
+| **Home Offset X** | `DB_MachineConfig.HomeOffset_X` | Real | 0.0 | X value assigned after homing |
+| **Home Offset Z** | `DB_MachineConfig.HomeOffset_Z` | Real | 0.0 | Z value assigned after homing |
+| **Home Velocity** | `DB_MachineConfig.HomeVelocity` | Real | 10.0 | Homing speed (mm/s) — keep slow |
+
+### Default Feedrate
+
+| HMI Object | PLC Address | Type | Factory Default | Description |
+|------------|-------------|------|-----------------|-------------|
+| **Default Feedrate** | `DB_MachineConfig.DefaultFeedrate` | Real | 300.0 | Used when recipe line has F=0 (mm/min) |
 
 ---
 
@@ -263,8 +343,8 @@ For diagnostics screen:
 
 | HMI Object | PLC Address | Type | Default | Description |
 |------------|-------------|------|---------|-------------|
-| **Tool Change X** | `DB_ToolConfig.ToolChangePos_X` | Real | 300.0 | Safe X for tool swap |
-| **Tool Change Z** | `DB_ToolConfig.ToolChangePos_Z` | Real | -150.0 | Safe Z for tool swap |
+| **Tool Change X** | `DB_MachineConfig.ToolChangePos_X` | Real | 10.0 | Safe X for manual tool swap |
+| **Tool Change Z** | `DB_MachineConfig.ToolChangePos_Z` | Real | -10.0 | Safe Z for manual tool swap (clearance zone) |
 | **Tool 1 Position** | `DB_ToolConfig.Tool1_Position` | Real | 0.0 | Servo angle |
 | **Tool 2 Position** | `DB_ToolConfig.Tool2_Position` | Real | 90.0 | Servo angle |
 | **Tool 3 Position** | `DB_ToolConfig.Tool3_Position` | Real | 180.0 | Servo angle |

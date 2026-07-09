@@ -1,0 +1,2650 @@
+// =============================================================================
+// Version_Recipe - 06_MainProcess.scl
+// Main process with recipe-based G-code and pre-scan validation
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// FB_InputManager - OR-combine inputs from HMI, Panel, Remote
+// DOC:
+//  purpose: Create single rising-edge command outputs (Cmd_*) from multiple input sources.
+//  inputs: HMI_*, Panel_*, Rem_* (Bool) - raw button states (level)
+//  outputs: Cmd_* (Bool) - one-shot rising-edge commands for the system
+//  notes: Uses prev* latches to detect rising edges; keeps logic simple for deterministic behavior.
+// -----------------------------------------------------------------------------
+FUNCTION_BLOCK "FB_InputManager"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+    VAR_INPUT
+        // Raw level inputs from various sources (HMI, physical panel, remote)
+        HMI_Start : Bool;    // HMI Start button (level)
+        HMI_Stop : Bool;     // HMI Stop button (level)
+        HMI_Pause : Bool;    // HMI Pause button (level)
+        HMI_Reset : Bool;    // HMI Reset button (level)
+        Panel_Start : Bool;  // Physical panel Start
+        Panel_Stop : Bool;   // Physical panel Stop
+        Panel_Pause : Bool;  // Physical panel Pause
+        Panel_Reset : Bool;  // Physical panel Reset
+        Rem_Start : Bool;    // Remote Start (e.g. PLC network)
+        Rem_Stop : Bool;     // Remote Stop
+    END_VAR
+    VAR_OUTPUT
+        // One-shot command outputs (rising edge true for one cycle)
+        Cmd_Start : Bool; 
+        Cmd_Stop : Bool; 
+        Cmd_Pause : Bool; 
+        Cmd_Reset : Bool; 
+    END_VAR
+    VAR 
+        // Previous sampled raw values for edge detection
+        prevStart : Bool; 
+        prevStop : Bool; 
+        prevPause : Bool; 
+        prevReset : Bool;
+        // Combined raw inputs for current cycle
+        rawStart : Bool; 
+        rawStop : Bool; 
+        rawPause : Bool; 
+        rawReset : Bool; 
+    END_VAR
+BEGIN
+    #rawStart := #HMI_Start OR #Panel_Start OR #Rem_Start;
+    #rawStop := #HMI_Stop OR #Panel_Stop OR #Rem_Stop;
+    #rawPause := #HMI_Pause OR #Panel_Pause;
+    #rawReset := #HMI_Reset OR #Panel_Reset;
+    #Cmd_Start := #rawStart AND NOT #prevStart;
+    #Cmd_Stop := #rawStop AND NOT #prevStop;
+    #Cmd_Pause := #rawPause AND NOT #prevPause;
+    #Cmd_Reset := #rawReset AND NOT #prevReset;
+    #prevStart := #rawStart; #prevStop := #rawStop; #prevPause := #rawPause; #prevReset := #rawReset;
+END_FUNCTION_BLOCK
+
+// -----------------------------------------------------------------------------
+// FB_SafetyMonitor - Check E-Stop, Door, Air Pressure, Drives
+// DOC:
+//  purpose: Evaluate hardware safety inputs and bypass flags, produce SafeToRun/SafeToJog.
+//  inputs: EStop_OK, Door_Closed, AirPressure_OK, DrivesReady and bypass flags.
+//  outputs: SafeToRun (machine may start), SafeToJog (manual jog allowed), ErrorCode (if unsafe).
+//  notes: Returns immediately on first fatal safety failure to minimize decision latency.
+// -----------------------------------------------------------------------------
+FUNCTION_BLOCK "FB_SafetyMonitor"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+    VAR_INPUT 
+        EStop_OK : Bool;            // TRUE if E-stop circuit is OK (no emergency)
+        Door_Closed : Bool;         // TRUE if safety door closed
+        AirPressure_OK : Bool;      // TRUE if air pressure sufficient
+        DrivesReady : Bool;         // TRUE if drives report ready
+        // Bypass flags (from HMI) used only for testing; production should disable
+        Bypass_EStop : Bool;
+        Bypass_Door : Bool;
+        Bypass_AirPressure : Bool;
+        Bypass_Drives : Bool;
+    END_VAR
+    VAR_OUTPUT 
+        SafeToRun : Bool;           // TRUE => allowed to start program execution
+        SafeToJog : Bool;           // TRUE => manual jogging permitted
+        ErrorCode : Word;           // Non-zero if unsafe (map to DB_ErrorCodes)
+    END_VAR
+BEGIN
+    // Runs every scan. RETURNs on first failing condition -- priority order matters.
+    // EStop and Drive fault disable both SafeToRun and SafeToJog (jogging also forbidden).
+    // Door and air pressure only disable SafeToRun (manual jog still permitted).
+    #ErrorCode := 0;
+    IF NOT #EStop_OK AND NOT #Bypass_EStop THEN
+        // EMERGENCY STOP active -- all motion forbidden
+        #SafeToRun := FALSE; #SafeToJog := FALSE; #ErrorCode := 16#0401;
+        "DB_Diagnostic".Error_Text := 'Safety: EMERGENCY STOP active';
+        RETURN;
+    END_IF;
+    // Drive readiness is NOT checked here.
+    // In STATE_STOPPED, contactors are physically blocked (modePermit=0), so drives can never
+    // report ready before starting. Blocking SafeToRun/SafeToJog here creates a deadlock.
+    // Drive enable is handled automatically in STATE_STARTING (tonDriveReady timeout).
+    // Drive faults while running are caught by prevDriveFaultX/Z detection → STATE_ERROR.
+    #SafeToJog := TRUE;
+    IF NOT #Door_Closed AND NOT #Bypass_Door THEN
+        // Safety door open -- auto run forbidden, manual jog allowed
+        #SafeToRun := FALSE; #ErrorCode := 16#0402;
+        "DB_Diagnostic".Error_Text := 'Safety: Safety door is open';
+        RETURN;
+    END_IF;
+    IF NOT #AirPressure_OK AND NOT #Bypass_AirPressure THEN
+        // Air pressure insufficient -- pneumatic system will not operate
+        #SafeToRun := FALSE; #ErrorCode := 16#0404;
+        "DB_Diagnostic".Error_Text := 'Safety: Air pressure too low';
+        RETURN;
+    END_IF;
+    #SafeToRun := TRUE;
+END_FUNCTION_BLOCK
+
+// -----------------------------------------------------------------------------
+// FB_LimitMonitor - Check soft and hard limits
+// DOC:
+//  purpose: Validate current axis positions against configured soft limits and hardware limit switches.
+//  inputs: ActualPos_X/Z, HW limit switches.
+//  outputs: LimitError (TRUE if any violation), ErrorCode (first matching error code).
+//  notes: Soft limits from DB_MachineConfig are used; hardware limit switches take precedence.
+// -----------------------------------------------------------------------------
+FUNCTION_BLOCK "FB_LimitMonitor"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+    VAR_INPUT
+        ActualPos_X : Real;         // Current X position (mm)
+        ActualPos_Z : Real;         // Current Z position (mm)
+        // NC limit switches: TRUE=closed=OK, FALSE=open=limit triggered
+        // Cable break also reads FALSE → fail-safe behavior
+        HW_NC_X_Min : Bool;         // NC switch: X min (FALSE = limit hit)
+        HW_NC_X_Max : Bool;         // NC switch: X max (FALSE = limit hit)
+        HW_NC_Z_Min : Bool;         // NC switch: Z min (FALSE = limit hit)
+        HW_NC_Z_Max : Bool;         // NC switch: Z max (FALSE = limit hit)
+        // PNP NO proximity sensors: TRUE=target detected=entered limit zone
+        // Triggered BEFORE NC switch → early warning + second safety layer
+        HW_PNP_X_Min : Bool;        // PNP NO sensor: X min (TRUE = limit zone)
+        HW_PNP_X_Max : Bool;        // PNP NO sensor: X max (TRUE = limit zone)
+        HW_PNP_Z_Min : Bool;        // PNP NO sensor: Z min (TRUE = limit zone)
+        HW_PNP_Z_Max : Bool;        // PNP NO sensor: Z max (TRUE = limit zone)
+    END_VAR
+    VAR_OUTPUT
+        LimitError : Bool;          // TRUE if any soft/hard limit violated
+        ErrorCode : Word;           // Specific error code for HMI/alarm
+    END_VAR
+BEGIN
+    // Runs every scan. Soft limits are read from DB_MachineConfig.
+    // Hardware limit switches take priority over soft limits (physical end stop).
+    // ErrorCode shows the last triggered fault -- multiple can be active simultaneously.
+    #LimitError := FALSE; #ErrorCode := 0;
+    // --- Software (Soft) Limits ---
+    IF #ActualPos_X < "DB_MachineConfig".SoftLimit_MinX THEN
+        #LimitError := TRUE; #ErrorCode := 16#0101;
+        "DB_Diagnostic".Error_Text := 'Limit: X axis below minimum soft limit';
+    END_IF;
+    IF #ActualPos_X > "DB_MachineConfig".SoftLimit_MaxX THEN
+        #LimitError := TRUE; #ErrorCode := 16#0102;
+        "DB_Diagnostic".Error_Text := 'Limit: X axis above maximum soft limit';
+    END_IF;
+    IF #ActualPos_Z < "DB_MachineConfig".SoftLimit_MinZ THEN
+        #LimitError := TRUE; #ErrorCode := 16#0103;
+        "DB_Diagnostic".Error_Text := 'Limit: Z axis below minimum soft limit';
+    END_IF;
+    IF #ActualPos_Z > "DB_MachineConfig".SoftLimit_MaxZ THEN
+        #LimitError := TRUE; #ErrorCode := 16#0104;
+        "DB_Diagnostic".Error_Text := 'Limit: Z axis above maximum soft limit';
+    END_IF;
+    // --- Hardware Limit Switches ---
+    // NC switches: the TO (Technology Object) is configured with these as HW limits.
+    // The TO handles deceleration and stop directly -- no PLC action required.
+    // Only E-Stop cuts contactor power; PLC does NOT raise LimitError on NC hits.
+    //
+    // PNP proximity sensors: handled separately in FB_Process (inline halt block).
+    // In auto mode: PNP → MC_Halt on triggered axis + STATE_ERROR (codes 16#0121-0124).
+    // In homing and manual mode: PNP is bypassed (expected zone during reference seek / manual op).
+END_FUNCTION_BLOCK
+
+// -----------------------------------------------------------------------------
+// FB_AlarmManager - Unified error management and monitoring
+// DOC:
+//  purpose: Single place to translate error codes to text, maintain active error state,
+//           append to centralized DB_Error history, and provide outputs for monitoring.
+//  inputs: NewError (rising edge), NewErrorCode, AcknowledgeError (edge)
+//  outputs: HasActiveError, ActiveErrorCode, ActiveErrorText, ActiveSeverity, ActiveSource, ActiveTime
+//  notes: Updates legacy DB_AlarmHistory for backward compatibility but centralizes storage in DB_Error.
+// -----------------------------------------------------------------------------
+FUNCTION_BLOCK "FB_AlarmManager"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 2.0
+    VAR_INPUT 
+        NewError : Bool;            // Rising edge triggers new active error
+        NewErrorCode : Word;       // Numeric code describing error
+        AcknowledgeError : Bool;   // Operator ack (edge)
+    END_VAR
+    VAR_OUTPUT
+        HasActiveError : Bool;       // TRUE while an error is active (until ack)
+        ActiveErrorCode : Word;      // Current active error code
+        ActiveErrorText : String[70];    // Human readable text for HMI (English)
+        ActiveErrorText_ES : String[70]; // Texto de error para HMI (Español)
+        ActiveSeverity : Byte;       // 0=info,1=warn,2=error,3=fatal
+        ActiveSource : String[20];   // Source category string
+        ActiveTime : DTL;            // Timestamp of active error
+    END_VAR
+    VAR 
+        prevNewError : Bool;       // previous NewError for edge detection
+        currentTime : DTL;         // timestamp captured at NewError
+        SystemTimeStatus : Int;    // RD_SYS_T return status
+        i : Int;                   // temporary loop index for history shift
+        internalNewError : Bool;
+        internalErrorCode : Word;
+        fromQueue : Bool;           // TRUE when error came from DB_SystemEvents queue
+    END_VAR
+BEGIN
+    #internalNewError := #NewError;
+    #internalErrorCode := #NewErrorCode;
+    #fromQueue := FALSE;
+
+    // Dequeue one item per scan from DB_SystemEvents error ring buffer (written by FC_ReportError).
+    // Processing one per scan is intentional: avoids two errors overwriting each other in the same
+    // AlarmManager call. Any remaining items are consumed on subsequent scans.
+    IF "DB_SystemEvents".EQ_Count > 0 THEN
+        #internalNewError := TRUE;
+        #internalErrorCode := "DB_SystemEvents".EQ_Code["DB_SystemEvents".EQ_Head];
+        "DB_Diagnostic".Error_Text := "DB_SystemEvents".EQ_Details["DB_SystemEvents".EQ_Head];
+        "DB_Diagnostic".Error_Code := "DB_SystemEvents".EQ_Code["DB_SystemEvents".EQ_Head];
+        "DB_SystemEvents".EQ_Head  := ("DB_SystemEvents".EQ_Head + 1) MOD 4;
+        "DB_SystemEvents".EQ_Count := "DB_SystemEvents".EQ_Count - 1;
+        #fromQueue := TRUE;
+    END_IF;
+
+    // Handle new error
+    // Queue path (fromQueue): always process — queue already guarantees one item per scan,
+    //   so edge detection would drop consecutive errors when prevNewError stays TRUE.
+    // Direct path (NewError input from FB_Process): edge-triggered to prevent repeated firing.
+    IF #internalErrorCode <> 0 AND (#fromQueue OR (#internalNewError AND NOT #prevNewError)) THEN
+        #ActiveErrorCode := #internalErrorCode;
+        #HasActiveError := TRUE;
+        #SystemTimeStatus := RD_SYS_T(OUT => #currentTime);
+        #ActiveTime := #currentTime;
+
+        // Translate code -> text
+        // Queue path (FC_ReportError → DB_SystemEvents): use the detailed text already written
+        //   to DB_Diagnostic.Error_Text -- this includes TO error codes and line numbers.
+        // Direct path (FB_Process sets newErrorCode directly): translate via code table.
+        IF #fromQueue THEN
+            #ActiveErrorText    := "DB_Diagnostic".Error_Text;
+            #ActiveErrorText_ES := "DB_Diagnostic".Error_Text; // queue text is dynamic -- no translation available
+        ELSE
+            CASE #internalErrorCode OF
+                // Axis Movement Errors
+                16#0001: #ActiveErrorText := 'X Axis: Move command failed';
+                         #ActiveErrorText_ES := 'Eje X: fallo en comando de movimiento';
+                16#0002: #ActiveErrorText := 'Z Axis: Move command failed';
+                         #ActiveErrorText_ES := 'Eje Z: fallo en comando de movimiento';
+                16#0003: #ActiveErrorText := 'X Axis: Homing failed';
+                         #ActiveErrorText_ES := 'Eje X: fallo en referenciado';
+                16#0004: #ActiveErrorText := 'Z Axis: Homing failed';
+                         #ActiveErrorText_ES := 'Eje Z: fallo en referenciado';
+                16#0005: #ActiveErrorText := 'Drive fault - check servo';
+                         #ActiveErrorText_ES := 'Fallo en variador - revisar servo';
+                16#0006: #ActiveErrorText := 'Tool Axis: Move failed';
+                         #ActiveErrorText_ES := 'Eje herramienta: fallo de movimiento';
+                16#0007: #ActiveErrorText := 'Tool Axis: Homing failed';
+                         #ActiveErrorText_ES := 'Eje herramienta: fallo de referenciado';
+                16#0008: #ActiveErrorText := 'Motion timeout - axis stuck';
+                         #ActiveErrorText_ES := 'Tiempo de movimiento excedido - eje bloqueado';
+                16#0009: #ActiveErrorText := 'X drive power failed';
+                         #ActiveErrorText_ES := 'Fallo de potencia variador X';
+                16#000A: #ActiveErrorText := 'Z drive power failed';
+                         #ActiveErrorText_ES := 'Fallo de potencia variador Z';
+                16#000B: #ActiveErrorText := 'Homing timeout - check ref switch';
+                         #ActiveErrorText_ES := 'Tiempo de referenciado excedido - revisar sensor';
+                16#000C: #ActiveErrorText := 'Drive ready timeout - check contactor/enable wiring';
+                         #ActiveErrorText_ES := 'Tiempo de espera variador - revisar contactor/cableado';
+                16#0010: #ActiveErrorText := 'User pressed STOP';
+                         #ActiveErrorText_ES := 'Operador presiono PARO';
+                // Soft Limits
+                16#0101: #ActiveErrorText := 'X beyond MIN soft limit';
+                         #ActiveErrorText_ES := 'X fuera de limite minimo';
+                16#0102: #ActiveErrorText := 'X beyond MAX soft limit';
+                         #ActiveErrorText_ES := 'X fuera de limite maximo';
+                16#0103: #ActiveErrorText := 'Z beyond MIN soft limit';
+                         #ActiveErrorText_ES := 'Z fuera de limite minimo';
+                16#0104: #ActiveErrorText := 'Z beyond MAX soft limit';
+                         #ActiveErrorText_ES := 'Z fuera de limite maximo';
+                // PNP Proximity Zone Errors (auto mode only; homing and manual bypass these)
+                16#0121: #ActiveErrorText := 'PNP zone: X axis MIN proximity';
+                         #ActiveErrorText_ES := 'Zona PNP: proximidad MIN Eje X';
+                16#0122: #ActiveErrorText := 'PNP zone: X axis MAX proximity';
+                         #ActiveErrorText_ES := 'Zona PNP: proximidad MAX Eje X';
+                16#0123: #ActiveErrorText := 'PNP zone: Z axis MIN proximity';
+                         #ActiveErrorText_ES := 'Zona PNP: proximidad MIN Eje Z';
+                16#0124: #ActiveErrorText := 'PNP zone: Z axis MAX proximity';
+                         #ActiveErrorText_ES := 'Zona PNP: proximidad MAX Eje Z';
+                // Tool Errors
+                16#0201: #ActiveErrorText := 'Invalid tool number';
+                         #ActiveErrorText_ES := 'Numero de herramienta invalido';
+                16#0202: #ActiveErrorText := 'Tool number out of range';
+                         #ActiveErrorText_ES := 'Numero de herramienta fuera de rango';
+                16#0203: #ActiveErrorText := 'Tool rotation timeout';
+                         #ActiveErrorText_ES := 'Tiempo de rotacion herramienta excedido';
+                16#0204: #ActiveErrorText := 'Retract to tool pos failed';
+                         #ActiveErrorText_ES := 'Fallo al retraer a posicion de herramienta';
+                16#0205: #ActiveErrorText := 'Tool rotation failed';
+                         #ActiveErrorText_ES := 'Fallo en rotacion de herramienta';
+                16#0206: #ActiveErrorText := 'Tool change timeout - check turret drive';
+                         #ActiveErrorText_ES := 'Tiempo de cambio herramienta excedido - revisar variador';
+                // Recipe/G-code Errors
+                16#0301: #ActiveErrorText := 'Recipe: Invalid command';
+                         #ActiveErrorText_ES := 'Receta: Comando invalido';
+                16#0302: #ActiveErrorText := 'Recipe: Parse error';
+                         #ActiveErrorText_ES := 'Receta: Error de analisis';
+                16#0303: #ActiveErrorText := 'Recipe: Empty program';
+                         #ActiveErrorText_ES := 'Receta: Programa vacio';
+                16#0304: #ActiveErrorText := 'Recipe: Line count zero';
+                         #ActiveErrorText_ES := 'Receta: Conteo de lineas cero';
+                16#0305: #ActiveErrorText := 'PreScan: Path exceeds limits';
+                         #ActiveErrorText_ES := 'PreVerificacion: Trayectoria fuera de limites';
+                16#0306: #ActiveErrorText := 'Recipe: Invalid feedrate';
+                         #ActiveErrorText_ES := 'Receta: Avance invalido';
+                16#0307: #ActiveErrorText := 'Recipe: Motion timeout';
+                         #ActiveErrorText_ES := 'Receta: Tiempo de movimiento excedido';
+                16#0308: #ActiveErrorText := 'Recipe: Invalid tool number';
+                         #ActiveErrorText_ES := 'Receta: Numero de herramienta invalido';
+                16#030A: #ActiveErrorText := 'Spindle at-speed timeout (10s)';
+                         #ActiveErrorText_ES := 'Husillo: tiempo de velocidad excedido (10s)';
+                16#030B: #ActiveErrorText := 'Spindle stop timeout (15s)';
+                         #ActiveErrorText_ES := 'Husillo: tiempo de paro excedido (15s)';
+                16#0310: #ActiveErrorText := 'Recipe not loaded - check TotalLines';
+                         #ActiveErrorText_ES := 'Receta no cargada - revisar TotalLines';
+                // Safety Errors
+                16#0401: #ActiveErrorText := 'EMERGENCY STOP ACTIVE!';
+                         #ActiveErrorText_ES := 'PARO DE EMERGENCIA ACTIVO!';
+                16#0402: #ActiveErrorText := 'Safety door is open';
+                         #ActiveErrorText_ES := 'Puerta de seguridad abierta';
+                16#0403: #ActiveErrorText := 'Drives not ready';
+                         #ActiveErrorText_ES := 'Variadores no listos';
+                16#0404: #ActiveErrorText := 'Air pressure too low';
+                         #ActiveErrorText_ES := 'Presion de aire baja';
+                16#0405: #ActiveErrorText := 'Safety interlock active';
+                         #ActiveErrorText_ES := 'Interlock de seguridad activo';
+                16#0406: #ActiveErrorText := 'E-Stop contact discrepancy!';
+                         #ActiveErrorText_ES := 'Discrepancia en contacto Paro de Emergencia!';
+                // Spindle Errors
+                16#0501: #ActiveErrorText := 'Spindle: Power-on failed';
+                         #ActiveErrorText_ES := 'Husillo: fallo al encender';
+                16#0502: #ActiveErrorText := 'Spindle: Run command failed';
+                         #ActiveErrorText_ES := 'Husillo: fallo al ejecutar comando';
+                16#0503: #ActiveErrorText := 'Spindle: Halt failed';
+                         #ActiveErrorText_ES := 'Husillo: fallo al detener';
+                16#0504: #ActiveErrorText := 'Spindle: Speed not reached';
+                         #ActiveErrorText_ES := 'Husillo: velocidad no alcanzada';
+                16#0505: #ActiveErrorText := 'Spindle: Drive enable timeout';
+                         #ActiveErrorText_ES := 'Husillo: tiempo de habilitacion excedido';
+                // NOTE: Siemens TO (Technology Object) error codes (16#8xxx) are NOT passed here
+                // directly. They are decoded via FC_TO_ErrorText and written to
+                // DB_Diagnostic.TO_ErrorText + DB_HMI.ErrorDetail at the point of failure.
+                // This CASE only handles project-level error codes (16#0001-16#05FF).
+                ELSE
+                    #ActiveErrorText    := 'Unknown error code';
+                    #ActiveErrorText_ES := 'Codigo de error desconocido';
+            END_CASE;
+        END_IF;
+
+        // Severity & source mapping (explicit ranges)
+        // Severity: 3=fatal, 2=error, 1=warn, 0=info
+        IF #ActiveErrorCode >= 16#0400 AND #ActiveErrorCode < 16#0500 THEN
+            #ActiveSeverity := 3; #ActiveSource := 'Safety';
+        ELSIF #ActiveErrorCode >= 16#0111 AND #ActiveErrorCode < 16#0120 THEN
+            #ActiveSeverity := 3; #ActiveSource := 'HW Limit';
+        ELSIF #ActiveErrorCode >= 16#0001 AND #ActiveErrorCode < 16#0011 THEN
+            #ActiveSeverity := 2; #ActiveSource := 'Axis';
+        ELSIF #ActiveErrorCode >= 16#0101 AND #ActiveErrorCode < 16#0110 THEN
+            #ActiveSeverity := 2; #ActiveSource := 'Soft Limit';
+        ELSIF #ActiveErrorCode >= 16#0200 AND #ActiveErrorCode < 16#0210 THEN
+            #ActiveSeverity := 2; #ActiveSource := 'Tool';
+        ELSIF #ActiveErrorCode >= 16#0300 AND #ActiveErrorCode < 16#0310 THEN
+            #ActiveSeverity := 2; #ActiveSource := 'Recipe';
+        ELSIF #ActiveErrorCode >= 16#0500 AND #ActiveErrorCode < 16#0510 THEN
+            #ActiveSeverity := 2; #ActiveSource := 'Spindle';
+        ELSE
+            #ActiveSeverity := 1; #ActiveSource := 'Unknown';
+        END_IF;
+
+        // Centralized DB_Error is the single source of truth for errors now.
+        // (Legacy DB_AlarmHistory removed -- HMI should read DB_Error or DB_Diagnostic.)
+
+        // Centralized DB_Error snapshot + history
+        "DB_Error".Active := TRUE;
+        "DB_Error".Code := #ActiveErrorCode;
+        "DB_Error".Severity := #ActiveSeverity;
+        "DB_Error".Source := #ActiveSource;
+        IF "DB_Diagnostic".Recipe_CurrentLine >= 0 AND (#ActiveSource = 'Recipe') THEN
+            "DB_Error".Line := "DB_Diagnostic".Recipe_CurrentLine;
+        ELSE
+            "DB_Error".Line := -1;
+        END_IF;
+        "DB_Error".TimeStamp := #currentTime;
+        "DB_Error".Details := #ActiveErrorText;
+        "DB_Error".TotalErrorCount := "DB_Error".TotalErrorCount + 1;
+        // Shift error history and insert new entry
+        FOR #i := 10 TO 2 BY -1 DO
+            "DB_Error".History_Code[#i] := "DB_Error".History_Code[#i - 1];
+            "DB_Error".History_Time[#i] := "DB_Error".History_Time[#i - 1];
+            "DB_Error".History_Source[#i] := "DB_Error".History_Source[#i - 1];
+            "DB_Error".History_Details[#i] := "DB_Error".History_Details[#i - 1];
+        END_FOR;
+        "DB_Error".History_Code[1] := #ActiveErrorCode;
+        "DB_Error".History_Time[1] := #currentTime;
+        "DB_Error".History_Source[1] := #ActiveSource;
+        "DB_Error".History_Details[1] := #ActiveErrorText;
+        "DB_Error".History_Index := "DB_Error".History_Index + 1;
+        IF "DB_Error".History_Index > 10 THEN "DB_Error".History_Index := 1; END_IF;
+        IF "DB_Error".History_Count < 10 THEN "DB_Error".History_Count := "DB_Error".History_Count + 1; END_IF;
+    END_IF;
+
+    // Latch previous new error for edge detection
+    #prevNewError := #internalNewError;
+
+    // Acknowledge handling: clear active state but retain history snapshot
+    IF #AcknowledgeError THEN
+        #ActiveErrorCode := 0;
+        #HasActiveError := FALSE;
+        #ActiveErrorText := '';
+        #ActiveSeverity := 0;
+        #ActiveSource := '';
+        #ActiveTime := DTL#1970-01-01-00:00:00;
+        // legacy DB_AlarmHistory removed; history retained in DB_Error
+        "DB_Error".Active := FALSE;
+        "DB_Error".Code := 0;  // BUG FIX: clear code so DB_HMI_Errors bits go FALSE
+        "DB_Error".Details := CONCAT(IN1 := "DB_Error".Details, IN2 := ' [ACK]');
+    END_IF;
+
+    // =========================================================================
+    // DB_HMI_Errors - Pack error bits into Words for HMI Discrete Alarms
+    // Word.Bit = one alarm line in HMI Alarm View
+    // =========================================================================
+
+    // AlarmWord_Axis: Bits 0-7
+    "DB_HMI_Errors".AlarmWord_Axis :=
+    BOOL_TO_WORD("DB_Error".Code = 16#0001) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0002), N := 1) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0003), N := 2) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0004), N := 3) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0005), N := 4) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0006), N := 5) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0007), N := 6) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0008), N := 7);
+
+    // AlarmWord_Limits: Bits 0-3 soft, 4-7 hardware
+    "DB_HMI_Errors".AlarmWord_Limits :=
+    BOOL_TO_WORD("DB_Error".Code = 16#0101) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0102), N := 1) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0103), N := 2) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0104), N := 3) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0111), N := 4) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0112), N := 5) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0113), N := 6) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0114), N := 7);
+
+    // AlarmWord_Tool: Bits 0-4
+    "DB_HMI_Errors".AlarmWord_Tool :=
+    BOOL_TO_WORD("DB_Error".Code = 16#0201) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0202), N := 1) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0203), N := 2) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0204), N := 3) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0205), N := 4);
+
+    // AlarmWord_Recipe: Bits 0-7
+    "DB_HMI_Errors".AlarmWord_Recipe :=
+    BOOL_TO_WORD("DB_Error".Code = 16#0301) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0302), N := 1) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0303), N := 2) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0304), N := 3) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0305), N := 4) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0306), N := 5) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0307), N := 6) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0308), N := 7);
+
+    // AlarmWord_Safety: Bits 0-5
+    "DB_HMI_Errors".AlarmWord_Safety :=
+    BOOL_TO_WORD("DB_Error".Code = 16#0401) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0402), N := 1) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0403), N := 2) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0404), N := 3) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0405), N := 4) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0406), N := 5);
+
+    // AlarmWord_Spindle: Bits 0-3
+    "DB_HMI_Errors".AlarmWord_Spindle :=
+    BOOL_TO_WORD("DB_Error".Code = 16#0501) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0502), N := 1) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0503), N := 2) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0504), N := 3);
+
+    // AlarmWord_TO: Bits 0-4
+    "DB_HMI_Errors".AlarmWord_TO :=
+    BOOL_TO_WORD("DB_Error".Code = 16#8401) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#8402), N := 1) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#8403), N := 2) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#8404), N := 3) OR
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#8405), N := 4);
+
+    // Individual Bool flags (derived from DB_Error.Code)
+    "DB_HMI_Errors".Err_X_MoveFailed       := ("DB_Error".Code = 16#0001);
+    "DB_HMI_Errors".Err_Z_MoveFailed       := ("DB_Error".Code = 16#0002);
+    "DB_HMI_Errors".Err_X_HomingFailed     := ("DB_Error".Code = 16#0003);
+    "DB_HMI_Errors".Err_Z_HomingFailed     := ("DB_Error".Code = 16#0004);
+    "DB_HMI_Errors".Err_DriveFault         := ("DB_Error".Code = 16#0005);
+    "DB_HMI_Errors".Err_ToolMoveFailed     := ("DB_Error".Code = 16#0006);
+    "DB_HMI_Errors".Err_ToolHomingFailed   := ("DB_Error".Code = 16#0007);
+    "DB_HMI_Errors".Err_MotionTimeout      := ("DB_Error".Code = 16#0008);
+    "DB_HMI_Errors".Err_SoftLimit_X_Min    := ("DB_Error".Code = 16#0101);
+    "DB_HMI_Errors".Err_SoftLimit_X_Max    := ("DB_Error".Code = 16#0102);
+    "DB_HMI_Errors".Err_SoftLimit_Z_Min    := ("DB_Error".Code = 16#0103);
+    "DB_HMI_Errors".Err_SoftLimit_Z_Max    := ("DB_Error".Code = 16#0104);
+    "DB_HMI_Errors".Err_HWLimit_X_Min      := ("DB_Error".Code = 16#0111);
+    "DB_HMI_Errors".Err_HWLimit_X_Max      := ("DB_Error".Code = 16#0112);
+    "DB_HMI_Errors".Err_HWLimit_Z_Min      := ("DB_Error".Code = 16#0113);
+    "DB_HMI_Errors".Err_HWLimit_Z_Max      := ("DB_Error".Code = 16#0114);
+    "DB_HMI_Errors".Err_InvalidToolNum     := ("DB_Error".Code = 16#0201);
+    "DB_HMI_Errors".Err_ToolOutOfRange     := ("DB_Error".Code = 16#0202);
+    "DB_HMI_Errors".Err_ToolRotTimeout     := ("DB_Error".Code = 16#0203);
+    "DB_HMI_Errors".Err_ToolRetractFail    := ("DB_Error".Code = 16#0204);
+    "DB_HMI_Errors".Err_ToolRotFailed      := ("DB_Error".Code = 16#0205);
+    "DB_HMI_Errors".Err_Recipe_InvalidCmd  := ("DB_Error".Code = 16#0301);
+    "DB_HMI_Errors".Err_Recipe_ParseErr    := ("DB_Error".Code = 16#0302);
+    "DB_HMI_Errors".Err_Recipe_Empty       := ("DB_Error".Code = 16#0303);
+    "DB_HMI_Errors".Err_Recipe_NoLines     := ("DB_Error".Code = 16#0304);
+    "DB_HMI_Errors".Err_PreScan_Limits     := ("DB_Error".Code = 16#0305);
+    "DB_HMI_Errors".Err_Recipe_Feedrate    := ("DB_Error".Code = 16#0306);
+    "DB_HMI_Errors".Err_Recipe_Timeout     := ("DB_Error".Code = 16#0307);
+    "DB_HMI_Errors".Err_Recipe_ToolNum     := ("DB_Error".Code = 16#0308);
+    "DB_HMI_Errors".Err_EStop              := ("DB_Error".Code = 16#0401);
+    "DB_HMI_Errors".Err_EStop_Discrepancy  := ("DB_Error".Code = 16#0406);
+    "DB_HMI_Errors".Err_DoorOpen           := ("DB_Error".Code = 16#0402);
+    "DB_HMI_Errors".Err_DrivesNotReady     := ("DB_Error".Code = 16#0403);
+    "DB_HMI_Errors".Err_AirPressure        := ("DB_Error".Code = 16#0404);
+    "DB_HMI_Errors".Err_SafetyInterlock    := ("DB_Error".Code = 16#0405);
+    "DB_HMI_Errors".Err_Spindle_Power      := ("DB_Error".Code = 16#0501);
+    "DB_HMI_Errors".Err_Spindle_Run        := ("DB_Error".Code = 16#0502);
+    "DB_HMI_Errors".Err_Spindle_Halt       := ("DB_Error".Code = 16#0503);
+    "DB_HMI_Errors".Err_Spindle_Speed      := ("DB_Error".Code = 16#0504);
+    "DB_HMI_Errors".Err_TO_Position        := ("DB_Error".Code = 16#8401);
+    "DB_HMI_Errors".Err_TO_Velocity        := ("DB_Error".Code = 16#8402);
+    "DB_HMI_Errors".Err_TO_NotReady        := ("DB_Error".Code = 16#8403);
+    "DB_HMI_Errors".Err_TO_NotEnabled      := ("DB_Error".Code = 16#8404);
+    "DB_HMI_Errors".Err_TO_LimitExceeded   := ("DB_Error".Code = 16#8405);
+
+    // Summary flags (non-zero Word = category has error)
+    "DB_HMI_Errors".AnyAxisError    := ("DB_HMI_Errors".AlarmWord_Axis <> 0);
+    "DB_HMI_Errors".AnyLimitError   := ("DB_HMI_Errors".AlarmWord_Limits <> 0);
+    "DB_HMI_Errors".AnyToolError    := ("DB_HMI_Errors".AlarmWord_Tool <> 0);
+    "DB_HMI_Errors".AnyRecipeError  := ("DB_HMI_Errors".AlarmWord_Recipe <> 0);
+    "DB_HMI_Errors".AnySafetyError  := ("DB_HMI_Errors".AlarmWord_Safety <> 0);
+    "DB_HMI_Errors".AnySpindleError := ("DB_HMI_Errors".AlarmWord_Spindle <> 0);
+    "DB_HMI_Errors".AnyError        := "DB_Error".Active;
+
+END_FUNCTION_BLOCK
+
+// -----------------------------------------------------------------------------
+// FB_ManualMode - Manual jog, home, move operations
+// DOC:
+//  purpose: Provide manual control and single-axis operations for operator (jog, absolute move, homing).
+//  inputs: Enable (activation), SelectedAxis, Jog buttons, MoveAbsolute, Home commands, SafeToJog
+//  outputs: Busy/Done/Error flags, AxisName/Position, ToolPosition
+//  notes: Designed to be used in Manual mode only; delegates axis operations to axis FBs.
+// -----------------------------------------------------------------------------
+FUNCTION_BLOCK "FB_ManualMode"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.2
+    VAR_INPUT 
+        Enable : Bool;              // Enable manual mode (true = active)
+        SelectedAxis : Int;         // 0=X,1=Z,2=Tool,3=Spindle
+        Jog_Plus : Bool;            // Jog positive direction (level)
+        Jog_Minus : Bool;           // Jog negative direction (level)
+        JogSpeed : Real;            // Jog velocity (mm/s)
+        MoveAbsolute : Bool;        // Trigger absolute move
+        TargetPosition : Real;      // Absolute target position (mm)
+        HomeAxis : Bool;            // Home selected axis
+        HomeAll : Bool;             // Home all axes
+        HomingMode : Int;           // Homing mode selection
+        HomePosition : Real;        // Home position parameter (if used)
+        GoSafe : Bool;              // Move to safe position
+        GoZero : Bool;              // Move to zero position
+        SafeToJog : Bool;           // From safety monitor
+        Reset : Bool;               // Reset manual FB state
+        PNP_X_Min : Bool;           // X min PNP sensor -- TRUE = in limit zone (for pre-homing clearance)
+        PNP_Z_Min : Bool;           // Z min PNP sensor -- TRUE = in limit zone
+        ToolStepCW : Bool;          // Tool step clockwise
+        ToolStepCCW : Bool;         // Tool step counter-clockwise
+        ToolStepAngle : Real;       // Angle per tool step (deg)
+        ToolStepSpeed : Real;       // Velocity for tool step (deg/s)
+    END_VAR
+    VAR_OUTPUT
+        Busy : Bool;
+        Done : Bool;
+        Error : Bool;
+        ErrorID : Word;
+        AxisName : String[10];      // Display name for selected axis
+        AxisPosition : Real;        // Current axis position reported
+        AxisHomed : Bool;
+        AxisReady : Bool;
+        ToolPosition : Real;
+        ActiveAxis : Int;           // Axis currently controlled (-1 = none)
+        HomingActive : Bool;        // TRUE = homing motion in progress (for limit bypass)
+    END_VAR
+    VAR_IN_OUT
+        Axis_X : TO_PositioningAxis; // Axis technology objects (in/out interface)
+        Axis_Z : TO_PositioningAxis;
+        Axis_Tool : TO_PositioningAxis;
+        Axis_Spindle : TO_PositioningAxis;
+    END_VAR
+    VAR 
+        state : Int;                // Local state for manual FB
+        // Motion FB instances used by manual mode
+        fbJogX, fbJogZ, fbJogTool : "FB_Axis_Jog";
+        fbMoveX, fbMoveZ : "FB_Axis_AbsPos";
+        fbMoveToolAbs : "FB_Axis_AbsPos";  // Manual > MOVE ABSOLUTE (requires homing)
+        fbMoveTool : "FB_Axis_RelPos";     // Manual > TOOL STEP (does not require homing)
+        fbHomeX, fbHomeZ, fbHomeTool : "FB_Axis_Home";
+        // Previous input state for edge detection and one-shot triggers
+        prevMoveAbs : Bool; 
+        prevHomeAxis : Bool; 
+        prevHomeAll : Bool; 
+        prevGoSafe : Bool; 
+        prevGoZero : Bool;
+        prevToolStepCW : Bool; 
+        prevToolStepCCW : Bool;
+        // Internal control flags
+        bMoveX : Bool;
+        bMoveZ : Bool;
+        bMoveTool : Bool;
+        bMoveToolAbs : Bool;
+        bHomeX : Bool;
+        bHomeZ : Bool;
+        bHomeTool : Bool;
+        bHomeAllExec : Bool;
+        bHomeXDoneLatch : Bool;    // Holds X Done pulse for HomeAll
+        bHomeZDoneLatch : Bool;    // Holds Z Done pulse for HomeAll
+        bHomeToolDoneLatch : Bool; // Holds Tool Done pulse for HomeAll
+        // Homing clearance -- escape from PNP zone / move away after homing
+        fbClearX : "FB_Axis_AbsPos";   // X clearance move
+        fbClearZ : "FB_Axis_AbsPos";   // Z clearance hareketi
+        bClearX  : Bool;               // X clearance execute flag
+        bClearZ  : Bool;               // Z clearance execute flag
+        bToolStepExec : Bool;
+        jogAxis : Int;             // Axis selected for jogging during a jog session
+        stepTarget : Real; 
+        moveVelocity : Real; 
+    END_VAR
+BEGIN
+    IF NOT #Enable THEN 
+        #state := 0; #Busy := FALSE; #Done := FALSE; 
+        #bMoveX := FALSE; #bMoveZ := FALSE; #bMoveTool := FALSE;
+        #bHomeX := FALSE; #bHomeZ := FALSE; #bHomeTool := FALSE;
+        RETURN; 
+    END_IF;
+    
+    IF NOT #SafeToJog THEN
+        #Error := TRUE; #ErrorID := 16#0005; #state := 999;
+        "DB_HMI".ErrorDetail    := 'Manual: drives not ready or E-Stop active';
+        "DB_HMI".ErrorDetail_ES := 'Manual: variadores no listos o Paro de Emergencia activo';
+    END_IF;
+    IF #Reset THEN #state := 0; #Error := FALSE; #ErrorID := 0; #Done := FALSE; END_IF;
+    
+    #ToolPosition := #Axis_Tool.ActualPosition;
+    
+    CASE #SelectedAxis OF
+        0: #AxisName := 'X'; #AxisPosition := #Axis_X.ActualPosition; #AxisHomed := #Axis_X.StatusBits.HomingDone; #AxisReady := #Axis_X.StatusBits.DriveReady;
+        1: #AxisName := 'Z'; #AxisPosition := #Axis_Z.ActualPosition; #AxisHomed := #Axis_Z.StatusBits.HomingDone; #AxisReady := #Axis_Z.StatusBits.DriveReady;
+        2: #AxisName := 'Tool'; #AxisPosition := #Axis_Tool.ActualPosition; #AxisHomed := #Axis_Tool.StatusBits.HomingDone; #AxisReady := #Axis_Tool.StatusBits.DriveReady;
+        3: #AxisName := 'Spindle'; #AxisPosition := #Axis_Spindle.ActualVelocity; #AxisHomed := TRUE; #AxisReady := #Axis_Spindle.StatusBits.DriveReady;
+    END_CASE;
+    
+    CASE #state OF
+        0: // IDLE
+            #Busy := FALSE; #Done := FALSE; #ActiveAxis := -1; #HomingActive := FALSE;
+            IF (#Jog_Plus OR #Jog_Minus) AND #SafeToJog THEN #jogAxis := #SelectedAxis; #state := 10; END_IF;
+            IF #MoveAbsolute AND NOT #prevMoveAbs THEN #state := 30; END_IF;
+            IF #HomeAxis AND NOT #prevHomeAxis THEN #state := 40; END_IF;
+            IF #HomeAll AND NOT #prevHomeAll THEN #state := 50; END_IF;
+            IF #GoSafe AND NOT #prevGoSafe THEN #state := 60; END_IF;
+            IF #GoZero AND NOT #prevGoZero THEN #state := 70; END_IF;
+            // moveVelocity must be set here -- FB call comes at the end of the same scan;
+            // if set in state 20 it arrives one scan late and MC_MoveRelative starts at 0 speed.
+            IF #ToolStepCW  AND NOT #prevToolStepCW  THEN
+                #stepTarget    :=  #ToolStepAngle;
+                #moveVelocity  := #ToolStepSpeed;
+                #bMoveTool     := TRUE;
+                #state         := 20;
+            END_IF;
+            IF #ToolStepCCW AND NOT #prevToolStepCCW THEN
+                #stepTarget    := -#ToolStepAngle;
+                #moveVelocity  := #ToolStepSpeed;
+                #bMoveTool     := TRUE;
+                #state         := 20;
+            END_IF;
+
+        10: // JOGGING
+            #Busy := TRUE; #ActiveAxis := #jogAxis;
+            IF NOT #Jog_Plus AND NOT #Jog_Minus THEN #state := 99; END_IF;
+        
+        20: // TOOL STEP
+            #Busy := TRUE; #ActiveAxis := 2;
+            #moveVelocity := #ToolStepSpeed;
+            #state := 80;
+
+        30: // MOVE ABSOLUTE
+            #Busy := TRUE;
+            #stepTarget := #TargetPosition; #moveVelocity := #JogSpeed;
+            CASE #SelectedAxis OF
+                0: #bMoveX    := TRUE; #ActiveAxis := 0;
+                1: #bMoveZ    := TRUE; #ActiveAxis := 1;
+                2: #bMoveToolAbs := TRUE; #ActiveAxis := 2;  // AbsPos -- requires prior homing
+            END_CASE;
+            #state := 80;
+            
+        40: // HOME AXIS INIT -- if in PNP zone, clear it first, then home
+            #Busy := TRUE; #HomingActive := TRUE;
+            CASE #SelectedAxis OF
+                0: // X axis
+                    #ActiveAxis := 0;
+                    IF #PNP_X_Min THEN
+                        // In X min PNP zone → clearance move first
+                        #bClearX := TRUE;
+                        #state := 41;
+                    ELSE
+                        #bHomeX := TRUE;
+                        #state := 80;
+                    END_IF;
+                1: // Z axis
+                    #ActiveAxis := 1;
+                    IF #PNP_Z_Min THEN
+                        #bClearZ := TRUE;
+                        #state := 41;
+                    ELSE
+                        #bHomeZ := TRUE;
+                        #state := 80;
+                    END_IF;
+                2: // Tool axis -- no PNP zone
+                    #bHomeTool := TRUE; #ActiveAxis := 2;
+                    #state := 80;
+            END_CASE;
+
+        41: // PRE-HOME CLEARANCE WAIT -- wait for clearance move out of PNP zone to finish
+            #Busy := TRUE; #HomingActive := TRUE;
+            IF #bClearX AND #fbClearX.Done THEN
+                #bClearX := FALSE; #bHomeX := TRUE; #state := 80;
+            ELSIF #bClearZ AND #fbClearZ.Done THEN
+                #bClearZ := FALSE; #bHomeZ := TRUE; #state := 80;
+            ELSIF (#bClearX AND #fbClearX.Error) OR (#bClearZ AND #fbClearZ.Error) THEN
+                #bClearX := FALSE; #bClearZ := FALSE;
+                #state := 999; #ErrorID := 16#0001;
+                "DB_HMI".ErrorDetail    := 'Manual: pre-home clearance move failed';
+                "DB_HMI".ErrorDetail_ES := 'Manual: fallo al liberar zona PNP antes de referenciar';
+            END_IF;
+
+        50: // HOME ALL INIT -- clear required axes from PNP zone
+            #Busy := TRUE; #HomingActive := TRUE; #ActiveAxis := -1;
+            #bClearX := #PNP_X_Min;   // Clearance only needed if inside PNP zone
+            #bClearZ := #PNP_Z_Min;
+            IF NOT "DB_MachineConfig".Bypass_ToolAxis THEN
+                #bHomeTool := TRUE;   // Home tool axis simultaneously with X and Z
+            END_IF;
+            IF #bClearX OR #bClearZ THEN
+                #state := 51;          // Clearance first
+            ELSE
+                #bHomeAllExec := TRUE; #state := 80;
+            END_IF;
+
+        51: // HOME ALL PRE-CLEARANCE WAIT -- wait until both axes have cleared PNP zone
+            #Busy := TRUE; #HomingActive := TRUE;
+            IF (NOT #bClearX OR #fbClearX.Done) AND (NOT #bClearZ OR #fbClearZ.Done) THEN
+                #bClearX := FALSE; #bClearZ := FALSE;
+                #bHomeAllExec := TRUE; #state := 80;
+            ELSIF (#bClearX AND #fbClearX.Error) OR (#bClearZ AND #fbClearZ.Error) THEN
+                #bClearX := FALSE; #bClearZ := FALSE;
+                #state := 999; #ErrorID := 16#0001;
+                "DB_HMI".ErrorDetail    := 'Manual: pre-home clearance move failed (Home All)';
+                "DB_HMI".ErrorDetail_ES := 'Manual: fallo al liberar zona PNP antes de referenciar (Ref. Todo)';
+            END_IF;
+
+        60: // GO SAFE
+            #Busy := TRUE; #moveVelocity := "DB_MachineConfig".RapidVelocity;
+            CASE #SelectedAxis OF
+                0: #bMoveX := TRUE; #stepTarget := "DB_MachineConfig".SafePos_X; #ActiveAxis := 0;
+                1: #bMoveZ := TRUE; #stepTarget := "DB_MachineConfig".SafePos_Z; #ActiveAxis := 1;
+            END_CASE;
+            #state := 80;
+        
+        70: // GO ZERO
+            #Busy := TRUE; #stepTarget := 0.0; #moveVelocity := "DB_MachineConfig".RapidVelocity;
+            CASE #SelectedAxis OF
+                0: #bMoveX := TRUE; #ActiveAxis := 0;
+                1: #bMoveZ := TRUE; #ActiveAxis := 1;
+            END_CASE;
+            #state := 80;
+            
+        80: // WAIT FOR COMPLETE
+            #Busy := TRUE;
+            // HomingActive: set while any homing flag is still active
+            #HomingActive := #bHomeX OR #bHomeZ OR #bHomeTool OR #bHomeAllExec;
+            // Normal moves -- go directly to 99 on completion
+            IF #bMoveX AND #fbMoveX.Done THEN #state := 99; END_IF;
+            IF #bMoveX AND #fbMoveX.Error THEN
+                #state := 999; #ErrorID := 16#0001;
+                "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Manual X move: TO:', IN2 := "FC_TO_ErrorText"(Code := #fbMoveX.ErrorID));
+                "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Manual mov. X: TO:', IN2 := "FC_TO_ErrorText"(Code := #fbMoveX.ErrorID));
+            END_IF;
+            IF #bMoveZ AND #fbMoveZ.Done THEN #state := 99; END_IF;
+            IF #bMoveZ AND #fbMoveZ.Error THEN
+                #state := 999; #ErrorID := 16#0002;
+                "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Manual Z move: TO:', IN2 := "FC_TO_ErrorText"(Code := #fbMoveZ.ErrorID));
+                "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Manual mov. Z: TO:', IN2 := "FC_TO_ErrorText"(Code := #fbMoveZ.ErrorID));
+            END_IF;
+            IF #bMoveTool    AND #fbMoveTool.Done    THEN #state := 99; END_IF;
+            IF #bMoveTool    AND #fbMoveTool.Error   THEN
+                #state := 999; #ErrorID := 16#0006;
+                "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Manual tool step: TO:', IN2 := "FC_TO_ErrorText"(Code := #fbMoveTool.ErrorID));
+                "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Manual paso herr: TO:', IN2 := "FC_TO_ErrorText"(Code := #fbMoveTool.ErrorID));
+            END_IF;
+            IF #bMoveToolAbs AND #fbMoveToolAbs.Done  THEN #state := 99; END_IF;
+            IF #bMoveToolAbs AND #fbMoveToolAbs.Error THEN
+                #state := 999; #ErrorID := 16#0006;
+                "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Manual tool abs: TO:', IN2 := "FC_TO_ErrorText"(Code := #fbMoveToolAbs.ErrorID));
+                "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Manual herr abs: TO:', IN2 := "FC_TO_ErrorText"(Code := #fbMoveToolAbs.ErrorID));
+            END_IF;
+            // Homing -- on completion, go to post-clearance move (move away from PNP zone)
+            IF #bHomeX AND #fbHomeX.Done THEN
+                #bHomeX := FALSE; #bClearX := TRUE; #state := 82;
+            END_IF;
+            IF #bHomeZ AND #fbHomeZ.Done THEN
+                #bHomeZ := FALSE; #bClearZ := TRUE; #state := 82;
+            END_IF;
+            IF #bHomeTool AND NOT #bHomeAllExec AND #fbHomeTool.Done THEN #state := 99; END_IF;  // Tool axis has no PNP zone (individual home)
+            IF #bHomeTool AND #fbHomeTool.Error THEN
+                #state := 999; #ErrorID := 16#0007;
+                "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Manual tool home: TO:', IN2 := "FC_TO_ErrorText"(Code := #fbHomeTool.ErrorID));
+                "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Manual ref herr: TO:', IN2 := "FC_TO_ErrorText"(Code := #fbHomeTool.ErrorID));
+            END_IF;
+            // HomeAll: latch Done pulses -- condition must hold even if they complete on different scans
+            IF #bHomeAllExec AND #fbHomeX.Done THEN #bHomeXDoneLatch := TRUE; END_IF;
+            IF #bHomeAllExec AND #fbHomeZ.Done THEN #bHomeZDoneLatch := TRUE; END_IF;
+            IF #bHomeAllExec AND #bHomeTool AND #fbHomeTool.Done THEN #bHomeToolDoneLatch := TRUE; END_IF;
+            IF #bHomeAllExec AND #bHomeXDoneLatch AND #bHomeZDoneLatch
+               AND (NOT #bHomeTool OR #bHomeToolDoneLatch) THEN
+                #bHomeAllExec := FALSE; #bHomeTool := FALSE;
+                #bHomeXDoneLatch := FALSE; #bHomeZDoneLatch := FALSE; #bHomeToolDoneLatch := FALSE;
+                #bClearX := TRUE; #bClearZ := TRUE; #state := 82;
+            END_IF;
+
+        82: // POST-HOME CLEARANCE WAIT -- move away from PNP zone after homing
+            #Busy := TRUE; #HomingActive := FALSE;  // Homing done, clearance move in progress
+            IF (NOT #bClearX OR #fbClearX.Done) AND (NOT #bClearZ OR #fbClearZ.Done) THEN
+                #bClearX := FALSE; #bClearZ := FALSE; #state := 99;
+            ELSIF (#bClearX AND #fbClearX.Error) OR (#bClearZ AND #fbClearZ.Error) THEN
+                #bClearX := FALSE; #bClearZ := FALSE;
+                #state := 999; #ErrorID := 16#0001;
+                "DB_HMI".ErrorDetail    := 'Manual: post-home clearance move failed';
+                "DB_HMI".ErrorDetail_ES := 'Manual: fallo al liberar zona PNP despues de referenciar';
+            END_IF;
+
+        99: // COMPLETE
+            #Busy := FALSE; #Done := TRUE; #HomingActive := FALSE;
+            #bMoveX := FALSE; #bMoveZ := FALSE; #bMoveTool := FALSE; #bMoveToolAbs := FALSE;
+            #bHomeX := FALSE; #bHomeZ := FALSE; #bHomeTool := FALSE;
+            #bHomeAllExec := FALSE; #bHomeXDoneLatch := FALSE; #bHomeZDoneLatch := FALSE; #bHomeToolDoneLatch := FALSE;
+            #bClearX := FALSE; #bClearZ := FALSE;
+            #ActiveAxis := -1;
+            #state := 0;
+
+        999: // ERROR
+            #Error := TRUE; #Busy := FALSE; #HomingActive := FALSE;
+            #bMoveX := FALSE; #bMoveZ := FALSE; #bMoveTool := FALSE; #bMoveToolAbs := FALSE;
+            #bClearX := FALSE; #bClearZ := FALSE;
+    END_CASE;
+    
+    IF #state = 0 THEN
+        #prevMoveAbs := #MoveAbsolute; #prevHomeAxis := #HomeAxis; #prevHomeAll := #HomeAll; 
+        #prevGoSafe := #GoSafe; #prevGoZero := #GoZero;
+    END_IF;
+    
+    // FB Calls
+    #fbJogX(JogForward := (#Jog_Plus AND #jogAxis = 0 AND #state = 10), 
+            JogBackward := (#Jog_Minus AND #jogAxis = 0 AND #state = 10), 
+            Velocity := #JogSpeed, Axis := #Axis_X);
+    #fbJogZ(JogForward := (#Jog_Plus AND #jogAxis = 1 AND #state = 10), 
+            JogBackward := (#Jog_Minus AND #jogAxis = 1 AND #state = 10), 
+            Velocity := #JogSpeed, Axis := #Axis_Z);
+    #fbMoveX(Execute := #bMoveX, Position := #stepTarget, Velocity := #moveVelocity, Axis := #Axis_X);
+    #fbMoveZ(Execute := #bMoveZ, Position := #stepTarget, Velocity := #moveVelocity, Axis := #Axis_Z);
+    #fbMoveTool(Execute := #bMoveTool, Distance := #stepTarget, Velocity := #moveVelocity, Axis := #Axis_Tool);
+    #fbMoveToolAbs(Execute := #bMoveToolAbs, Position := #stepTarget, Velocity := #moveVelocity, Axis := #Axis_Tool);
+    #fbHomeX(Execute := #bHomeX OR #bHomeAllExec, Mode := #HomingMode, Position := #HomePosition, Axis := #Axis_X);
+    #fbHomeZ(Execute := #bHomeZ OR #bHomeAllExec, Mode := #HomingMode, Position := #HomePosition, Axis := #Axis_Z);
+    #fbHomeTool(Execute := #bHomeTool, Mode := #HomingMode, Position := #HomePosition, Axis := #Axis_Tool);
+    // Homing clearance moves:
+    //   Pre-home:  when in PNP zone, move to safe position before starting homing
+    //   Post-home: move away from PNP zone after homing completes
+    //   Target: HomeOffset + PostHome_Clearance (same position in both cases)
+    #fbClearX(Execute  := #bClearX,
+              Position := "DB_MachineConfig".HomeOffset_X + "DB_MachineConfig".PostHome_Clearance,
+              Velocity := "DB_MachineConfig".HomeVelocity,
+              Axis     := #Axis_X);
+    #fbClearZ(Execute  := #bClearZ,
+              Position := "DB_MachineConfig".HomeOffset_Z + "DB_MachineConfig".PostHome_Clearance,
+              Velocity := "DB_MachineConfig".HomeVelocity,
+              Axis     := #Axis_Z);
+    #prevToolStepCW  := #ToolStepCW;
+    #prevToolStepCCW := #ToolStepCCW;
+END_FUNCTION_BLOCK
+
+// -----------------------------------------------------------------------------
+// FB_Process - Main supervisory state machine with PRE-SCAN
+// -----------------------------------------------------------------------------
+FUNCTION_BLOCK "FB_Process"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 4.0
+    VAR_INPUT Panel_Start : Bool; Panel_Stop : Bool; Panel_Pause : Bool; Panel_Reset : Bool;
+              Rem_Start : Bool; Rem_Stop : Bool;
+              EStop_OK : Bool := TRUE; Door_Closed : Bool := TRUE; AirPressure_OK : Bool := TRUE;
+              // NC limit switches (FALSE = limit hit, fail-safe)
+              HW_NC_X_Min : Bool; HW_NC_X_Max : Bool; HW_NC_Z_Min : Bool; HW_NC_Z_Max : Bool;
+              // PNP NO proximity sensors (TRUE = limit zone, pre-warning before NC)
+              HW_PNP_X_Min : Bool; HW_PNP_X_Max : Bool; HW_PNP_Z_Min : Bool; HW_PNP_Z_Max : Bool; END_VAR
+    VAR_OUTPUT Running : Bool; IsPaused : Bool; Error : Bool; StatusID : Int; CurrentTool : Int; SafeToRun : Bool; END_VAR
+    VAR_IN_OUT Axis_X : TO_PositioningAxis; Axis_Z : TO_PositioningAxis;
+               Axis_Tool : TO_PositioningAxis; Axis_Spindle : TO_PositioningAxis; END_VAR
+    VAR State : Int;
+        
+        // Recipe handlers (one per program for flexibility)
+        fbRecipeHandler : "FB_RecipeHandler";
+        fbPreScan : "FB_RecipePreScan";
+        
+        // Support FBs
+        fbToolChanger : "FB_ToolChanger";
+        fbHomeX, fbHomeZ, fbHomeTool : "FB_Axis_Home";
+        fbSpindleControl : "FB_SpindleControl";
+        fbManualMode : "FB_ManualMode";
+        fbPowerX, fbPowerZ, fbPowerTool : "FB_Axis_Power";
+        fbResetX, fbResetZ, fbResetTool, fbResetSpindle : "FB_Axis_Reset";
+        fbInputs : "FB_InputManager";
+        fbLimitMonitor : "FB_LimitMonitor";
+        fbSafetyMonitor : "FB_SafetyMonitor";
+        fbAlarmManager : "FB_AlarmManager";
+        // Additional motion FBs for moving to position 0 after stop
+        fbMoveX_Stop, fbMoveZ_Stop : "FB_Axis_AbsPos";
+        // Homing clearance moves (pre + post homing)
+        fbMoveX_HomeClr, fbMoveZ_HomeClr : "FB_Axis_AbsPos";
+        bHomeClrX, bHomeClrZ : Bool;
+        // PNP proximity sensor halt: controlled stop when PNP zone entered in auto mode
+        fbHaltX_PNP, fbHaltZ_PNP : "FB_Axis_Halt";
+        bHaltX_PNP, bHaltZ_PNP : Bool;  // Halt execute flags (cleared when state returns to STOPPED)
+        
+        // Control flags
+        bPreScanExec : Bool;
+        bResetRecipe : Bool;    // One-shot flag to reset FB_RecipeHandler
+        bStartSeq, bToolExecute, bPauseActive : Bool;
+        bStopMoveX, bStopMoveZ : Bool;       // Flags for moving to position 0 after stop
+        // Sequential homing (startup): home X then Z then Tool in active mode (mode 3)
+        bHomeXExec : Bool;
+        bHomeZExec : Bool;
+        bHomeToolExec : Bool;
+        homeSeqState : Int;   // 0=idle, 1=homing X, 2=homing Z, 3=homing Tool
+        activeToolReq : Int; activeToolDone : Bool;
+        newErrorFlag : Bool; newErrorCode : Word;
+        bSpindleStart, bSpindleStop, bDrivesEnable : Bool;
+        prevAckError, prevRestart, prevContinue, ackEdge, restartEdge, continueEdge : Bool;
+        prevApplyToolConfig : Bool;   // previous ApplyToolConfig button state
+        applyToolEdge : Bool;         // rising edge for apply tool mapping
+        prevProdReset, prevLastCycleReset, prodResetEdge, lastCycleResetEdge : Bool;
+        prevSafetyError : Bool;
+        prevDriveFaultX : Bool;  // Edge detection: X drive power failure
+        prevDriveFaultZ : Bool;  // Edge detection: Z drive power failure
+        prevManualError : Bool;  // Edge detection: manual mode error
+        bInitDone    : Bool;   // TRUE after first PLC scan; prevents re-triggering startup reset
+        bDoHardReset : Bool;   // Pulse: set TRUE to trigger hard-reset block this scan (startup + Cmd_Reset)
+
+        applyIndex : Int;  // Loop index for tool config apply
+
+        // Active recipe reference
+        activeProgram : Int;
+        activeLineCount : Int;
+
+        // ToolHeadLock timers
+        tonLockWait : TON;      // Fallback timeout for states 17 and 29 (T#1S)
+        tonLockPreDelay : TON;  // Pre-delay before commanding extend in state 17 (T#1S)
+        // TRUE = LOCK_RETRACT_WAIT exits to STATE_STOP_GOHOME (homing after stop)
+        // FALSE = exits to STATE_TOOL_CHANGE
+        bLockAfterHoming : Bool;
+        // Sheet wait (STATE_SHEET_WAIT = 14)
+        bSheetWaitPhase2     : Bool;   // FALSE = showing insert-sheet prompt; TRUE = MandrelLock extending (T#5S)
+        tonMandrelWait       : TON;    // T#5S open-loop stroke wait for MandrelLock
+        bMandrelRetractPulse : Bool;   // One-shot: pulse Cmd_Retract for one scan to release FB from State 3 (Mode=0)
+
+        // Cycle timer
+        tonElapsed : TON;
+        // Homing timeout: fires if homing sequence takes longer than 120s
+        tonHomingTimeout : TON;
+        // Drive ready timeout: fires if drives do not become ready within 3s of STATE_STARTING
+        tonDriveReady : TON;
+        // Spindle deceleration wait
+        tonSpindleDecel      : TON;   // Decel wait timer
+        bSpindleDecelWait    : Bool;  // TRUE while waiting for decel to complete
+        bSpindlePendingStart : Bool;  // Deferred start captured during decel wait
+        pendingSpindleSpeed  : Real;  // Speed to apply when timer expires
+        elapsedAccum : Time;         // Accumulated elapsed time
+        timerRunning : Bool;         // Timer active flag
+        elapsedSeconds : DInt;       // Seconds counter
+        
+        // Warm restart
+        savedLineIndex : Int := -1;  // Saved line for restart (-1 = none)
+        savedProgram : Int := -1;    // Saved program for restart
+
+        // Production logging
+        prevState : Int;             // For state edge detection
+        prodTimeNow : DTL;
+        prodTimeStatus : Int;
+
+        // Spindle history ring buffer: previous values for change detection
+        // A new snapshot is pushed only when one of these changes.
+        prevSnap_State       : Int;
+        prevSnap_PrevStart   : Bool;
+        prevSnap_ReqStart    : Bool;
+        prevSnap_StartEdge   : Bool;
+        prevSnap_MoveVelBusy : Bool;  // MC_MoveVelocity.Busy -- triggers snapshot when TO accepts/drops command
+
+    END_VAR
+    
+    CONST
+        STATE_STOPPED : Int := 0;
+        STATE_MANUAL : Int := 5;
+        STATE_STARTING : Int := 10;
+        STATE_PRE_SCAN : Int := 12;
+        STATE_PRE_HOME_CLR : Int := 13;      // Pre-homing clearance move out of PNP zone
+        STATE_SHEET_WAIT   : Int := 14;      // Sheet insertion wait: show prompt, extend MandrelLock, then → LOCK_EXTEND_WAIT
+        STATE_HOMING : Int := 15;
+        STATE_POST_HOME_CLR : Int := 16;     // Post-homing clearance move away from PNP zone
+        STATE_STOPPING : Int := 18;
+        STATE_STOP_GOHOME : Int := 19;
+        STATE_STOP_GOTOZERO : Int := 21;
+        STATE_PNP_HALT : Int := 22;          // PNP limit zone -- halt active, reverse jog allowed
+        STATE_RUNNING : Int := 20;
+        STATE_PAUSED : Int := 25;
+        STATE_TOOL_CHANGE : Int := 30;
+        STATE_TOOL_WAIT : Int := 35;
+        STATE_LOCK_EXTEND_WAIT : Int := 17;   // ToolHeadLock engaging before RUNNING
+        STATE_LOCK_RETRACT_WAIT : Int := 29;  // ToolHeadLock releasing before tool change or homing
+        STATE_ERROR : Int := 999;
+    END_CONST
+BEGIN
+    // Update HMI displays
+    "DB_HMI".ActualX := #Axis_X.ActualPosition;
+    "DB_HMI".ActualZ := #Axis_Z.ActualPosition;
+    "DB_HMI".MachineState := #State;
+
+    // =========================================================================
+    // FIRST-SCAN STARTUP INIT
+    // =========================================================================
+    // On the very first PLC scan after power-up or warm restart, trigger a hard
+    // reset. This forces a known-clean machine state explicitly rather than
+    // relying solely on NON_RETAIN default values. Covers any case where the
+    // state machine variable did not reset cleanly (e.g. mid-homing on restart).
+    IF NOT #bInitDone THEN
+        #bDoHardReset := TRUE;
+        #bInitDone    := TRUE;
+    END_IF;
+
+    // Edge detection for buttons
+    #ackEdge := "DB_HMI".Btn_AckError AND NOT #prevAckError;
+    #prevAckError := "DB_HMI".Btn_AckError;
+    #restartEdge := "DB_HMI".Btn_Restart AND NOT #prevRestart;
+    #prevRestart := "DB_HMI".Btn_Restart;
+    #continueEdge := "DB_HMI".Btn_Continue AND NOT #prevContinue;
+    #prevContinue := "DB_HMI".Btn_Continue;
+    // Apply Tool Config edge
+    #applyToolEdge := "DB_HMI".Btn_ApplyToolConfig AND NOT #prevApplyToolConfig;
+    #prevApplyToolConfig := "DB_HMI".Btn_ApplyToolConfig;
+    #prodResetEdge := "DB_HMI".Btn_ProdReset AND NOT #prevProdReset;
+    #prevProdReset := "DB_HMI".Btn_ProdReset;
+    #lastCycleResetEdge := "DB_HMI".Btn_LastCycleReset AND NOT #prevLastCycleReset;
+    #prevLastCycleReset := "DB_HMI".Btn_LastCycleReset;
+    
+    // Get active program from HMI (lock during RUNNING to prevent mid-program switch)
+    IF #State < STATE_STARTING OR #State >= STATE_ERROR THEN
+        #activeProgram := "DB_HMI".ProductSelect;
+        IF #activeProgram < 1 THEN #activeProgram := 1; END_IF;
+        IF #activeProgram > 5 THEN #activeProgram := 5; END_IF;
+    END_IF;
+
+    // Apply tool-slot mapping from HMI -> DB_ToolConfig when operator requests it.
+    IF #applyToolEdge THEN
+        // Only copy up to 4 slots; respect configured ToolCount
+        FOR #applyIndex := 1 TO 4 DO
+            IF #applyIndex <= "DB_MachineConfig".ToolCount THEN
+                "DB_ToolConfig".ToolCode_List[#applyIndex] := "DB_HMI".ToolSlotCode[#applyIndex];
+            END_IF;
+        END_FOR;
+    END_IF;
+    
+    // Safety monitor
+    #fbSafetyMonitor(EStop_OK := #EStop_OK, Door_Closed := #Door_Closed, AirPressure_OK := #AirPressure_OK,
+                     DrivesReady := #fbPowerX.Status AND #fbPowerZ.Status,
+                     Bypass_EStop := "DB_HMI".Bypass_EStop,
+                     Bypass_Door := "DB_HMI".Bypass_Door,
+                     Bypass_AirPressure := "DB_HMI".Bypass_AirPressure,
+                     Bypass_Drives := "DB_HMI".Bypass_Drives);
+    
+    // Power control
+    #bDrivesEnable := (#EStop_OK OR "DB_HMI".Bypass_EStop) AND (#State <> STATE_ERROR);
+    #fbPowerX(Enable := #bDrivesEnable, Axis := #Axis_X);
+    #fbPowerZ(Enable := #bDrivesEnable, Axis := #Axis_Z);
+    #fbPowerTool(Enable := #bDrivesEnable AND NOT "DB_MachineConfig".Bypass_ToolAxis, Axis := #Axis_Tool);
+
+    // Drive power failure detection -- capture TO ErrorID and write to diagnostic
+    // Checked every scan; alarm is raised only when a new error occurs (rising edge).
+    // STATE_PRE_SCAN(12) is treated like STATE_STOPPED(0): contactors are still open during
+    // pre-scan (closed only in STATE_STARTING), so a drive fault here is typically a latched
+    // fault from a previous run or a transient after TO reset -- not a new startup failure.
+    // The drive ready check (tonDriveReady) and MC_Home.Error in STATE_STARTING handle genuine
+    // startup faults. Firing STATE_ERROR in PRE_SCAN would abort the recipe validation for no reason.
+    IF #fbPowerX.Error THEN
+        "DB_Diagnostic".Power_X_ErrorID := #fbPowerX.ErrorID;
+        "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #fbPowerX.ErrorID);
+        IF NOT #prevDriveFaultX THEN
+            #newErrorFlag := TRUE;
+            #newErrorCode := 16#0009;
+            "DB_HMI".ErrorText      := 'X drive power failed';
+            "DB_HMI".ErrorText_ES   := 'Fallo de potencia variador X';
+            "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+            "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN THEN
+                #State := STATE_ERROR;
+            END_IF;
+        END_IF;
+        #prevDriveFaultX := TRUE;
+    ELSE
+        #prevDriveFaultX := FALSE;
+    END_IF;
+
+    IF #fbPowerZ.Error THEN
+        "DB_Diagnostic".Power_Z_ErrorID := #fbPowerZ.ErrorID;
+        "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #fbPowerZ.ErrorID);
+        IF NOT #prevDriveFaultZ THEN
+            #newErrorFlag := TRUE;
+            #newErrorCode := 16#000A;
+            "DB_HMI".ErrorText      := 'Z drive power failed';
+            "DB_HMI".ErrorText_ES   := 'Fallo de potencia variador Z';
+            "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+            "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN THEN
+                #State := STATE_ERROR;
+            END_IF;
+        END_IF;
+        #prevDriveFaultZ := TRUE;
+    ELSE
+        #prevDriveFaultZ := FALSE;
+    END_IF;
+
+    // Limit monitor
+    #fbLimitMonitor(ActualPos_X := #Axis_X.ActualPosition, ActualPos_Z := #Axis_Z.ActualPosition,
+                    HW_NC_X_Min := #HW_NC_X_Min, HW_NC_X_Max := #HW_NC_X_Max,
+                    HW_NC_Z_Min := #HW_NC_Z_Min, HW_NC_Z_Max := #HW_NC_Z_Max,
+                    HW_PNP_X_Min := #HW_PNP_X_Min, HW_PNP_X_Max := #HW_PNP_X_Max,
+                    HW_PNP_Z_Min := #HW_PNP_Z_Min, HW_PNP_Z_Max := #HW_PNP_Z_Max);
+    // During homing the axis may move outside soft limits (moving toward home switch).
+    // All four homing-related states are bypassed: PRE_HOME_CLR, HOMING, POST_HOME_CLR,
+    // and STOP_GOHOME. Without bypassing PRE/POST_HOME_CLR the clearance moves could
+    // trip a spurious soft-limit fault before homing even begins (TO position = 0 after restart).
+    // STATE_MANUAL and STATE_PNP_HALT are also bypassed to match PNP sensor bypass behaviour.
+    // STATE_PRE_SCAN(12) and STATE_STARTING(10) are bypassed because:
+    //   PRE_SCAN: pure software validation, no motion -- TO position may be stale from last run.
+    //   STARTING: contactors just closing, drives not yet ready -- homing will establish real position.
+    // HW limit switch faults are caught by TO → MC_Home.Error → handled in state machine.
+    IF #State = STATE_HOMING OR #State = STATE_STOP_GOHOME
+       OR #State = STATE_PRE_HOME_CLR OR #State = STATE_POST_HOME_CLR
+       OR #State = STATE_MANUAL OR #State = STATE_PNP_HALT
+       OR #State = STATE_PRE_SCAN OR #State = STATE_STARTING THEN
+        #SafeToRun := #fbSafetyMonitor.SafeToRun;   // Soft limit bypass
+    ELSE
+        #SafeToRun := #fbSafetyMonitor.SafeToRun AND NOT #fbLimitMonitor.LimitError;
+    END_IF;
+    
+    // Safety error handling
+    // NOTE: Alarm is only raised from active states such as RUNNING/MANUAL.
+    // No new alarm is raised in STOPPED (0) or ERROR (999) state;
+    // this prevents drive enable delay after ACK/Reset from creating spurious alarms.
+    IF NOT #fbSafetyMonitor.SafeToRun AND #fbSafetyMonitor.ErrorCode <> 0 THEN
+        IF NOT #prevSafetyError AND #State <> 0 AND #State <> STATE_ERROR THEN
+            #newErrorFlag := TRUE; #newErrorCode := #fbSafetyMonitor.ErrorCode;
+        END_IF;
+        IF #State <> 0 AND #State <> STATE_ERROR THEN #State := STATE_ERROR; END_IF;
+        #prevSafetyError := TRUE;
+    ELSE
+        #prevSafetyError := FALSE;
+    END_IF;
+
+    // Soft limit error handling -- triggers STATE_ERROR when axis exceeds configured soft limits.
+    // NC hardware limit switches are removed from LimitMonitor; TO handles them natively.
+    // Bypassed in all four homing-related states: during homing the axis position is invalid
+    // until the reference seek completes (TO position = 0 before homing = false soft-limit trip).
+    // STATE_MANUAL and STATE_PNP_HALT also bypassed to match PNP sensor bypass behaviour.
+    // STATE_PRE_SCAN(12) and STATE_STARTING(10) bypassed: TO position may be stale or zero
+    // before homing; firing here would abort startup for a position that was valid last run.
+    IF #fbLimitMonitor.LimitError AND #fbLimitMonitor.ErrorCode <> 0
+       AND #State <> STATE_HOMING AND #State <> STATE_STOP_GOHOME
+       AND #State <> STATE_PRE_HOME_CLR AND #State <> STATE_POST_HOME_CLR
+       AND #State <> STATE_MANUAL AND #State <> STATE_PNP_HALT
+       AND #State <> STATE_PRE_SCAN AND #State <> STATE_STARTING
+       AND #State <> STATE_STOPPED AND #State <> STATE_ERROR THEN
+        #newErrorFlag := TRUE;
+        #newErrorCode := #fbLimitMonitor.ErrorCode;
+        #State := STATE_ERROR;
+    END_IF;
+
+    // PNP proximity sensor halt -- auto mode only.
+    // Bypassed in: homing states (PNP zone expected during reference seek),
+    //              manual mode (operator in direct control, TO handles HW limits),
+    //              STOPPED, PNP_HALT, and ERROR (no active motion to halt).
+    // Triggers: MC_Halt on affected axis + STATE_PNP_HALT.
+    // In STATE_PNP_HALT: drives stay ON, FB_ManualMode active, reverse jog allowed to escape zone.
+    IF #State <> STATE_HOMING AND #State <> STATE_STOP_GOHOME
+       AND #State <> STATE_PRE_HOME_CLR AND #State <> STATE_POST_HOME_CLR
+       AND #State <> STATE_MANUAL AND #State <> STATE_STOPPED
+       AND #State <> STATE_PNP_HALT AND #State <> STATE_ERROR THEN
+        IF #HW_PNP_X_Min AND NOT #bHaltX_PNP THEN
+            #bHaltX_PNP := TRUE;
+            #newErrorFlag := TRUE; #newErrorCode := 16#0121;
+            "DB_HMI".ErrorText      := 'PNP limit: X axis MIN zone';
+            "DB_HMI".ErrorText_ES   := 'Limite PNP: zona MIN Eje X';
+            "DB_HMI".ErrorDetail    := 'X axis MIN proximity triggered - select X, jog + to escape';
+            "DB_HMI".ErrorDetail_ES := 'Proximidad MIN Eje X activa - seleccionar X, joguear + para salir';
+            #State := STATE_PNP_HALT;
+        END_IF;
+        IF #HW_PNP_X_Max AND NOT #bHaltX_PNP THEN
+            #bHaltX_PNP := TRUE;
+            #newErrorFlag := TRUE; #newErrorCode := 16#0122;
+            "DB_HMI".ErrorText      := 'PNP limit: X axis MAX zone';
+            "DB_HMI".ErrorText_ES   := 'Limite PNP: zona MAX Eje X';
+            "DB_HMI".ErrorDetail    := 'X axis MAX proximity triggered - select X, jog - to escape';
+            "DB_HMI".ErrorDetail_ES := 'Proximidad MAX Eje X activa - seleccionar X, joguear - para salir';
+            #State := STATE_PNP_HALT;
+        END_IF;
+        IF #HW_PNP_Z_Min AND NOT #bHaltZ_PNP THEN
+            #bHaltZ_PNP := TRUE;
+            #newErrorFlag := TRUE; #newErrorCode := 16#0123;
+            "DB_HMI".ErrorText      := 'PNP limit: Z axis MIN zone';
+            "DB_HMI".ErrorText_ES   := 'Limite PNP: zona MIN Eje Z';
+            "DB_HMI".ErrorDetail    := 'Z axis MIN proximity triggered - select Z, jog + to escape';
+            "DB_HMI".ErrorDetail_ES := 'Proximidad MIN Eje Z activa - seleccionar Z, joguear + para salir';
+            #State := STATE_PNP_HALT;
+        END_IF;
+        IF #HW_PNP_Z_Max AND NOT #bHaltZ_PNP THEN
+            #bHaltZ_PNP := TRUE;
+            #newErrorFlag := TRUE; #newErrorCode := 16#0124;
+            "DB_HMI".ErrorText      := 'PNP limit: Z axis MAX zone';
+            "DB_HMI".ErrorText_ES   := 'Limite PNP: zona MAX Eje Z';
+            "DB_HMI".ErrorDetail    := 'Z axis MAX proximity triggered - select Z, jog - to escape';
+            "DB_HMI".ErrorDetail_ES := 'Proximidad MAX Eje Z activa - seleccionar Z, joguear - para salir';
+            #State := STATE_PNP_HALT;
+        END_IF;
+    END_IF;
+    // Safety clear: halt flags released when we return to idle
+    IF #State = STATE_STOPPED THEN
+        #bHaltX_PNP := FALSE;
+        #bHaltZ_PNP := FALSE;
+    END_IF;
+
+    // Input manager
+    #fbInputs(HMI_Start := "DB_HMI".Btn_Start, HMI_Stop := "DB_HMI".Btn_Stop,
+              HMI_Pause := "DB_HMI".Btn_Pause, HMI_Reset := "DB_HMI".Btn_Reset,
+              Panel_Start := #Panel_Start, Panel_Stop := #Panel_Stop,
+              Panel_Pause := #Panel_Pause, Panel_Reset := #Panel_Reset,
+              Rem_Start := #Rem_Start, Rem_Stop := #Rem_Stop);
+    
+    // Command processing
+    IF #fbInputs.Cmd_Stop THEN 
+        // STOP: controlled stop without generating an error + return to safe position
+        #bPauseActive := FALSE; 
+        #bStartSeq := FALSE; 
+        // If running, go to special STOP sequence; otherwise go directly to STOPPED
+        IF (#State >= STATE_STARTING AND #State < STATE_ERROR AND #State <> 100) OR (#State = STATE_PAUSED) THEN
+            #State := STATE_STOPPING;
+        ELSE
+            #State := STATE_STOPPED;
+        END_IF;
+    END_IF;
+    // Reset and Restart are blocked while E-Stop is active.
+    // Operator must physically release E-Stop before clearing any error state.
+    IF #fbInputs.Cmd_Reset AND (#EStop_OK OR "DB_HMI".Bypass_EStop) THEN
+        #bDoHardReset := TRUE;
+    END_IF;
+
+    // Btn_Restart - restart program from beginning (from ERROR or PAUSED).
+    // This block fires BEFORE the CASE state machine, so CASE 999/25 restart handlers
+    // are bypassed. All required cleanup must be done here.
+    IF #restartEdge AND (#State = STATE_ERROR OR #State = STATE_PAUSED)
+       AND (#EStop_OK OR "DB_HMI".Bypass_EStop) THEN
+        #State := STATE_STOPPED;
+        #bPauseActive := FALSE;
+        #Error := FALSE;
+        #bResetRecipe := TRUE;      // Reset recipe handler to IDLE (was missing -- bug fix)
+        #prevSafetyError := FALSE;  // Fresh safety evaluation on restart
+        #savedLineIndex := -1;
+        #savedProgram := -1;
+        "DB_HMI".ResumeLine := -1;
+        #bMandrelRetractPulse := TRUE;  // Release mandrel lock (may be extended from RUNNING/PAUSED)
+        #fbAlarmManager(NewError := FALSE, NewErrorCode := 0,
+                        AcknowledgeError := TRUE);  // Clear active alarm (was missing -- bug fix)
+    END_IF;
+    
+    // Pause - one-shot SET only (no toggle). Only Btn_Continue resumes.
+    IF #fbInputs.Cmd_Pause AND #Running AND NOT #bPauseActive THEN #bPauseActive := TRUE; END_IF;
+    
+    #Running := (#State >= 10) AND (#State < STATE_ERROR);
+    #IsPaused := (#State = STATE_PAUSED);
+    
+    // Update HMI status lamps
+    "DB_HMI".IsRunning := #Running;
+    "DB_HMI".IsPaused := #IsPaused;
+    "DB_HMI".HasError := (#State = STATE_ERROR);
+
+    // Warning: only E-Stop bypass is shown on HMI (Door/Air/Drive bypasses silently permitted for setup)
+    "DB_HMI".HasWarning := "DB_HMI".Bypass_EStop;
+    IF "DB_HMI".Bypass_EStop THEN
+        "DB_HMI".WarningText    := 'E-Stop bypass ON - auto start blocked';
+        "DB_HMI".WarningText_ES := 'Paro de emergencia desactivado - inicio automatico bloqueado';
+    ELSE
+        "DB_HMI".WarningText    := '';
+        "DB_HMI".WarningText_ES := '';
+    END_IF;
+    
+    // Update HMI status message based on state (English + Spanish)
+    CASE #State OF
+        0:   "DB_HMI".StatusMsg := 'Stopped';                            "DB_HMI".StatusMsg_ES := 'Detenido';
+        5:   "DB_HMI".StatusMsg := 'Manual Mode';                        "DB_HMI".StatusMsg_ES := 'Modo Manual';
+        10:  "DB_HMI".StatusMsg := 'Starting...';                        "DB_HMI".StatusMsg_ES := 'Iniciando...';
+        12:  "DB_HMI".StatusMsg := 'Pre-scanning...';                    "DB_HMI".StatusMsg_ES := 'Verificando receta...';
+        13:  "DB_HMI".StatusMsg := 'Clearing PNP zone...';               "DB_HMI".StatusMsg_ES := 'Liberando zona PNP...';
+        14:  "DB_HMI".StatusMsg := 'Waiting for sheet...';               "DB_HMI".StatusMsg_ES := 'Esperando lamina...';
+        15:  "DB_HMI".StatusMsg := 'Homing...';                          "DB_HMI".StatusMsg_ES := 'Referenciando...';
+        16:  "DB_HMI".StatusMsg := 'Post-home clearance...';             "DB_HMI".StatusMsg_ES := 'Despejando zona PNP...';
+        17:  "DB_HMI".StatusMsg := 'Lock engaging...';                   "DB_HMI".StatusMsg_ES := 'Bloqueando cabezal...';
+        18:  "DB_HMI".StatusMsg := 'Stopping...';                        "DB_HMI".StatusMsg_ES := 'Deteniendo...';
+        29:  "DB_HMI".StatusMsg := 'Lock releasing...';                  "DB_HMI".StatusMsg_ES := 'Liberando bloqueo...';
+        19:  "DB_HMI".StatusMsg := 'Homing (post-stop)...';              "DB_HMI".StatusMsg_ES := 'Referenciando (post-paro)...';
+        20:  "DB_HMI".StatusMsg := 'Running';                            "DB_HMI".StatusMsg_ES := 'Ejecutando';
+        21:  "DB_HMI".StatusMsg := 'Returning to zero...';               "DB_HMI".StatusMsg_ES := 'Retornando a cero...';
+        22:  "DB_HMI".StatusMsg := 'PNP Halt - jog to escape limit zone';"DB_HMI".StatusMsg_ES := 'Zona PNP - joguear para salir';
+        25:  "DB_HMI".StatusMsg := 'Paused';                             "DB_HMI".StatusMsg_ES := 'Pausado';
+        30:  "DB_HMI".StatusMsg := 'Tool Change';                        "DB_HMI".StatusMsg_ES := 'Cambio de Herramienta';
+        35:  "DB_HMI".StatusMsg := 'Tool Change Wait';                   "DB_HMI".StatusMsg_ES := 'Esperando cambio...';
+        100: "DB_HMI".StatusMsg := 'Program Complete';                   "DB_HMI".StatusMsg_ES := 'Programa Completado';
+        999: "DB_HMI".StatusMsg := 'ERROR';                              "DB_HMI".StatusMsg_ES := 'ERROR';
+    END_CASE;
+    
+    // =========================================================================
+    // ALARM MANAGER - call FIRST so outputs are ready for DB_HMI
+    // =========================================================================
+    // NOTE: Acknowledge is done only on edge (ackEdge), not level.
+    // This keeps ActiveError/HMI bools visible until the operator actually presses Ack.
+    #fbAlarmManager(NewError := #newErrorFlag, NewErrorCode := #newErrorCode,
+                    AcknowledgeError := #ackEdge OR #fbInputs.Cmd_Reset);
+    #newErrorFlag := FALSE;
+    
+    // Debug helpers: copy alarm/diagnostic info into DB_Diagnostic for easy tracing
+    // This ensures a snapshot of the latest active error code is always visible for debugging.
+    "DB_Diagnostic".Error_ProcessState := #State;
+    "DB_Diagnostic".Error_Code := #fbAlarmManager.ActiveErrorCode;
+    // If recipe reported a line error, keep that; otherwise -1
+    IF "DB_Diagnostic".Error_Line < 0 THEN
+        "DB_Diagnostic".Error_Line := -1;
+    END_IF;
+
+    // Copy alarm outputs to HMI (now reads CURRENT scan values)
+    "DB_HMI".ErrorID       := #fbAlarmManager.ActiveErrorCode;
+    "DB_HMI".ErrorText     := #fbAlarmManager.ActiveErrorText;
+    "DB_HMI".ErrorText_ES  := #fbAlarmManager.ActiveErrorText_ES;
+    // ITEM-08: If no active alarm text but a safety condition is blocking, show it.
+    // This covers the case where the operator is in STOPPED state with door open / E-Stop active
+    // after a previous error was acknowledged — AlarmManager cleared its text but the safety
+    // condition is still live and writing to DB_Diagnostic.Error_Text.
+    // Use compact customer-facing text here; DB_Diagnostic keeps the developer detail.
+    IF "DB_HMI".ErrorText = '' AND NOT #fbSafetyMonitor.SafeToRun THEN
+        CASE #fbSafetyMonitor.ErrorCode OF
+            16#0401: "DB_HMI".ErrorText := 'EMERGENCY STOP active';
+                     "DB_HMI".ErrorText_ES := 'PARO DE EMERGENCIA activo';
+            16#0402: "DB_HMI".ErrorText := 'Safety door open';
+                     "DB_HMI".ErrorText_ES := 'Puerta de seguridad abierta';
+            16#0403: "DB_HMI".ErrorText := 'Drives not ready';
+                     "DB_HMI".ErrorText_ES := 'Variadores no listos';
+            16#0404: "DB_HMI".ErrorText := 'Air pressure low';
+                     "DB_HMI".ErrorText_ES := 'Presion de aire baja';
+            ELSE     "DB_HMI".ErrorText := 'Safety interlock active';
+                     "DB_HMI".ErrorText_ES := 'Interlock de seguridad activo';
+        END_CASE;
+    END_IF;
+    "DB_HMI".CurrentTool := #CurrentTool;
+    
+    // Reset TO errors (only on AckError or full reset)
+    // BUG FIX: MC_Reset is triggered only by edge signals. Btn_AckError level signal
+    // is not used -- when the button is held, Execute stays HIGH continuously, which
+    // adversely affects TO error management (new errors may be masked).
+    #fbResetX(Execute := #ackEdge OR #fbInputs.Cmd_Reset, Axis := #Axis_X);
+    #fbResetZ(Execute := #ackEdge OR #fbInputs.Cmd_Reset, Axis := #Axis_Z);
+    #fbResetTool(Execute := #ackEdge OR #fbInputs.Cmd_Reset, Axis := #Axis_Tool);
+    #fbResetSpindle(Execute := #ackEdge OR #fbInputs.Cmd_Reset, Axis := #Axis_Spindle);
+
+    // =========================================================================
+    // HARD RESET
+    // =========================================================================
+    // Single place that defines what a full reset clears.
+    // Triggered from exactly two places:
+    //   1. bInitDone block (first PLC scan after power-up / warm restart)
+    //   2. Cmd_Reset handler (operator presses Reset button)
+    // Motion-FB execute flags (bHomeXExec, bStopMoveX, etc.) are cleared by the
+    // STATE_STOPPED CASE block which runs on this same scan right after this block.
+    IF #bDoHardReset THEN
+        #State           := STATE_STOPPED;
+        #Error           := FALSE;
+        #bPauseActive    := FALSE;
+        #savedLineIndex  := -1;
+        #savedProgram    := -1;
+        "DB_HMI".ResumeLine := -1;
+        #prevSafetyError := FALSE;
+        #bResetRecipe         := TRUE;
+        #bSheetWaitPhase2     := FALSE;
+        #bMandrelRetractPulse := TRUE;   // Release mandrel lock regardless of which state was active
+        #bDoHardReset         := FALSE;
+    END_IF;
+
+    // =========================================================================
+    // MAIN STATE MACHINE
+    // =========================================================================
+    CASE #State OF
+
+        // -----------------------------------------------------------------
+        // === STATE_STOPPED (0) ===
+        // -----------------------------------------------------------------
+        0: // STOPPED
+            #StatusID := 0; #bStartSeq := FALSE; #bPreScanExec := FALSE;
+            "DB_HMI".ErrorText    := '';
+            "DB_HMI".ErrorText_ES := '';
+            // Clear ALL motion-FB execute flags every scan while stopped.
+            // Every path that reaches STATE_STOPPED (Cmd_Reset, Ack, Continue,
+            // Restart, normal stop sequence) therefore clears these automatically.
+            // Without this, a flag stuck TRUE (e.g. bHomeXExec after a homing error)
+            // keeps its MC_ FB running → error re-triggers immediately after reset.
+            #bHomeXExec    := FALSE; #bHomeZExec    := FALSE; #bHomeToolExec := FALSE;
+            #homeSeqState  := 0;
+            #bToolExecute  := FALSE;
+            #bStopMoveX    := FALSE; #bStopMoveZ    := FALSE;
+            #bHomeClrX     := FALSE; #bHomeClrZ     := FALSE;
+            #bLockAfterHoming := FALSE;
+            // Spindle
+            #bSpindleStart       := FALSE;
+            #bSpindleStop        := FALSE;
+            #bSpindleDecelWait   := FALSE;
+            #bSpindlePendingStart := FALSE;
+            // MandrelLock: clear Cmd_Extend (spring retracts on EStop/power-loss).
+            // Cmd_Retract is pulsed by bMandrelRetractPulse (set in STOPPING/COMPLETE) to
+            // force FB out of State 3 — Mode=0 does not auto-retract on Cmd_Extend=FALSE alone.
+            "DB_Cylinder_MandrelLock".Cmd_Extend := FALSE;
+            // BackSupport CMD=41 overrides: de-energise Sol_B and atmosphere valve at rest
+            "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;
+            "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
+
+            IF "DB_Manual".ManualModeActive AND #fbSafetyMonitor.SafeToJog THEN
+                #State := STATE_MANUAL;
+            ELSIF #fbInputs.Cmd_Start AND #SafeToRun AND NOT "DB_HMI".Bypass_EStop THEN
+                // Start pre-scan before running
+                // Bypass_EStop blocks auto start: bypass is for manual mode only
+                #State := STATE_PRE_SCAN;
+            END_IF;
+        
+        // -----------------------------------------------------------------
+        // === STATE_MANUAL (5) ===
+        // -----------------------------------------------------------------
+        5: // MANUAL
+            #StatusID := 50;
+            IF NOT "DB_Manual".ManualModeActive THEN
+                // Clear manual contactor flags before returning to STOPPED
+                // so stale HMI button states cannot activate outputs in STATE_STOPPED.
+                "DB_HMI".Btn_Contactor_X       := FALSE;
+                "DB_HMI".Btn_Contactor_Z       := FALSE;
+                "DB_HMI".Btn_Contactor_Tool    := FALSE;
+                "DB_HMI".Btn_Contactor_Spindle := FALSE;
+                "DB_HMI".Btn_Enable_X          := FALSE;
+                "DB_HMI".Btn_Enable_Z          := FALSE;
+                #State := 0;
+            ELSIF #fbInputs.Cmd_Start AND #SafeToRun AND NOT "DB_HMI".Bypass_EStop THEN
+                // Bypass_EStop blocks transition to auto: must be cleared before running
+                "DB_Manual".ManualModeActive := FALSE;
+                #State := STATE_PRE_SCAN;
+            END_IF;
+        
+        // -----------------------------------------------------------------
+        // === STATE_PRE_SCAN (12) ===
+        // -----------------------------------------------------------------
+        12: // PRE-SCAN - Validate recipe before running
+            #StatusID := 12;
+            #bPreScanExec := TRUE;
+            #bResetRecipe := FALSE;  // Clear one-shot reset flag (consumed this scan)
+            
+            // Line count read from the active recipe DB Header (written by CAM post-processor)
+            CASE #activeProgram OF
+                1: #activeLineCount := "DB_RecipeProgram1".Header.LineCount;
+                2: #activeLineCount := "DB_RecipeProgram2".Header.LineCount;
+                3: #activeLineCount := "DB_RecipeProgram3".Header.LineCount;
+                4: #activeLineCount := "DB_RecipeProgram4".Header.LineCount;
+                5: #activeLineCount := "DB_RecipeProgram5".Header.LineCount;
+            END_CASE;
+
+            // Validate: 0 = recipe not loaded (Header not written yet); >999 = impossible
+            IF #activeLineCount <= 0 OR #activeLineCount > 999 THEN
+                #newErrorCode := 16#0310;  // Recipe: invalid line count (not loaded?)
+                "DB_Diagnostic".Error_Text := 'Recipe not loaded: Header.LineCount invalid';
+                "DB_HMI".ErrorText    := 'Recipe not loaded';
+                "DB_HMI".ErrorText_ES := 'Receta no cargada';
+                #State := STATE_ERROR;
+            END_IF;
+            
+            // Call pre-scan based on active program
+            CASE #activeProgram OF
+                1: #fbPreScan(Execute := #bPreScanExec, LineCount := #activeLineCount, 
+                              Lines := "DB_RecipeProgram1".Lines);
+                2: #fbPreScan(Execute := #bPreScanExec, LineCount := #activeLineCount, 
+                              Lines := "DB_RecipeProgram2".Lines);
+                3: #fbPreScan(Execute := #bPreScanExec, LineCount := #activeLineCount, 
+                              Lines := "DB_RecipeProgram3".Lines);
+                4: #fbPreScan(Execute := #bPreScanExec, LineCount := #activeLineCount, 
+                              Lines := "DB_RecipeProgram4".Lines);
+                5: #fbPreScan(Execute := #bPreScanExec, LineCount := #activeLineCount, 
+                              Lines := "DB_RecipeProgram5".Lines);
+            END_CASE;
+            
+            // Update progress every scan during pre-scan (HMI bar)
+            "DB_HMI".PreScanProgress := #fbPreScan.Progress;
+
+            IF #fbPreScan.Done THEN
+                #bPreScanExec := FALSE;
+
+                // Update HMI with bounding box
+                "DB_HMI".BoundingBox_MinX := #fbPreScan.MinX;
+                "DB_HMI".BoundingBox_MaxX := #fbPreScan.MaxX;
+                "DB_HMI".BoundingBox_MinZ := #fbPreScan.MinZ;
+                "DB_HMI".BoundingBox_MaxZ := #fbPreScan.MaxZ;
+                "DB_HMI".BoundingBox_Valid := #fbPreScan.Valid;
+                
+                // Update diagnostic
+                "DB_Diagnostic".PreScan_Complete := TRUE;
+                "DB_Diagnostic".PreScan_Valid := #fbPreScan.Valid;
+                "DB_Diagnostic".PreScan_ErrorLine := #fbPreScan.ErrorLine;
+                
+                IF #fbPreScan.Valid THEN
+                    #State := STATE_STARTING;
+                ELSE
+                    // Pre-scan failed - limits exceeded
+                    #newErrorFlag := TRUE;
+                    #newErrorCode := 16#0305;
+                    "DB_HMI".ErrorText    := CONCAT(IN1 := 'PreScan Ln', IN2 := CONCAT(
+                                            IN1 := INT_TO_STRING(#fbPreScan.ErrorLine), IN2 := CONCAT(
+                                            IN1 := ': ', IN2 := #fbPreScan.ErrorDesc)));
+                    "DB_HMI".ErrorText_ES := 'PreVerificacion: trayectoria fuera de limites';
+                    "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Check line ', IN2 := INT_TO_STRING(#fbPreScan.ErrorLine));
+                    "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Revisar linea ', IN2 := INT_TO_STRING(#fbPreScan.ErrorLine));
+                    "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'PreScan failed Ln',
+                                                  IN2 := CONCAT(IN1 := INT_TO_STRING(#fbPreScan.ErrorLine),
+                                                  IN2 := CONCAT(IN1 := ': ', IN2 := #fbPreScan.ErrorDesc)));
+                    #State := STATE_ERROR;
+                END_IF;
+            END_IF;
+        
+        // -----------------------------------------------------------------
+        // === STATE_STARTING (10) ===
+        // -----------------------------------------------------------------
+        10: // STARTING
+            #StatusID := 1;
+            // Auto-enable drives for auto mode -- contactors and enable signals are set automatically.
+            // In manual mode (STATE_MANUAL) they are under HMI control; PLC takes over when switching to auto.
+            "DB_HMI".Btn_Contactor_X       := TRUE;
+            "DB_HMI".Btn_Contactor_Z       := TRUE;
+            "DB_HMI".Btn_Contactor_Tool    := NOT "DB_MachineConfig".Bypass_ToolAxis;
+            "DB_HMI".Btn_Contactor_Spindle := NOT "DB_HMI".Bypass_Spindle;
+            "DB_HMI".Btn_Enable_X          := TRUE;
+            "DB_HMI".Btn_Enable_Z          := TRUE;
+            // Wait for both drives to report ready before issuing any motion command.
+            // Physical contactor close + drive boot can take up to several hundred ms.
+            // tonDriveReady is called unconditionally near the timer section (auto-resets on exit).
+            IF #fbPowerX.Status AND #fbPowerZ.Status THEN
+                // Drives ready -- proceed to homing or running
+                IF NOT #Axis_X.StatusBits.HomingDone OR NOT #Axis_Z.StatusBits.HomingDone
+                   OR (NOT #Axis_Tool.StatusBits.HomingDone AND NOT "DB_MachineConfig".Bypass_ToolAxis)
+                   OR "DB_MachineConfig".AlwaysHomeOnAutoStart THEN
+                    // If in PNP zone, clear it first
+                    #bHomeClrX := #HW_PNP_X_Min AND NOT #Axis_X.StatusBits.HomingDone;
+                    #bHomeClrZ := #HW_PNP_Z_Min AND NOT #Axis_Z.StatusBits.HomingDone;
+                    IF #bHomeClrX OR #bHomeClrZ THEN
+                        #State := STATE_PRE_HOME_CLR;
+                    ELSE
+                        #homeSeqState := 1;
+                        #bHomeXExec := TRUE; #bHomeZExec := FALSE;
+                        #State := STATE_HOMING;
+                    END_IF;
+                ELSE
+                    // Axes already homed: engage lock before entering RUNNING
+                    #State := STATE_LOCK_EXTEND_WAIT;
+                END_IF;
+            ELSIF #tonDriveReady.Q THEN
+                // Timeout: drives did not become ready within 3s
+                #newErrorFlag := TRUE;
+                #newErrorCode := 16#000C;
+                "DB_HMI".ErrorText      := 'Drive ready timeout';
+                "DB_HMI".ErrorText_ES   := 'Tiempo de espera variador excedido';
+                "DB_HMI".ErrorDetail    := 'Contactor closed but drive not enabled - check wiring';
+                "DB_HMI".ErrorDetail_ES := 'Contactor cerrado pero variador no habilitado - revisar cableado';
+                #State := STATE_ERROR;
+            END_IF;
+        
+        // -----------------------------------------------------------------
+        // === STATE_HOMING (15) ===
+        // -----------------------------------------------------------------
+        15: // HOMING (sequential: X then Z in active homing mode 3)
+            #StatusID := 2;
+            // Ensure other stop/homing triggers are not interfering
+            IF #homeSeqState = 1 THEN
+                // Homing X
+                #bHomeXExec := TRUE;
+                #bHomeZExec := FALSE;
+                IF #fbHomeX.Done THEN
+                    #bHomeXExec := FALSE;
+                    #homeSeqState := 2;    // proceed to homing Z
+                    #bHomeZExec := TRUE;
+                ELSIF #fbHomeX.Error THEN
+                    #bHomeXExec := FALSE;
+                    #bHomeZExec := FALSE;
+                    #State := STATE_ERROR;
+                    #newErrorFlag := TRUE;
+                    #newErrorCode := 16#0003;
+                    "DB_Diagnostic".HomeX_ErrorID := #fbHomeX.ErrorID;
+                    "DB_Diagnostic".TO_ErrorText  := "FC_TO_ErrorText"(Code := #fbHomeX.ErrorID);
+                    "DB_HMI".ErrorText      := 'Homing failed: X axis';
+                    "DB_HMI".ErrorText_ES   := 'Fallo de referenciado: Eje X';
+                    "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                    "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                END_IF;
+            ELSIF #homeSeqState = 2 THEN
+                // Homing Z
+                #bHomeXExec := FALSE;
+                #bHomeZExec := TRUE;
+                IF #fbHomeZ.Done THEN
+                    #bHomeZExec := FALSE;
+                    IF NOT "DB_MachineConfig".Bypass_ToolAxis THEN
+                        // Proceed to tool axis homing (step 3)
+                        #homeSeqState := 3;
+                        #bHomeToolExec := TRUE;
+                    ELSE
+                        // Tool axis bypassed -- go to post-homing clearance
+                        #homeSeqState := 0;
+                        #bHomeClrX := TRUE; #bHomeClrZ := TRUE;
+                        #CurrentTool := 1;  // Tool axis homed to slot 1 position
+                        #State := STATE_POST_HOME_CLR;
+                    END_IF;
+                ELSIF #fbHomeZ.Error THEN
+                    #bHomeZExec := FALSE;
+                    #State := STATE_ERROR;
+                    #newErrorFlag := TRUE;
+                    #newErrorCode := 16#0004;
+                    "DB_Diagnostic".HomeZ_ErrorID := #fbHomeZ.ErrorID;
+                    "DB_Diagnostic".TO_ErrorText  := "FC_TO_ErrorText"(Code := #fbHomeZ.ErrorID);
+                    "DB_HMI".ErrorText      := 'Homing failed: Z axis';
+                    "DB_HMI".ErrorText_ES   := 'Fallo de referenciado: Eje Z';
+                    "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                    "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                END_IF;
+            ELSIF #homeSeqState = 3 THEN
+                // Homing Tool axis
+                #bHomeToolExec := TRUE;
+                IF #fbHomeTool.Done THEN
+                    #bHomeToolExec := FALSE;
+                    #homeSeqState := 0;
+                    // Tool done -- proceed to post-homing clearance for X and Z
+                    #bHomeClrX := TRUE; #bHomeClrZ := TRUE;
+                    #CurrentTool := 1;  // Tool axis homed to slot 1 position
+                    #State := STATE_POST_HOME_CLR;
+                ELSIF #fbHomeTool.Error THEN
+                    #bHomeToolExec := FALSE;
+                    #State := STATE_ERROR;
+                    #newErrorFlag := TRUE;
+                    #newErrorCode := 16#0007;
+                    "DB_Diagnostic".HomeTool_ErrorID := #fbHomeTool.ErrorID;
+                    "DB_Diagnostic".TO_ErrorText     := "FC_TO_ErrorText"(Code := #fbHomeTool.ErrorID);
+                    "DB_HMI".ErrorText      := 'Homing failed: Tool axis';
+                    "DB_HMI".ErrorText_ES   := 'Fallo de referenciado: Eje herramienta';
+                    "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                    "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                END_IF;
+            ELSE
+                // Fallback: if homeSeqState not set, go to STARTING check
+                #homeSeqState := 0;
+                #State := STATE_STARTING;
+            END_IF;
+            // Homing timeout: X+Z+Tool combined must complete within 120s
+            IF #tonHomingTimeout.Q THEN
+                #bHomeXExec := FALSE;
+                #bHomeZExec := FALSE;
+                #bHomeToolExec := FALSE;
+                #homeSeqState := 0;
+                #State := STATE_ERROR;
+                #newErrorFlag := TRUE;
+                #newErrorCode := 16#000B;
+                "DB_HMI".ErrorText      := 'Homing timeout (120s)';
+                "DB_HMI".ErrorText_ES   := 'Tiempo de referenciado excedido (120s)';
+                "DB_HMI".ErrorDetail    := 'Homing did not complete - check reference switch/drive';
+                "DB_HMI".ErrorDetail_ES := 'Referenciado no completado - revisar sensor/variador';
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_PRE_HOME_CLR (13) ===
+        // -----------------------------------------------------------------
+        13: // PRE_HOME_CLR -- Clear PNP zone before homing
+            #StatusID := 2;
+            // Transition to homing as soon as clearance move finishes
+            IF (NOT #bHomeClrX OR #fbMoveX_HomeClr.Done) AND (NOT #bHomeClrZ OR #fbMoveZ_HomeClr.Done) THEN
+                #bHomeClrX := FALSE; #bHomeClrZ := FALSE;
+                #homeSeqState := 1; #bHomeXExec := TRUE; #bHomeZExec := FALSE;
+                #State := STATE_HOMING;
+            ELSIF (#bHomeClrX AND #fbMoveX_HomeClr.Error) OR (#bHomeClrZ AND #fbMoveZ_HomeClr.Error) THEN
+                #bHomeClrX := FALSE; #bHomeClrZ := FALSE;
+                #newErrorFlag := TRUE; #newErrorCode := 16#0001;
+                "DB_HMI".ErrorText      := 'Pre-home clearance move failed';
+                "DB_HMI".ErrorText_ES   := 'Fallo al liberar zona PNP (pre-referencia)';
+                "DB_HMI".ErrorDetail    := 'Axis could not clear PNP zone before homing - check drive';
+                "DB_HMI".ErrorDetail_ES := 'Eje no pudo liberar zona PNP antes del referenciado - revisar variador';
+                #State := STATE_ERROR;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_POST_HOME_CLR (16) ===
+        // -----------------------------------------------------------------
+        16: // POST_HOME_CLR -- Move away from PNP zone after homing
+            #StatusID := 2;
+            IF (NOT #bHomeClrX OR #fbMoveX_HomeClr.Done) AND (NOT #bHomeClrZ OR #fbMoveZ_HomeClr.Done) THEN
+                #bHomeClrX := FALSE; #bHomeClrZ := FALSE;
+                // Homing done: wait for sheet insertion before engaging ToolHeadLock
+                #bSheetWaitPhase2 := FALSE;  // Always start in phase 1 (show prompt)
+                #State := STATE_SHEET_WAIT;
+            ELSIF (#bHomeClrX AND #fbMoveX_HomeClr.Error) OR (#bHomeClrZ AND #fbMoveZ_HomeClr.Error) THEN
+                #bHomeClrX := FALSE; #bHomeClrZ := FALSE;
+                #newErrorFlag := TRUE; #newErrorCode := 16#0001;
+                "DB_HMI".ErrorText      := 'Post-home clearance move failed';
+                "DB_HMI".ErrorText_ES   := 'Fallo al liberar zona PNP (post-referencia)';
+                "DB_HMI".ErrorDetail    := 'Axis could not move from PNP zone after homing - check drive';
+                "DB_HMI".ErrorDetail_ES := 'Eje no pudo salir de zona PNP despues del referenciado - revisar variador';
+                #State := STATE_ERROR;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_SHEET_WAIT (14) ===
+        // Phase 1: show "Insert sheet" HMI warning; wait for operator to press
+        //          both start buttons (Cmd_Start rising edge).
+        // Phase 2: extend MandrelLock (open-loop T#5S), then → STATE_LOCK_EXTEND_WAIT
+        //          so ToolHeadLock engages before RUNNING.
+        // -----------------------------------------------------------------
+        14: // SHEET_WAIT
+            #StatusID := 14;
+            IF NOT #bSheetWaitPhase2 THEN
+                // Phase 1: prompt operator to insert the sheet
+                "DB_HMI".HasWarning     := TRUE;
+                "DB_HMI".WarningText    := 'Insert sheet, then press both start buttons';
+                "DB_HMI".WarningText_ES := 'Inserte la lamina y presione ambos botones de inicio';
+                IF #fbInputs.Cmd_Start THEN
+                    // Operator confirmed — clear prompt and begin MandrelLock extension
+                    "DB_HMI".HasWarning     := FALSE;
+                    "DB_HMI".WarningText    := '';
+                    "DB_HMI".WarningText_ES := '';
+                    "DB_Cylinder_MandrelLock".Cmd_Extend := TRUE;
+                    #bSheetWaitPhase2 := TRUE;
+                END_IF;
+            ELSE
+                // Phase 2: open-loop wait T#5S for MandrelLock full stroke
+                // tonMandrelWait is driven by the global timer section below (IN when state=14 AND phase2)
+                IF #tonMandrelWait.Q THEN
+                    #State := STATE_LOCK_EXTEND_WAIT;  // ToolHeadLock engages, then → RUNNING
+                END_IF;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_RUNNING (20) ===
+        // -----------------------------------------------------------------
+        20: // RUNNING
+            #StatusID := 3; #bStartSeq := TRUE;
+            #timerRunning := TRUE;  // Start cycle timer
+            
+            // Update HMI
+            "DB_HMI".CurrentLine := #fbRecipeHandler.CurrentLine;
+            "DB_HMI".ProgressPercent := #fbRecipeHandler.Progress;
+            "DB_HMI".FeedrateActive := #fbRecipeHandler.ActiveFeedrate;
+            
+            IF #bPauseActive THEN #State := STATE_PAUSED; END_IF;
+            
+            // Tool change request (bypass if no tool axis)
+            IF #fbRecipeHandler.ToolChangeReq THEN
+                IF "DB_MachineConfig".Bypass_ToolAxis THEN
+                    // Skip tool change - clear request and continue
+                    #fbRecipeHandler.ToolChangeReq := FALSE;
+                ELSIF #fbRecipeHandler.ToolReqNumber = #CurrentTool THEN
+                    // Requested tool already in position (e.g. home = slot 1) - skip retract/rotate/extend
+                    #fbRecipeHandler.ToolChangeReq := FALSE;
+                ELSE
+                    #activeToolReq    := #fbRecipeHandler.ToolReqNumber;
+                    #bStartSeq        := FALSE;
+                    // Release lock before rotating turret: wait T#2S in LOCK_RETRACT_WAIT,
+                    // then proceed to STATE_TOOL_CHANGE.
+                    #bLockAfterHoming := FALSE;  // LOCK_RETRACT_WAIT exits to STATE_TOOL_CHANGE
+                    #State            := STATE_LOCK_RETRACT_WAIT;
+                END_IF;
+            END_IF;
+            
+            // Spindle control from recipe
+            IF #fbRecipeHandler.SpindleReqStart THEN
+                IF #bSpindleDecelWait THEN
+                    // Decel timer still running — capture for deferred apply
+                    #bSpindlePendingStart := TRUE;
+                    #pendingSpindleSpeed  := #fbRecipeHandler.SpindleReqSpeed;
+                ELSE
+                    #bSpindleStart := TRUE;
+                    "DB_Spindle".Cmd_SetSpeed := #fbRecipeHandler.SpindleReqSpeed;
+                END_IF;
+            END_IF;
+            IF #fbRecipeHandler.SpindleReqStop THEN
+                #bSpindleStart       := FALSE;  // Drop RunCmd level
+                #bSpindleDecelWait   := TRUE;   // Start decel wait
+                #bSpindlePendingStart := FALSE; // Cancel any previous pending start
+            END_IF;
+
+            // Complete
+            IF #fbRecipeHandler.Done THEN 
+                #State := 100;  // Go to COMPLETE state, not IDLE
+                "DB_HMI".ProgressPercent := 100.0;
+                #bSpindleStart := FALSE;  // Drop RunCmd level on completion
+                #timerRunning := FALSE; // Stop cycle timer
+                #savedLineIndex := -1;  // Clear saved position
+                #savedProgram := -1;
+            END_IF;
+            
+            // Error
+            IF #fbRecipeHandler.Error THEN 
+                #State := STATE_ERROR;
+                #newErrorFlag := TRUE; 
+                #newErrorCode := #fbRecipeHandler.ErrorID;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_LOCK_EXTEND_WAIT (17) ===
+        // -----------------------------------------------------------------
+        17: // LOCK_EXTEND_WAIT -- commanding ToolHeadLock to extend; sensor must confirm before RUNNING
+            // Cmd_Extend=TRUE is driven outside the CASE (see ToolHeadLock section below).
+            // No timer fallback -- lock MUST be confirmed by sensor before machining starts.
+
+ 	     #StatusID := 17;
+	      IF "DB_Cylinder_ToolHeadLock".AtSetpoint THEN
+ 	         #State := STATE_RUNNING;
+ 	     ELSIF "DB_Cylinder_ToolHeadLock".Error THEN
+  	        // Sensor did not confirm within Timeout_Extend (T#3S) — abort
+  	        #newErrorFlag := TRUE;
+  	        #newErrorCode := 16#0012;
+  	        "DB_HMI".ErrorText      := 'ToolHeadLock: extend timeout';
+  	        "DB_HMI".ErrorText_ES   := 'Bloqueo cabezal: tiempo de extension excedido';
+   	       "DB_HMI".ErrorDetail    := 'Lock sensor (AtSetpoint) not confirmed - check cylinder/sensor';
+   	       "DB_HMI".ErrorDetail_ES := 'Sensor de bloqueo (AtSetpoint) no confirmado - revisar cilindro/sensor';
+   	       #State := STATE_ERROR;
+   	   END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_LOCK_RETRACT_WAIT (29) ===
+        // -----------------------------------------------------------------
+        29: // LOCK_RETRACT_WAIT -- ToolHeadLock releasing (spring return); wait T#2S before proceeding
+            // Cmd_Extend=FALSE here (state not RUNNING/PAUSED/LOCK_EXTEND_WAIT); spring retracts.
+            // No sensor yet: proceed after timeout regardless.
+            // bLockAfterHoming selects exit:
+            //   TRUE  = coming from STOPPING → go to STATE_STOP_GOHOME (homing after stop)
+            //   FALSE = coming from RUNNING (tool change) → go to STATE_TOOL_CHANGE
+            #StatusID := 29;
+            IF #tonLockWait.Q THEN
+                IF #bLockAfterHoming THEN
+                    #homeSeqState := 1;
+                    #bHomeXExec   := TRUE;
+                    #State        := STATE_STOP_GOHOME;
+                ELSE
+                    #State := STATE_TOOL_CHANGE;
+                END_IF;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_STOPPING (18) ===
+        // -----------------------------------------------------------------
+        18: // STOPPING - Stop program without generating an error; then home all axes.
+            // After recipe executor finishes, spindle is stopped and all axes are homed
+            // (X → Z → Tool, same sequence as STATE_HOMING) so the machine is at a known
+            // reference position ready for the next run or manual mode.
+            #StatusID := 18;
+            #Running := FALSE;
+            #timerRunning := FALSE;
+            // Wait for recipe executor to finish current motion.
+            // Then release lock (Cmd_Extend=FALSE here, spring retracts) and wait T#2S
+            // before starting homing -- lock must be fully retracted before turret/axes move.
+            IF NOT #fbRecipeHandler.Busy THEN
+                #bSpindleStop        := TRUE;
+                #bMandrelRetractPulse := TRUE;  // One-shot: release mandrel lock (Mode=0 FB stays in state 3 without this)
+                #bLockAfterHoming    := TRUE;   // LOCK_RETRACT_WAIT exits to STATE_STOP_GOHOME
+                #State               := STATE_LOCK_RETRACT_WAIT;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_STOP_GOHOME (19) ===
+        // -----------------------------------------------------------------
+        19: // STOP_GOHOME - Active homing after stop (X then Z, sequential)
+            // BUG FIX: Previous implementation homed X and Z simultaneously.
+            // Using the same sequential pattern as STATE_HOMING: X first, then Z.
+            #StatusID := 19;
+            #Running := FALSE;
+            IF #homeSeqState = 1 THEN
+                // X homing
+                #bHomeXExec := TRUE;
+                #bHomeZExec := FALSE;
+                IF #fbHomeX.Done THEN
+                    #bHomeXExec := FALSE;
+                    #homeSeqState := 2;
+                    #bHomeZExec := TRUE;
+                ELSIF #fbHomeX.Error THEN
+                    #bHomeXExec := FALSE;
+                    #homeSeqState := 0;
+                    #State := STATE_ERROR;
+                    #newErrorFlag := TRUE;
+                    #newErrorCode := 16#0003;
+                    "DB_Diagnostic".HomeX_ErrorID := #fbHomeX.ErrorID;
+                    "DB_Diagnostic".TO_ErrorText  := "FC_TO_ErrorText"(Code := #fbHomeX.ErrorID);
+                    "DB_HMI".ErrorText      := 'Post-stop homing failed: X';
+                    "DB_HMI".ErrorText_ES   := 'Fallo de referenciado post-paro: X';
+                    "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                    "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                END_IF;
+            ELSIF #homeSeqState = 2 THEN
+                // Z homing
+                #bHomeXExec := FALSE;
+                #bHomeZExec := TRUE;
+                IF #fbHomeZ.Done THEN
+                    #bHomeZExec := FALSE;
+                    IF NOT "DB_MachineConfig".Bypass_ToolAxis THEN
+                        // Proceed to tool axis homing (step 3)
+                        #homeSeqState := 3;
+                        #bHomeToolExec := TRUE;
+                    ELSE
+                        // Tool axis bypassed -- homing complete
+                        #homeSeqState := 0;
+                        #State := STATE_STOPPED;
+                    END_IF;
+                ELSIF #fbHomeZ.Error THEN
+                    #bHomeZExec := FALSE;
+                    #homeSeqState := 0;
+                    #State := STATE_ERROR;
+                    #newErrorFlag := TRUE;
+                    #newErrorCode := 16#0004;
+                    "DB_Diagnostic".HomeZ_ErrorID := #fbHomeZ.ErrorID;
+                    "DB_Diagnostic".TO_ErrorText  := "FC_TO_ErrorText"(Code := #fbHomeZ.ErrorID);
+                    "DB_HMI".ErrorText      := 'Post-stop homing failed: Z';
+                    "DB_HMI".ErrorText_ES   := 'Fallo de referenciado post-paro: Z';
+                    "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                    "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                END_IF;
+            ELSIF #homeSeqState = 3 THEN
+                // Homing Tool axis
+                #bHomeToolExec := TRUE;
+                IF #fbHomeTool.Done THEN
+                    #bHomeToolExec := FALSE;
+                    #homeSeqState := 0;
+                    #State := STATE_STOPPED;
+                ELSIF #fbHomeTool.Error THEN
+                    #bHomeToolExec := FALSE;
+                    #homeSeqState := 0;
+                    #State := STATE_ERROR;
+                    #newErrorFlag := TRUE;
+                    #newErrorCode := 16#0007;
+                    "DB_Diagnostic".HomeTool_ErrorID := #fbHomeTool.ErrorID;
+                    "DB_Diagnostic".TO_ErrorText     := "FC_TO_ErrorText"(Code := #fbHomeTool.ErrorID);
+                    "DB_HMI".ErrorText      := 'Post-stop homing failed: Tool';
+                    "DB_HMI".ErrorText_ES   := 'Fallo de referenciado post-paro: Herramienta';
+                    "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                    "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                END_IF;
+            ELSE
+                // homeSeqState invalid -- safe fallback
+                #homeSeqState := 0;
+                #bHomeXExec := FALSE;
+                #bHomeZExec := FALSE;
+                #bHomeToolExec := FALSE;
+                #State := STATE_STOPPED;
+            END_IF;
+            // Homing timeout: X+Z+Tool combined must complete within 120s
+            IF #tonHomingTimeout.Q THEN
+                #bHomeXExec := FALSE;
+                #bHomeZExec := FALSE;
+                #bHomeToolExec := FALSE;
+                #homeSeqState := 0;
+                #State := STATE_ERROR;
+                #newErrorFlag := TRUE;
+                #newErrorCode := 16#000B;
+                "DB_HMI".ErrorText      := 'Homing timeout (120s)';
+                "DB_HMI".ErrorText_ES   := 'Tiempo de referenciado excedido (120s)';
+                "DB_HMI".ErrorDetail    := 'Post-stop homing did not complete - check reference switch/drive';
+                "DB_HMI".ErrorDetail_ES := 'Referenciado post-paro no completado - revisar sensor/variador';
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_STOP_GOTOZERO (21) ===
+        // -----------------------------------------------------------------
+        21: // STOP_GOTOZERO - Go to position 0 after stop
+            #StatusID := 21;
+            #Running := FALSE;
+            // Has X axis motion completed?
+            IF #bStopMoveX AND #fbMoveX_Stop.Done THEN
+                #bStopMoveX := FALSE;
+            ELSIF #bStopMoveX AND #fbMoveX_Stop.Error THEN
+                #bStopMoveX := FALSE;
+                #State := STATE_ERROR;
+                #newErrorFlag := TRUE;
+                #newErrorCode := 16#0001; // X move failed
+                "DB_HMI".ErrorText      := 'Post-stop X move failed';
+                "DB_HMI".ErrorText_ES   := 'Fallo de movimiento post-paro: X';
+                "DB_HMI".ErrorDetail    := 'X axis could not return to zero after stop';
+                "DB_HMI".ErrorDetail_ES := 'Eje X no pudo retornar a cero despues del paro';
+            END_IF;
+            // Has Z axis motion completed?
+            IF #bStopMoveZ AND #fbMoveZ_Stop.Done THEN
+                #bStopMoveZ := FALSE;
+            ELSIF #bStopMoveZ AND #fbMoveZ_Stop.Error THEN
+                #bStopMoveZ := FALSE;
+                #State := STATE_ERROR;
+                #newErrorFlag := TRUE;
+                #newErrorCode := 16#0002; // Z move failed
+                "DB_HMI".ErrorText      := 'Post-stop Z move failed';
+                "DB_HMI".ErrorText_ES   := 'Fallo de movimiento post-paro: Z';
+                "DB_HMI".ErrorDetail    := 'Z axis could not return to zero after stop';
+                "DB_HMI".ErrorDetail_ES := 'Eje Z no pudo retornar a cero despues del paro';
+            END_IF;
+            // When both axes are done, return to STOPPED
+            IF NOT #bStopMoveX AND NOT #bStopMoveZ AND (#State = STATE_STOP_GOTOZERO) THEN
+                #State := STATE_STOPPED;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_PNP_HALT (22) ===
+        // -----------------------------------------------------------------
+        22: // PNP_HALT -- axis halted at proximity zone; drives ON, reverse jog allowed to escape
+            #StatusID := 22;
+            #Running := FALSE;
+            // Auto-exit: PNP zone cleared (axis has moved away) -- return to STOPPED
+            IF NOT #HW_PNP_X_Min AND NOT #HW_PNP_X_Max THEN #bHaltX_PNP := FALSE; END_IF;
+            IF NOT #HW_PNP_Z_Min AND NOT #HW_PNP_Z_Max THEN #bHaltZ_PNP := FALSE; END_IF;
+            IF NOT #bHaltX_PNP AND NOT #bHaltZ_PNP THEN
+                #State := STATE_STOPPED;
+            END_IF;
+            // Manual exit: operator presses AckError or Reset
+            IF (#ackEdge OR #fbInputs.Cmd_Reset) AND (#EStop_OK OR "DB_HMI".Bypass_EStop) THEN
+                #bHaltX_PNP := FALSE;
+                #bHaltZ_PNP := FALSE;
+                #Error := FALSE;
+                #prevSafetyError := FALSE;
+                #fbAlarmManager(NewError := FALSE, NewErrorCode := 0, AcknowledgeError := TRUE);
+                #State := STATE_STOPPED;
+            END_IF;
+            // Forward spindle commands from recipe handler.
+            // When PNP fires during STATE_RUNNING, the RUNNING(20) case is skipped, so
+            // bSpindleStart is never updated from fbRecipeHandler signals. Mirror them here.
+            // Note: fbRecipeHandler runs AFTER this CASE, so values here are from previous scan.
+            IF #fbRecipeHandler.SpindleReqStop THEN
+                #bSpindleStart := FALSE;  // Drop RunCmd level
+            END_IF;
+            IF #fbRecipeHandler.SpindleReqStart THEN
+                #bSpindleStart := TRUE;
+                "DB_Spindle".Cmd_SetSpeed := #fbRecipeHandler.SpindleReqSpeed;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // === STATE_PAUSED (25) ===
+        // -----------------------------------------------------------------
+        25: // PAUSED
+            #StatusID := 88;
+            // Stop elapsed time counting while paused
+            #timerRunning := FALSE;
+            // Only Btn_Continue resumes (Pause button does NOT toggle)
+            IF #continueEdge THEN 
+                #bPauseActive := FALSE; 
+                #State := STATE_RUNNING; 
+            END_IF;
+        
+        // -----------------------------------------------------------------
+        // === STATE_TOOL_CHANGE (30) ===
+        // -----------------------------------------------------------------
+        30: // TOOL_CHANGE
+            #StatusID := 4; #bToolExecute := TRUE; #State := STATE_TOOL_WAIT;
+        
+        // -----------------------------------------------------------------
+        // === STATE_TOOL_WAIT (35) ===
+        // -----------------------------------------------------------------
+        35: // TOOL_WAIT
+            IF #fbToolChanger.Done THEN
+                #bToolExecute := FALSE;
+                #CurrentTool := #fbToolChanger.CurrentTool;
+                #fbRecipeHandler.ToolChangeReq := FALSE;  // Signal RecipeHandler to continue
+                // Tool change done: re-engage lock before resuming machining
+                #State := STATE_LOCK_EXTEND_WAIT;
+            ELSIF #fbToolChanger.Error THEN
+                #bToolExecute := FALSE;
+                #State := STATE_ERROR;
+                #newErrorFlag := TRUE;
+                #newErrorCode := #fbToolChanger.ErrorID;
+                "DB_HMI".ErrorText      := 'Tool changer failed';
+                "DB_HMI".ErrorText_ES   := 'Fallo en cambiador de herramienta';
+                "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Tool ', IN2 := INT_TO_STRING(#activeToolReq));
+                "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Herramienta ', IN2 := INT_TO_STRING(#activeToolReq));
+            END_IF;
+        
+        // -----------------------------------------------------------------
+        // === STATE_ERROR (999) ===
+        // -----------------------------------------------------------------
+        999: // ERROR
+            #StatusID := 99; #bStartSeq := FALSE; #Error := TRUE;
+            #timerRunning := FALSE;  // Stop cycle timer
+            // Clear CMD=41 BackSupport overrides — valves de-energise on error
+            "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;
+            "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
+            
+            // Save current position for warm restart
+            IF #savedLineIndex < 0 THEN
+                #savedLineIndex := #fbRecipeHandler.CurrentLine;
+                #savedProgram := #activeProgram;
+            END_IF;
+            "DB_HMI".ResumeLine := #savedLineIndex;   // HMI shows which line will be resumed on next Start
+            
+            // Debug: populate DB_Diagnostic with error context for easier troubleshooting
+            "DB_Diagnostic".Error_ProcessState := #State;
+            "DB_Diagnostic".Error_Code := #fbAlarmManager.ActiveErrorCode; // primary error source
+            // If recipe handler provided an error line, prefer that
+            IF "DB_Diagnostic".Recipe_CurrentLine >= 0 THEN
+                "DB_Diagnostic".Error_Line := "DB_Diagnostic".Recipe_CurrentLine;
+            END_IF;
+
+            // BUG FIX: Previous implementation transitioned ackEdge → STATE_PAUSED,
+            // but the recipe handler remained in its internal STATE_ERROR (999).
+            // In PAUSED → Continue → STATE_RUNNING the recipe handler was not running (error state).
+            // Fix: All recovery paths go to STATE_STOPPED + recipe handler is reset.
+            // When operator presses Start, PRE_SCAN → STARTING → RUNNING flow starts clean.
+            // ACK, Continue and Restart are blocked while E-Stop is active.
+            // E-Stop must be physically released before any error acknowledgement is accepted.
+            IF #ackEdge AND (#EStop_OK OR "DB_HMI".Bypass_EStop) THEN
+                // Acknowledge: clear error → STOPPED. savedLineIndex kept for warm restart on next Start.
+                #Error := FALSE;
+                #bPauseActive := FALSE;
+                #bResetRecipe := TRUE;   // Reset recipe handler to IDLE (cannot continue from state 999)
+                #prevSafetyError := FALSE;   // Clear safety latch -- fresh evaluation on restart
+                #bMandrelRetractPulse := TRUE;  // Release mandrel lock (may be extended from last run)
+                #fbAlarmManager(NewError := FALSE, NewErrorCode := 0,
+                                AcknowledgeError := TRUE);
+                #State := STATE_STOPPED;
+            ELSIF #continueEdge AND (#EStop_OK OR "DB_HMI".Bypass_EStop) THEN
+                // Continue: resume from savedLineIndex on next Start (warm restart)
+                #Error := FALSE;
+                #bPauseActive := FALSE;
+                #bResetRecipe := TRUE;
+                #bMandrelRetractPulse := TRUE;  // Release mandrel lock
+                #fbAlarmManager(NewError := FALSE, NewErrorCode := 0,
+                                AcknowledgeError := TRUE);
+                #State := STATE_STOPPED;
+            ELSIF #restartEdge AND (#EStop_OK OR "DB_HMI".Bypass_EStop) THEN
+                // Restart: explicit restart from line 0 -- clear saved position
+                #Error := FALSE;
+                #bPauseActive := FALSE;
+                #bResetRecipe := TRUE;
+                #savedLineIndex := -1;
+                #savedProgram := -1;
+                "DB_HMI".ResumeLine := -1;
+                #bMandrelRetractPulse := TRUE;  // Release mandrel lock
+                #fbAlarmManager(NewError := FALSE, NewErrorCode := 0,
+                                AcknowledgeError := TRUE);
+                #State := STATE_STOPPED;
+            END_IF;
+    END_CASE;
+    
+    // -----------------------------------------------------------------
+    // === STATE_COMPLETE (100) ===
+    // (handled as IF block outside CASE -- no new constant needed)
+    // -----------------------------------------------------------------
+    IF #State = 100 THEN
+        #StatusID := 100; #bStartSeq := FALSE;
+        #Running := FALSE;
+        // Clear bSpindleStart: RUNNING no longer runs to clear it, so SpindleReqStart=TRUE
+        // from the last CMD_SPINDLE_ON would keep Start=TRUE through PRE_SCAN and STARTING.
+        // prevStart is reset inside FB_SpindleControl on halt Done, so the next CMD_SPINDLE_ON
+        // in the new recipe generates a clean startEdge.
+        // bSpindleStop is intentionally NOT cleared here: line 1567 sets it TRUE on Done to
+        // stop the spindle, and clearing it in the same scan (IF State=100 runs same scan as
+        // the Done handler in CASE 20) would cancel the stop command before it is consumed.
+        #bSpindleStart := FALSE;
+        "DB_Cylinder_MandrelLock".Cmd_Extend := FALSE;
+        #bMandrelRetractPulse := TRUE;          // One-shot: force mandrel lock FB out of State 3 → spring retracts
+        "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;  // De-energise CMD=41 Sol_B override
+        "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;  // De-energise atmosphere valve
+        "DB_HMI".StatusMsg    := 'Program Complete';
+        "DB_HMI".StatusMsg_ES := 'Programa Completado';
+        "DB_HMI".ErrorText    := 'Done!';
+        "DB_HMI".ErrorText_ES := '¡Completado!';
+        IF #fbInputs.Cmd_Start OR #restartEdge THEN
+            "DB_HMI".CycleCount := "DB_HMI".CycleCount + 1;
+            #bResetRecipe := TRUE;      // Reset FB_RecipeHandler (state 99→0) before re-run
+            #State := STATE_PRE_SCAN;   // Restart/Start = immediate re-run, keeps drives on
+        ELSIF #fbInputs.Cmd_Reset THEN
+            "DB_HMI".CycleCount := "DB_HMI".CycleCount + 1;
+            #bResetRecipe := TRUE;      // Also reset recipe handler on manual reset
+            #State := STATE_PRE_SCAN;    // Reset from COMPLETE goes to PRE_SCAN (drives stay on)
+        END_IF;
+    END_IF;
+    
+    // =========================================================================
+    // CYCLE TIMER - runs during RUNNING and PAUSED
+    // =========================================================================
+    #tonElapsed(IN := #timerRunning, PT := T#24h);
+    // Homing timeout: counts only while in a homing state; auto-resets when state exits
+    #tonHomingTimeout(IN := (#State = STATE_HOMING OR #State = STATE_STOP_GOHOME), PT := T#120S);
+    // ToolHeadLock wait: counts in both lock wait states; auto-resets on exit
+    // tonLockWait: 5s total (1s pre-delay + up to 4s for cylinder stroke). AtSetpoint exits early.
+    #tonLockWait(IN := (#State = STATE_LOCK_RETRACT_WAIT),
+                 PT := T#5S);  // Retract wait only -- no fallback for extend (sensor required)
+    #tonLockPreDelay(IN := (#State = STATE_LOCK_EXTEND_WAIT), PT := T#1S);
+    // MandrelLock stroke wait: open-loop T#5S during STATE_SHEET_WAIT phase 2
+    #tonMandrelWait(IN := (#State = STATE_SHEET_WAIT AND #bSheetWaitPhase2), PT := T#5S);
+    // MandrelLock one-shot retract pulse:
+    // ValveType=1 + Mode=0 keeps Sol_A=TRUE in State 3 even after Cmd_Extend=FALSE.
+    // A one-scan Cmd_Retract=TRUE pulse forces the FB to State 2 (Sol_A=FALSE) → spring retracts.
+    // Set bMandrelRetractPulse=TRUE from STATE_STOPPING or STATE_COMPLETE to trigger.
+    "DB_Cylinder_MandrelLock".Cmd_Retract := #bMandrelRetractPulse;
+    #bMandrelRetractPulse := FALSE;  // Self-clearing: active for exactly one scan
+    // Drive ready timeout: counts while in STARTING and drives not yet ready; auto-resets on exit
+    #tonDriveReady(IN := (#State = STATE_STARTING) AND NOT (#fbPowerX.Status AND #fbPowerZ.Status), PT := T#3S);
+    // Spindle decel wait: blocks RunCmd from going TRUE until VFD ramp-down completes
+    #tonSpindleDecel(IN := #bSpindleDecelWait, PT := "DB_MachineConfig".SpindleDecelTime);
+    IF #tonSpindleDecel.Q THEN
+        #bSpindleDecelWait := FALSE;
+        IF #bSpindlePendingStart THEN
+            "DB_Spindle".Cmd_SetSpeed := #pendingSpindleSpeed;
+            #bSpindleStart        := TRUE;
+            #bSpindlePendingStart := FALSE;
+        END_IF;
+    END_IF;
+    IF #timerRunning THEN
+        "DB_HMI".ElapsedTime := #tonElapsed.ET;
+        "DB_HMI".ElapsedSeconds := TIME_TO_DINT(#tonElapsed.ET / 1000);
+    END_IF;
+    // Reset timer on new program start
+    IF #State = STATE_STARTING THEN
+        #tonElapsed(IN := FALSE, PT := T#24h);  // Reset
+        "DB_HMI".ElapsedTime := T#0s;
+        "DB_HMI".ElapsedSeconds := 0;
+    END_IF;
+    
+    // =========================================================================
+    // PRODUCTION LOGGING - DB_Production
+    // =========================================================================
+    // Edge: cycle start (enter PRE_SCAN)
+    IF (#State = STATE_PRE_SCAN) AND (#prevState <> STATE_PRE_SCAN) THEN
+        "DB_Production".CurrentActive := TRUE;
+        "DB_Production".CurrentProgram := #activeProgram;
+        "DB_Production".TotalStarted := "DB_Production".TotalStarted + 1;
+        #prodTimeStatus := RD_SYS_T(OUT => #prodTimeNow);
+        "DB_Production".CurrentStartTime := #prodTimeNow;
+    END_IF;
+    
+    // Edge: OK complete (enter state 100)
+    IF (#State = 100) AND (#prevState <> 100) THEN
+        "DB_Production".LastResult := 1;  // OK
+        "DB_Production".LastProgram := #activeProgram;
+        "DB_Production".LastDuration_s := "DB_HMI".ElapsedSeconds;
+        "DB_Production".LastErrorCode := 0;
+        "DB_Production".LastErrorLine := -1;
+        "DB_Production".TotalOK := "DB_Production".TotalOK + 1;
+        #prodTimeStatus := RD_SYS_T(OUT => #prodTimeNow);
+        "DB_Production".LastEndTime := #prodTimeNow;
+        "DB_Production".CurrentActive := FALSE;
+
+        // History ring buffer update
+        "DB_Production".Hist_Index := "DB_Production".Hist_Index + 1;
+        IF "DB_Production".Hist_Index > 100 THEN
+            "DB_Production".Hist_Index := 1;
+        END_IF;
+        IF "DB_Production".Hist_Count < 100 THEN
+            "DB_Production".Hist_Count := "DB_Production".Hist_Count + 1;
+        END_IF;
+        "DB_Production".Hist_Result["DB_Production".Hist_Index] := "DB_Production".LastResult;
+        "DB_Production".Hist_Program["DB_Production".Hist_Index] := "DB_Production".LastProgram;
+        "DB_Production".Hist_Duration_s["DB_Production".Hist_Index] := "DB_Production".LastDuration_s;
+        "DB_Production".Hist_ErrorCode["DB_Production".Hist_Index] := "DB_Production".LastErrorCode;
+        "DB_Production".Hist_ErrorLine["DB_Production".Hist_Index] := "DB_Production".LastErrorLine;
+        "DB_Production".Hist_Time["DB_Production".Hist_Index] := #prodTimeNow;
+    END_IF;
+    
+    // Edge: NOK (enter STATE_ERROR with active cycle)
+    IF (#State = STATE_ERROR) AND (#prevState <> STATE_ERROR) AND "DB_Production".CurrentActive THEN
+        "DB_Production".LastResult := 2;  // NOK
+        "DB_Production".LastProgram := #activeProgram;
+        "DB_Production".LastDuration_s := "DB_HMI".ElapsedSeconds;
+        "DB_Production".LastErrorCode := #fbAlarmManager.ActiveErrorCode;
+        "DB_Production".LastErrorLine := "DB_Diagnostic".Error_Line;
+        "DB_Production".TotalNOK := "DB_Production".TotalNOK + 1;
+        #prodTimeStatus := RD_SYS_T(OUT => #prodTimeNow);
+        "DB_Production".LastEndTime := #prodTimeNow;
+        "DB_Production".CurrentActive := FALSE;
+
+        // History ring buffer update
+        "DB_Production".Hist_Index := "DB_Production".Hist_Index + 1;
+        IF "DB_Production".Hist_Index > 100 THEN
+            "DB_Production".Hist_Index := 1;
+        END_IF;
+        IF "DB_Production".Hist_Count < 100 THEN
+            "DB_Production".Hist_Count := "DB_Production".Hist_Count + 1;
+        END_IF;
+        "DB_Production".Hist_Result["DB_Production".Hist_Index] := "DB_Production".LastResult;
+        "DB_Production".Hist_Program["DB_Production".Hist_Index] := "DB_Production".LastProgram;
+        "DB_Production".Hist_Duration_s["DB_Production".Hist_Index] := "DB_Production".LastDuration_s;
+        "DB_Production".Hist_ErrorCode["DB_Production".Hist_Index] := "DB_Production".LastErrorCode;
+        "DB_Production".Hist_ErrorLine["DB_Production".Hist_Index] := "DB_Production".LastErrorLine;
+        "DB_Production".Hist_Time["DB_Production".Hist_Index] := #prodTimeNow;
+    END_IF;
+    
+    // Edge: STOPPED via STOP sequence (STOPPING / STOP_GOHOME / STOP_GOTOZERO → STOPPED)
+    IF (#State = STATE_STOPPED) AND
+       ((#prevState = STATE_STOPPING) OR (#prevState = STATE_STOP_GOHOME) OR (#prevState = STATE_STOP_GOTOZERO)) AND
+       "DB_Production".CurrentActive THEN
+        "DB_Production".LastResult := 3;  // STOP
+        "DB_Production".LastProgram := #activeProgram;
+        "DB_Production".LastDuration_s := "DB_HMI".ElapsedSeconds;
+        "DB_Production".LastErrorCode := 0;
+        "DB_Production".LastErrorLine := -1;
+        "DB_Production".TotalStopped := "DB_Production".TotalStopped + 1;
+        #prodTimeStatus := RD_SYS_T(OUT => #prodTimeNow);
+        "DB_Production".LastEndTime := #prodTimeNow;
+        "DB_Production".CurrentActive := FALSE;
+
+        // History ring buffer update
+        "DB_Production".Hist_Index := "DB_Production".Hist_Index + 1;
+        IF "DB_Production".Hist_Index > 100 THEN
+            "DB_Production".Hist_Index := 1;
+        END_IF;
+        IF "DB_Production".Hist_Count < 100 THEN
+            "DB_Production".Hist_Count := "DB_Production".Hist_Count + 1;
+        END_IF;
+        "DB_Production".Hist_Result["DB_Production".Hist_Index] := "DB_Production".LastResult;
+        "DB_Production".Hist_Program["DB_Production".Hist_Index] := "DB_Production".LastProgram;
+        "DB_Production".Hist_Duration_s["DB_Production".Hist_Index] := "DB_Production".LastDuration_s;
+        "DB_Production".Hist_ErrorCode["DB_Production".Hist_Index] := "DB_Production".LastErrorCode;
+        "DB_Production".Hist_ErrorLine["DB_Production".Hist_Index] := "DB_Production".LastErrorLine;
+        "DB_Production".Hist_Time["DB_Production".Hist_Index] := #prodTimeNow;
+    END_IF;
+    
+    // Production RESET: clear counters + history
+    IF #prodResetEdge THEN
+        "DB_Production".TotalStarted := 0;
+        "DB_Production".TotalOK := 0;
+        "DB_Production".TotalNOK := 0;
+        "DB_Production".TotalStopped := 0;
+        "DB_Production".Hist_Index := 0;
+        "DB_Production".Hist_Count := 0;
+        // Optionally also clear last cycle summary
+        "DB_Production".LastResult := 0;
+        "DB_Production".LastProgram := 0;
+        "DB_Production".LastDuration_s := 0;
+        "DB_Production".LastErrorCode := 0;
+        "DB_Production".LastErrorLine := -1;
+        "DB_Production".CurrentActive := FALSE;
+    END_IF;
+    
+    // Last-cycle RESET: only clear last cycle summary (counters and history are preserved)
+    IF #lastCycleResetEdge THEN
+        "DB_Production".LastResult := 0;
+        "DB_Production".LastProgram := 0;
+        "DB_Production".LastDuration_s := 0;
+        "DB_Production".LastErrorCode := 0;
+        "DB_Production".LastErrorLine := -1;
+    END_IF;
+    
+    // Update prevState for next cycle
+    #prevState := #State;
+    
+    // =========================================================================
+    // RECIPE HANDLER - Execute based on active program
+    // =========================================================================
+    CASE #activeProgram OF
+        1: #fbRecipeHandler(Start := #bStartSeq, Stop := #fbInputs.Cmd_Stop,
+                            Pause := #bPauseActive, Reset := #fbInputs.Cmd_Reset OR #bResetRecipe,
+                            bStartEdge := #fbInputs.Cmd_Start,
+                            StartLine := MAX(IN1:= INT#0, IN2:= #savedLineIndex),
+                            LineCount := #activeLineCount,
+                            Lines := "DB_RecipeProgram1".Lines,
+                            Axis_X := #Axis_X, Axis_Z := #Axis_Z);
+        2: #fbRecipeHandler(Start := #bStartSeq, Stop := #fbInputs.Cmd_Stop,
+                            Pause := #bPauseActive, Reset := #fbInputs.Cmd_Reset OR #bResetRecipe,
+                            bStartEdge := #fbInputs.Cmd_Start,
+                            StartLine := MAX(IN1:= INT#0,IN2:= #savedLineIndex),
+                            LineCount := #activeLineCount,
+                            Lines := "DB_RecipeProgram2".Lines,
+                            Axis_X := #Axis_X, Axis_Z := #Axis_Z);
+        3: #fbRecipeHandler(Start := #bStartSeq, Stop := #fbInputs.Cmd_Stop,
+                            Pause := #bPauseActive, Reset := #fbInputs.Cmd_Reset OR #bResetRecipe,
+                            bStartEdge := #fbInputs.Cmd_Start,
+                            StartLine := MAX(IN1:= INT#0,IN2:= #savedLineIndex),
+                            LineCount := #activeLineCount,
+                            Lines := "DB_RecipeProgram3".Lines,
+                            Axis_X := #Axis_X, Axis_Z := #Axis_Z);
+        4: #fbRecipeHandler(Start := #bStartSeq, Stop := #fbInputs.Cmd_Stop,
+                            Pause := #bPauseActive, Reset := #fbInputs.Cmd_Reset OR #bResetRecipe,
+                            bStartEdge := #fbInputs.Cmd_Start,
+                            StartLine := MAX(IN1:= INT#0,IN2:= #savedLineIndex),
+                            LineCount := #activeLineCount,
+                            Lines := "DB_RecipeProgram4".Lines,
+                            Axis_X := #Axis_X, Axis_Z := #Axis_Z);
+        5: #fbRecipeHandler(Start := #bStartSeq, Stop := #fbInputs.Cmd_Stop,
+                            Pause := #bPauseActive, Reset := #fbInputs.Cmd_Reset OR #bResetRecipe,
+                            bStartEdge := #fbInputs.Cmd_Start,
+                            StartLine := MAX(IN1:= INT#0,IN2:= #savedLineIndex),
+                            LineCount := #activeLineCount,
+                            Lines := "DB_RecipeProgram5".Lines,
+                            Axis_X := #Axis_X, Axis_Z := #Axis_Z);
+    END_CASE;
+    
+    // Homing -- sequential pattern: STATE_HOMING (startup) and STATE_STOP_GOHOME (post-stop)
+    // both use homeSeqState + bHomeXExec/bHomeZExec.
+    // Mode SEL: mode 3 (active+zero) is forced in STATE_HOMING; other states use DB_Manual.HomingMode.
+    #fbHomeX(
+        Execute := #bHomeXExec,
+        Mode := SEL(G := (#State = STATE_HOMING AND #bHomeXExec), IN0 := 3, IN1 := "DB_Manual".HomingMode),
+        Position := "DB_MachineConfig".HomeOffset_X,
+        Axis := #Axis_X
+    );
+    #fbHomeZ(
+        Execute := #bHomeZExec,
+        Mode := SEL(G := (#State = STATE_HOMING AND #bHomeZExec), IN0 := 3, IN1 := "DB_Manual".HomingMode),
+        Position := "DB_MachineConfig".HomeOffset_Z,
+        Axis := #Axis_Z
+    );
+    #fbHomeTool(
+        Execute  := #bHomeToolExec,
+        Mode     := SEL(G := (#State = STATE_HOMING AND #bHomeToolExec), IN0 := 3, IN1 := "DB_Manual".HomingMode),
+        Position := 0.0,
+        Axis     := #Axis_Tool
+    );
+    // PNP halt FBs: Execute stays TRUE until bHaltX/Z_PNP is cleared (on return to STATE_STOPPED)
+    #fbHaltX_PNP(Execute := #bHaltX_PNP, Axis := #Axis_X);
+    #fbHaltZ_PNP(Execute := #bHaltZ_PNP, Axis := #Axis_Z);
+    
+    // Tool changer -- only rotates the turret; axis positioning done by G-code
+    #fbToolChanger(Execute := #bToolExecute, ToolNumber := #activeToolReq,
+                   Axis_Tool := #Axis_Tool);
+
+    // Motion FBs for moving to position 0 after stop
+    #fbMoveX_Stop(Execute := #bStopMoveX, Position := 0.0, Velocity := "DB_MachineConfig".RapidVelocity, Axis := #Axis_X);
+    #fbMoveZ_Stop(Execute := #bStopMoveZ, Position := 0.0, Velocity := "DB_MachineConfig".RapidVelocity, Axis := #Axis_Z);
+    // Homing clearance moves -- pre (clear PNP zone) and post (move away after homing)
+    // Target: HomeOffset + PostHome_Clearance (outside PNP sensor range)
+    #fbMoveX_HomeClr(Execute  := #bHomeClrX,
+                     Position := "DB_MachineConfig".HomeOffset_X + "DB_MachineConfig".PostHome_Clearance,
+                     Velocity := "DB_MachineConfig".HomeVelocity,
+                     Axis     := #Axis_X);
+    #fbMoveZ_HomeClr(Execute  := #bHomeClrZ,
+                     Position := "DB_MachineConfig".HomeOffset_Z + "DB_MachineConfig".PostHome_Clearance,
+                     Velocity := "DB_MachineConfig".HomeVelocity,
+                     Axis     := #Axis_Z);
+    
+    // Manual mode - sync aliases first
+    // In STATE_PNP_HALT: block jog direction that would drive the axis deeper into the PNP zone.
+    // Jog toward the active PNP zone is blocked; jog away (escape direction) is passed through.
+    IF #State = STATE_PNP_HALT THEN
+        "DB_Manual".Jog_Plus  := "DB_Manual".Btn_JogPlus AND NOT (
+            ("DB_Manual".SelectedAxis = 0 AND #HW_PNP_X_Max) OR
+            ("DB_Manual".SelectedAxis = 1 AND #HW_PNP_Z_Max));
+        "DB_Manual".Jog_Minus := "DB_Manual".Btn_JogMinus AND NOT (
+            ("DB_Manual".SelectedAxis = 0 AND #HW_PNP_X_Min) OR
+            ("DB_Manual".SelectedAxis = 1 AND #HW_PNP_Z_Min));
+    ELSE
+        "DB_Manual".Jog_Plus  := "DB_Manual".Btn_JogPlus;
+        "DB_Manual".Jog_Minus := "DB_Manual".Btn_JogMinus;
+    END_IF;
+    "DB_Manual".Btn_HomeAxis := "DB_Manual".Btn_Home;
+
+    #fbManualMode(Enable := (#State = STATE_MANUAL OR #State = STATE_PNP_HALT),
+                  SelectedAxis := "DB_Manual".SelectedAxis,
+                  Jog_Plus := "DB_Manual".Jog_Plus, Jog_Minus := "DB_Manual".Jog_Minus, 
+                  JogSpeed := "DB_Manual".JogSpeed,
+                  MoveAbsolute := "DB_Manual".Btn_MoveAbsolute, TargetPosition := "DB_Manual".MoveToPosition,
+                  HomeAxis := "DB_Manual".Btn_HomeAxis, HomeAll := "DB_Manual".Btn_HomeAll,
+                  HomingMode := "DB_Manual".HomingMode, HomePosition := 0.0,
+                  GoSafe := "DB_Manual".Btn_GoSafe, GoZero := "DB_Manual".Btn_GoZero,
+                  SafeToJog := #fbSafetyMonitor.SafeToJog, Reset := #fbInputs.Cmd_Reset,
+                  PNP_X_Min := #HW_PNP_X_Min, PNP_Z_Min := #HW_PNP_Z_Min,
+                  ToolStepCW := "DB_Manual".Btn_ToolStepCW, ToolStepCCW := "DB_Manual".Btn_ToolStepCCW,
+                  ToolStepAngle := "DB_Manual".ToolStepAngle, ToolStepSpeed := "DB_Manual".ToolStepSpeed,
+                  Axis_X := #Axis_X, Axis_Z := #Axis_Z, Axis_Tool := #Axis_Tool, Axis_Spindle := #Axis_Spindle);
+    
+    // Update manual mode status
+    "DB_Manual".JogBusy := #fbManualMode.Busy;
+    "DB_Manual".ManualBusy := #fbManualMode.Busy;       // Alias
+    "DB_Manual".JogError := #fbManualMode.Error;
+    "DB_Manual".ManualError := #fbManualMode.Error;     // Alias
+    "DB_Manual".JogErrorID := #fbManualMode.ErrorID;
+    "DB_Manual".ManualErrorID := #fbManualMode.ErrorID; // Alias
+    "DB_Manual".SelectedAxisPos := SEL(G := "DB_Manual".SelectedAxis = 0, 
+                                        IN0 := #Axis_Z.ActualPosition, IN1 := #Axis_X.ActualPosition);
+    "DB_Manual".SelectedAxisName := SEL(G := "DB_Manual".SelectedAxis = 0, IN0 := 'Z', IN1 := 'X');
+    "DB_Manual".ToolPosition := #Axis_Tool.ActualPosition;
+    "DB_Manual".ActiveAxis := #fbManualMode.ActiveAxis;
+
+    // Forward manual mode errors to alarm manager (once, on rising edge)
+    IF #fbManualMode.Error AND NOT #prevManualError THEN
+        #newErrorFlag := TRUE;
+        #newErrorCode := #fbManualMode.ErrorID;
+        // DB_HMI.ErrorDetail is written directly inside FB_ManualMode at each error point.
+        // Write ErrorText here as a fallback for any code not yet handled with direct detail.
+        "DB_HMI".ErrorText    := 'Manual mode error - check ErrorDetail and ErrorID';
+        "DB_HMI".ErrorText_ES := 'Error modo manual - revisar ErrorDetail y ErrorID';
+    END_IF;
+    #prevManualError := #fbManualMode.Error;
+
+    // =========================================================================
+    // SPINDLE CONTROL
+    // Manual mode spindle control via DB_Manual buttons
+    // Recipe handler spindle control via bSpindleStart/bSpindleStop flags
+    // =========================================================================
+    // Capture inputs BEFORE calling the FB so Diag_* reflects this scan's values.
+    "DB_Spindle".Diag_bSpindleStart := #bSpindleStart;
+    "DB_Spindle".Diag_bSpindleStop  := #bSpindleStop;
+    "DB_Spindle".Diag_EnableInput   := #bDrivesEnable;
+    "DB_Spindle".Diag_StartInput    := "DB_Manual".Btn_SpindleStart OR #bSpindleStart;
+    "DB_Spindle".Diag_StopInput     := "DB_Manual".Btn_SpindleStop OR #bSpindleStop OR #fbInputs.Cmd_Stop;
+    "DB_Spindle".Diag_ReqStart      := #fbRecipeHandler.SpindleReqStart;
+    "DB_Spindle".Diag_ReqStop       := #fbRecipeHandler.SpindleReqStop;
+    // -------------------------------------------------------------------------
+    // Spindle history ring buffer: push snapshot on any meaningful change.
+    // Trigger fields: SpindleState, PrevStart, ReqStart, StartEdge.
+    // Reading tip: sort Hist_Log[0..19] by .Seq to get chronological order.
+    // -------------------------------------------------------------------------
+    IF "DB_Spindle".Hist_Clear THEN
+        "DB_Spindle".Hist_Head   := 0;
+        "DB_Spindle".Hist_Count  := 0;
+        "DB_Spindle".Hist_SeqNum := 0;
+        "DB_Spindle".Hist_Clear  := FALSE;
+    ELSIF ("DB_Spindle".Diag_SpindleState <> #prevSnap_State)
+       OR ("DB_Spindle".Diag_PrevStart    <> #prevSnap_PrevStart)
+       OR ("DB_Spindle".Diag_ReqStart     <> #prevSnap_ReqStart)
+       OR ("DB_Spindle".Diag_StartEdge    <> #prevSnap_StartEdge)
+       OR ("DB_Spindle".Diag_MoveVelBusy  <> #prevSnap_MoveVelBusy) THEN
+        // Push new entry at Hist_Head
+        "DB_Spindle".Hist_Log["DB_Spindle".Hist_Head].Seq          := "DB_Spindle".Hist_SeqNum;
+        "DB_Spindle".Hist_Log["DB_Spindle".Hist_Head].MachineState := #State;
+        "DB_Spindle".Hist_Log["DB_Spindle".Hist_Head].State        := "DB_Spindle".Diag_SpindleState;
+        "DB_Spindle".Hist_Log["DB_Spindle".Hist_Head].ReqStart     := "DB_Spindle".Diag_ReqStart;
+        "DB_Spindle".Hist_Log["DB_Spindle".Hist_Head].ReqStop      := "DB_Spindle".Diag_ReqStop;
+        "DB_Spindle".Hist_Log["DB_Spindle".Hist_Head].bStart       := "DB_Spindle".Diag_bSpindleStart;
+        "DB_Spindle".Hist_Log["DB_Spindle".Hist_Head].bStop        := "DB_Spindle".Diag_bSpindleStop;
+        "DB_Spindle".Hist_Log["DB_Spindle".Hist_Head].StartInput   := "DB_Spindle".Diag_StartInput;
+        "DB_Spindle".Hist_Log["DB_Spindle".Hist_Head].StopInput    := "DB_Spindle".Diag_StopInput;
+        "DB_Spindle".Hist_Log["DB_Spindle".Hist_Head].EnableIn     := "DB_Spindle".Diag_EnableInput;
+        "DB_Spindle".Hist_Log["DB_Spindle".Hist_Head].PrevStart    := "DB_Spindle".Diag_PrevStart;
+        "DB_Spindle".Hist_Log["DB_Spindle".Hist_Head].StartEdge    := "DB_Spindle".Diag_StartEdge;
+        "DB_Spindle".Hist_Log["DB_Spindle".Hist_Head].MoveVelBusy  := "DB_Spindle".Diag_MoveVelBusy;
+        "DB_Spindle".Hist_Log["DB_Spindle".Hist_Head].MoveVelInVel := "DB_Spindle".Diag_MoveVelInVel;
+        // Advance ring buffer pointer
+        "DB_Spindle".Hist_SeqNum := "DB_Spindle".Hist_SeqNum + 1;
+        "DB_Spindle".Hist_Head   := ("DB_Spindle".Hist_Head + 1) MOD 20;
+        IF "DB_Spindle".Hist_Count < 20 THEN
+            "DB_Spindle".Hist_Count := "DB_Spindle".Hist_Count + 1;
+        END_IF;
+        // Latch current values for next-scan comparison
+        #prevSnap_State       := "DB_Spindle".Diag_SpindleState;
+        #prevSnap_PrevStart   := "DB_Spindle".Diag_PrevStart;
+        #prevSnap_ReqStart    := "DB_Spindle".Diag_ReqStart;
+        #prevSnap_StartEdge   := "DB_Spindle".Diag_StartEdge;
+        #prevSnap_MoveVelBusy := "DB_Spindle".Diag_MoveVelBusy;
+    END_IF;
+    // RunCmd is a level signal (TRUE = run).
+    // The CALLER must:
+    //   • Set SetSpeed before raising RunCmd
+    //   • Lower RunCmd to stop (do not change SetSpeed while RunCmd is TRUE)
+    //   • For a speed change: lower RunCmd → update SetSpeed → raise RunCmd again
+    #fbSpindleControl(
+        Enable   := #bDrivesEnable,
+        RunCmd   := ("DB_Manual".Btn_SpindleStart OR #bSpindleStart)
+                    AND NOT ("DB_Manual".Btn_SpindleStop OR #bSpindleStop OR #fbInputs.Cmd_Stop),
+        SetSpeed := SEL(G := (#State = STATE_MANUAL),
+                        IN0 := "DB_Spindle".Cmd_SetSpeed,
+                        IN1 := "DB_Manual".Manual_SpindleSpeed),
+        SpeedOverride := "DB_Spindle".SpeedOverride,
+        Reset    := #fbInputs.Cmd_Reset OR #bResetRecipe,
+        AckError := #ackEdge OR "DB_Manual".Btn_SpindleAckError,
+	RunForward := "PTO_RunForward_AxisS",
+        Axis_Spindle := #Axis_Spindle
+    );
+    
+    // =========================================================================
+    // TOOLHEADLOCK CONTROL
+    // Written every scan so FB_CylinderControl (called from OB1) sees the
+    // correct command on the next scan.
+    //
+    // EXTEND (Sol_A ON):  STATE_RUNNING (20), STATE_PAUSED (25), STATE_LOCK_EXTEND_WAIT (17)
+    // RETRACT (spring):   all other states -- cylinder retracts automatically via spring return.
+    //
+    // Safety: spring-return valve retracts on power loss without any PLC action.
+    // State 17 checks AtSetpoint for extend confirmation; tonLockWait is 2s fallback.
+    // State 29 uses tonLockWait only (spring retract; no retract sensor).
+    // =========================================================================
+    "DB_Cylinder_ToolHeadLock".Cmd_Extend :=
+        (#State = STATE_RUNNING) OR
+        (#State = STATE_PAUSED) OR
+        (#State = STATE_LOCK_EXTEND_WAIT AND #tonLockPreDelay.Q);
+
+    // Diagnostic output
+    "DB_Diagnostic".Process_State        := #State;
+    "DB_Diagnostic".Process_SafeToRun    := #SafeToRun;
+    "DB_Diagnostic".Process_DrivesEnable := #bDrivesEnable;
+    "DB_Diagnostic".Recipe_CurrentProgram := #activeProgram;
+    "DB_Diagnostic".Recipe_TotalLines    := #activeLineCount;
+    "DB_Diagnostic".Axis_X_Pos           := #Axis_X.ActualPosition;
+    "DB_Diagnostic".Axis_Z_Pos           := #Axis_Z.ActualPosition;
+    "DB_Diagnostic".Axis_X_Enabled       := #fbPowerX.Status;
+    "DB_Diagnostic".Axis_Z_Enabled       := #fbPowerZ.Status;
+    "DB_Diagnostic".Axis_X_Homed         := #Axis_X.StatusBits.HomingDone;
+    "DB_Diagnostic".Axis_Z_Homed         := #Axis_Z.StatusBits.HomingDone;
+
+    // =========================================================================
+    // CONTACTOR CONTROL -- called as the last step of FB_Process.
+    // FC_ContactorControl reads DB_HMI.Btn_Contactor_* and Bypass_EStop/HasError.
+    // In auto mode STATE_STARTING already sets these flags TRUE; they are reflected to I/O here.
+    // Called here rather than from OB1 to ensure contactor logic runs in sync with the process.
+    // =========================================================================
+    "FC_ContactorControl"();
+END_FUNCTION_BLOCK

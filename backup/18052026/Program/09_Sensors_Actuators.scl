@@ -1,0 +1,1015 @@
+// =============================================================================
+// Version_Recipe -- 09_Sensors_Actuators.scl
+// Reusable sensor and actuator function blocks
+//
+// FBs:
+//   FB_DigitalSensor    -- Any digital input (NC/NO, debounce, edge detection)
+//   FB_AnalogSensor     -- Analog input scaling + alarm
+//   FB_CylinderControl  -- 5/2 and 5/3 pneumatic cylinder control
+//
+// USAGE CONCEPT:
+//   A separate instance is opened from these FBs for each physical sensor/actuator.
+//   The instance DB is used directly as the HMI interface.
+//
+//   Example: 1 cylinder + mid-point magnetic switch + linear ruler:
+//     DB_Sen_Cyl1_Setpt  (FB_DigitalSensor) ← I/O: In_Cyl1_AtSetpoint
+//     DB_Sen_Cyl1_Ret    (FB_DigitalSensor) ← I/O: In_Cyl1_Retracted  (optional)
+//     DB_Cylinder1       (FB_CylinderControl)
+//     DB_LinearRuler     (FB_AnalogSensor)  ← I/O: AI_LinearRuler
+//
+// HMI CONNECTION RULES:
+//   HMI → PLC : writes directly to VAR_INPUT fields
+//               (inputs not connected in OB1 call are read from instance DB)
+//   PLC → HMI : reads VAR_OUTPUT fields
+//
+// MANUAL TEST USAGE:
+//   HMI can always write to DB_CylinderX.Cmd_* fields.
+//   Cylinder FB is called every scan from OB1 (independent of state machine).
+//   While SafetyOK=TRUE, cylinder accepts commands regardless of MANUAL/AUTO/STOPPED mode.
+// =============================================================================
+
+
+// -----------------------------------------------------------------------------
+// FB_DigitalSensor -- Digital input filter, polarity correction, edge detection
+// -----------------------------------------------------------------------------
+// USAGE:
+//   For any digital input such as magnetic switches, proximity sensors,
+//   buttons, and limit switches. NC/NO polarity and debounce time are
+//   configured per instance.
+//
+// EXAMPLE OB1 CALL:
+//   "DB_Sen_Cyl1_Ext"(RawInput := "In_Cyl1_Extended");
+//   // IsNC and DebounceTime use values from the instance DB
+//
+// HMI CONNECTIONS (via instance DB):
+//   IsNC         (Bool, →PLC) : TRUE = NC sensor, signal is inverted
+//   DebounceTime (Time, →PLC) : Stability time (T#0ms = no filter)
+//   State        (Bool, PLC→) : Filtered + polarity-corrected signal
+//   RisingEdge   (Bool, PLC→) : 1 scan: State FALSE→TRUE transition
+//   FallingEdge  (Bool, PLC→) : 1 scan: State TRUE→FALSE transition
+//
+// NC/NO LOGIC:
+//   IsNC=FALSE (NO): RawInput=TRUE → sensor active → State=TRUE
+//   IsNC=TRUE  (NC): RawInput=FALSE → sensor active → State=TRUE
+//   Use IsNC=TRUE for fail-safe NC components like limit switches and door sensors
+//
+// DEBOUNCE:
+//   Cylinder magnetic switch: T#10ms recommended
+//   Button (panel): T#20ms recommended
+//   Fast proximity: T#5ms or T#0ms
+// -----------------------------------------------------------------------------
+FUNCTION_BLOCK "FB_DigitalSensor"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+    VAR_INPUT
+        RawInput     : Bool;              // Raw physical input (polarity not yet corrected)
+        IsNC         : Bool := FALSE;     // TRUE = Normally Closed sensor (logic inverted)
+        DebounceTime : Time := T#10ms;    // Stability time (0 = no filter)
+    END_VAR
+    VAR_OUTPUT
+        State       : Bool;   // Filtered + polarity-corrected signal
+        RisingEdge  : Bool;   // 1 scan: State FALSE→TRUE
+        FallingEdge : Bool;   // 1 scan: State TRUE→FALSE
+    END_VAR
+    VAR
+        rawInverted : Bool;   // Raw signal after polarity correction
+        prevState   : Bool;   // Previous scan State value (for edge detection)
+        tonDebounce : TON;    // Rising edge debounce timer
+    END_VAR
+BEGIN
+    // Step 1: NC/NO polarity correction
+    // XOR: IsNC=FALSE → unchanged | IsNC=TRUE → inverted
+    #rawInverted := #RawInput XOR #IsNC;
+
+    // Step 2: Debounce filter (for rising edge)
+    // TON: Q=TRUE only if rawInverted stays TRUE for DebounceTime continuously
+    // rawInverted=FALSE immediately sets Q=FALSE (falling edge is unfiltered)
+    // Note: To also filter the falling edge, add TOF -- not implemented currently
+    #tonDebounce(IN := #rawInverted, PT := #DebounceTime);
+
+    IF #DebounceTime > T#0ms THEN
+        #State := #tonDebounce.Q;   // Filtered signal
+    ELSE
+        #State := #rawInverted;     // Unfiltered (when DebounceTime=0)
+    END_IF;
+
+    // Step 3: Edge detection (compare with previous scan)
+    #RisingEdge  :=     #State AND NOT #prevState;
+    #FallingEdge := NOT #State AND     #prevState;
+    #prevState   := #State;
+END_FUNCTION_BLOCK
+
+
+// -----------------------------------------------------------------------------
+// FB_AnalogSensor -- Analog input scaling, validity check, alarm
+// -----------------------------------------------------------------------------
+// USAGE:
+//   For analog inputs such as linear rulers, pressure sensors, and potentiometers.
+//   Calibration parameters (Raw_Min/Max, Phys_Min/Max) can be written from HMI.
+//
+// EXAMPLE OB1 CALL:
+//   "DB_LinearRuler"(AI_Raw := "AI_LinearRuler");
+//   // Calibration parameters are read from instance DB (written by HMI or FC_LoadConfig)
+//
+// S7-1200 AI STANDARD:
+//   0 V  (or 4  mA) → 0     (or 5530)
+//   10 V (or 20 mA) → 27648
+//   Raw_Min=0,    Raw_Max=27648 → correct for 0-10V
+//   Raw_Min=5530, Raw_Max=27648 → correct for 4-20mA
+//
+// SCALING FORMULA:
+//   norm = (AI_Raw - Raw_Min) / (Raw_Max - Raw_Min)
+//   Value = norm × (Phys_Max - Phys_Min) + Phys_Min
+//
+// HMI CONNECTIONS (via instance DB):
+//   AI_Raw   (Int,  →PLC) : Connected directly to physical input in OB1
+//   Raw_Min      (Int,  →PLC) : AI raw minimum (calibration)
+//   Raw_Max      (Int,  →PLC) : AI raw maximum (calibration)
+//   Phys_Min     (Real, →PLC) : Physical minimum (mm, bar, etc.)
+//   Phys_Max     (Real, →PLC) : Physical maximum
+//   InvertSignal (Bool, →PLC) : TRUE = sensor wired reverse (low raw = high physical value)
+//   Hi_Limit     (Real, →PLC) : High alarm level
+//   Lo_Limit     (Real, →PLC) : Low alarm level
+//   Value    (Real, PLC→) : Scaled output (engineering units)
+//   Valid    (Bool, PLC→) : TRUE = raw value within range (sensor healthy)
+//   Hi_Alarm (Bool, PLC→) : Value >= Hi_Limit
+//   Lo_Alarm (Bool, PLC→) : Value <= Lo_Limit
+// -----------------------------------------------------------------------------
+FUNCTION_BLOCK "FB_AnalogSensor"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+    VAR_INPUT
+        AI_Raw   : Int;               // Raw analog value (S7-1200: 0-27648)
+    END_VAR
+    VAR
+        // Calibration parameters -- declared as VAR (static) because:
+        //   • FC_LoadConfig writes to these at startup (must be writable from outside)
+        //   • HMI reads/writes directly via instance DB
+        //   • In optimized FBs, VAR_INPUT cannot be written externally (e.g. from FC)
+        Raw_Min      : Int  := 0;         // Raw minimum (corresponds to 0V or 4mA)
+        Raw_Max      : Int  := 27648;     // Raw maximum (corresponds to 10V or 20mA)
+        Phys_Min     : Real := 0.0;       // Physical minimum (mm, bar, °C, etc.)
+        Phys_Max     : Real := 100.0;     // Physical maximum
+        InvertSignal : Bool := FALSE;     // TRUE = sensor wired reverse (low raw = high physical value)
+        Hi_Limit     : Real := 90.0;      // High alarm level (engineering units)
+        Lo_Limit     : Real := 10.0;      // Low alarm level
+    END_VAR
+    VAR_OUTPUT
+        Value    : Real;              // Scaled output (engineering units)
+        Valid    : Bool;              // TRUE = raw value within range
+        Hi_Alarm : Bool;              // Value >= Hi_Limit (and Valid)
+        Lo_Alarm : Bool;              // Value <= Lo_Limit (and Valid)
+    END_VAR
+    VAR_TEMP
+        rawReal   : Real;
+        rangeReal : Real;
+        normVal   : Real;
+    END_VAR
+BEGIN
+    // Range check: is the raw value within the configured limits?
+    IF #AI_Raw >= #Raw_Min AND #AI_Raw <= #Raw_Max AND #Raw_Max > #Raw_Min THEN
+        // Scaling calculation
+        rawReal   := INT_TO_REAL(#AI_Raw - #Raw_Min);
+        rangeReal := INT_TO_REAL(#Raw_Max - #Raw_Min);
+        normVal   := rawReal / rangeReal;
+        IF #InvertSignal THEN normVal := 1.0 - normVal; END_IF;
+        #Value    := normVal * (#Phys_Max - #Phys_Min) + #Phys_Min;
+        #Valid    := TRUE;
+    ELSE
+        // Out of range: HMI should illuminate a sensor fault indicator
+        #Valid := FALSE;
+    END_IF;
+
+    // Alarm outputs -- evaluated only when measurement is valid
+    #Hi_Alarm := #Valid AND (#Value >= #Hi_Limit);
+    #Lo_Alarm := #Valid AND (#Value <= #Lo_Limit);
+END_FUNCTION_BLOCK
+
+
+// =============================================================================
+// FB_CylinderControl -- Pneumatic cylinder control (supports 5/2 and 5/3)
+// =============================================================================
+//
+// ─── QUICK SETUP ─────────────────────────────────────────────────────────────
+//
+//  1) Define physical I/O tags in TIA Portal:
+//       "In_Cyl1_AtSetpoint"  Bool  DI   → Mid/target point magnetic switch
+//       "In_Cyl1_AtRetract"   Bool  DI   → Retract end magnetic switch (skip if none)
+//       "Output_Cyl1_SolA"    Bool  DO   → Solenoid A (extend coil)
+//       "Output_Cyl1_SolB"    Bool  DO   → Solenoid B (retract coil, for 5/3)
+//
+//  2) Call in OB1 in this order (order matters -- sensors must run before cylinder FB):
+//       "DB_Sen_Cyl1_Setpt"(RawInput := "In_Cyl1_AtSetpoint");
+//       "DB_Sen_Cyl1_Ret"(RawInput   := "In_Cyl1_AtRetract");   // optional
+//       "DB_Cylinder1"(
+//           SafetyOK       := "Safety_Estop" OR "DB_HMI".Bypass_EStop,
+//           Sen_AtSetpoint := "DB_Sen_Cyl1_Setpt".State,
+//           Sen_AtRetract  := "DB_Sen_Cyl1_Ret".State
+//       );
+//       "Output_Cyl1_SolA" := "DB_Cylinder1".Sol_A;
+//       "Output_Cyl1_SolB" := "DB_Cylinder1".Sol_B;
+//
+//  3) Connect DB_Cylinder1 tags in HMI (see table below)
+//
+//  4) Set DB_Cylinder1.ValveType correctly:
+//       2 = 5/3 blocked center  (default, required for ruler mode)
+//       1 = 5/2 spring return   (single solenoid, intermediate hold not reliable)
+//
+// ─── HMI SCREEN CONNECTIONS ──────────────────────────────────────────────────
+//
+//  Writable (HMI → PLC):
+//    DB_Cylinder1.Cmd_Extend      Bool   Extend button
+//    DB_Cylinder1.Cmd_ExtendFull  Bool   Full extend button -- bypass sensors/ruler; release = stop (pulse use)
+//    DB_Cylinder1.Cmd_Retract     Bool   Retract button
+//    DB_Cylinder1.Cmd_RetractFull Bool   Full retract button -- bypass sensors/ruler; release = stop (pulse use)
+//    DB_Cylinder1.Timeout_Extend  Time   Extend timeout (Modes 0/1/3, default T#5S)
+//    DB_Cylinder1.Timeout_Retract Time   Retract timeout (Modes 0/1, default T#5S)
+//    DB_Cylinder1.TargetPos       Real   Mode 3: ruler stop position (mm) -- set from HMI or recipe
+//    DB_Cylinder1.ValveType       Byte   Valve type (set during commissioning)
+//
+//  Read-only (PLC → HMI):
+//    DB_Cylinder1.State           Int    State code (see STATE CODES)
+//    DB_Cylinder1.StateText       String State text
+//    DB_Cylinder1.AtSetpoint      Bool   Lamp: locked at setpoint (Modes 0/1)
+//    DB_Cylinder1.AtRetract       Bool   Lamp: at retract end (Modes 0/1)
+//    DB_Cylinder1.AtTarget        Bool   Lamp: within Tolerance of TargetPos (Mode 2)
+//    DB_Cylinder1.PosError        Real   Position error mm (Mode 2)
+//    DB_Cylinder1.Error           Bool   Lamp: error present
+//    DB_Cylinder1.ErrorID         Word   Error code (display in hex)
+//    DB_Cylinder1.Sol_A           Bool   Lamp: SolA energized (for debug)
+//    DB_Cylinder1.Sol_B           Bool   Lamp: SolB energized (for debug)
+//
+//  Sensor status (read-only, for debug screen):
+//    DB_Sen_Cyl1_Setpt.State      Bool   Setpoint sensor active?
+//    DB_Sen_Cyl1_Ret.State        Bool   Retract end sensor active?
+//
+// ─── MANUAL TEST USAGE ───────────────────────────────────────────────────────
+//
+//  Cylinder FB is called every scan from OB1 -- independent of the state machine.
+//  While SafetyOK=TRUE (E-Stop OK or bypass), HMI commands work regardless of
+//  whether the machine is in MANUAL, AUTO, or STOPPED mode.
+//
+//  Test scenarios:
+//
+//  [A] Full extend (Modes 0/1):
+//        Cmd_ExtendFull = TRUE (maintained button)
+//        Cylinder extends until Timeout_Extend expires.
+//        Returns to Idle when button is released.
+//
+//  [B] Move to setpoint and hold (5/3 valve, Mode 1):
+//        Give Cmd_Extend = TRUE once (momentary sufficient)
+//        When Sen_AtSetpoint=TRUE, FB stops and locks. State=3.
+//        To retract: Cmd_Retract = TRUE.
+//
+//  [C] Move to setpoint and hold (5/2 valve, Mode 1):
+//        Cmd_Extend = TRUE MUST BE HELD.
+//        When Sen_AtSetpoint=TRUE, Sol_A=TRUE is maintained (pressure hold).
+//        If button released, spring retracts.
+//
+//  [D] Retract without sensor (Mode 0):
+//        Cmd_Retract = TRUE
+//        Transitions to Idle after Timeout_Retract -- no error.
+//
+//  [E] Ruler zone-pulse positioning (Mode 2, ValveType=2):
+//        Set TargetPos (mm). Give Cmd_GotoPos rising edge (or Cmd_Extend/Cmd_Retract).
+//        FB fires zone-calculated pulses. Direction auto-selected from PosError sign.
+//        After each pulse: solenoid off (mechanical lock) → wait SettleTime → evaluate.
+//        Repeats until within Tolerance or MaxCorrections reached (error 16#0505).
+//        Each pulse lets the piston travel, then holds; position approaches target step by step.
+//
+//  [F] Clear error:
+//        State=10 (ERROR) → give any command → State=0 (Idle).
+//
+// ─── VALVE TYPE SELECTION ─────────────────────────────────────────────────────
+//
+//  ValveType=1 (5/2 Spring Return):
+//    Sol_A=TRUE  → piston extends.  Sol_A=FALSE → piston retracts (spring).
+//    Sol_B is never used.
+//    ⚠ On power loss, piston returns to spring position (retracted).
+//
+//  ValveType=2 (5/3 Blocked Center) -- recommended, required for Mode 2:
+//    Sol_A=TRUE, Sol_B=FALSE → extends
+//    Sol_A=FALSE, Sol_B=TRUE → retracts
+//    Sol_A=FALSE, Sol_B=FALSE → mechanical lock (piston stays in place)
+//    ⚠ On power loss, piston is locked (remains in current position).
+//    ⚠ Purchase BLOCKED CENTER -- do NOT use EXHAUST CENTER (releases on power loss).
+//
+//  ValveType=3 (5/3 Exhaust Center):
+//    Not suitable for holding intermediate positions.
+//
+// ─── POSITIONING MODES ───────────────────────────────────────────────────────
+//
+//  Mode 0 (No sensor):      Cmd_Extend = full stroke; timeout = done, no error.
+//  Mode 1 (Magn. switch):   Cmd_Extend waits for Sen_AtSetpoint; timeout = error 16#0501.
+//  Mode 2 (Linear ruler):   Zone-pulse positioning. ValveType must be 2.
+//                           No digital end sensors used in this mode.
+//  Mode 3 (Ruler setpoint): Cmd_Extend/Cmd_GotoPos extends until RulerValue >= TargetPos; solenoid cuts immediately.
+//                           TargetPos (mm) is set from HMI (Cyl_TargetPos) or recipe CMD=40 (Param × Cmd40_Gain).
+//                           Sol_A held on during extend; solenoid cuts when position reached.
+//                           5/3 blocked-center valve recommended (mechanical lock holds position).
+//                           RulerValid=FALSE → error 16#0504. Timeout → error 16#0506.
+//
+// ─── STATE CODES ─────────────────────────────────────────────────────────────
+//   -1 = E-Stop        SafetyOK=FALSE, all outputs off
+//    0 = Idle           No command / waiting
+//    1 = Extending      Sol_A=TRUE, waiting for setpoint or timeout (Modes 0/1)
+//    2 = Retracting     5/3:Sol_B=TRUE / 5/2:spring (Modes 0/1)
+//    3 = At Setpoint    Held at target position, locked (Modes 1/3)
+//    4 = At Retract     Retract end sensor triggered (Mode 1)
+//    5 = Ruler Pulse    Solenoid firing for zone-calculated duration (Mode 2)
+//    7 = Ruler Hold     Both solenoids off (mechanical lock); settles then evaluates (Mode 2)
+//   10 = ERROR          Fault condition -- clears on next command
+//
+// ─── ERROR CODES ─────────────────────────────────────────────────────────────
+//   16#0501 = Extend timeout   -- Sen_AtSetpoint not received within Timeout_Extend (Mode 1)
+//   16#0502 = Retract timeout  -- reserved
+//   16#0503 = Sensor conflict        -- Sen_AtSetpoint AND Sen_AtRetract TRUE simultaneously
+//   16#0504 = Ruler invalid          -- RulerValid=FALSE during ruler motion (Mode 2)
+//   16#0505 = Max corrections        -- MaxCorrections pulses fired without reaching Tolerance (Mode 2)
+//   16#0506 = Ruler setpoint timeout -- RulerValue did not reach TargetPos within Timeout_Extend (Mode 3)
+//
+// ─── RULER MODE ZONE-PULSE PARAMETERS (Mode 2) ───────────────────────────────
+//
+//   Zone boundaries are distances from target (mm), all HMI-configurable.
+//   The FB selects the pulse duration based on ABS(PosError):
+//
+//     ABS(PosError) <= Zone1_Limit              → Pulse_Short
+//     Zone1_Limit  < ABS(PosError) <= Zone2_Limit → Pulse_Medium
+//     Zone2_Limit  < ABS(PosError) <= Zone3_Limit → Pulse_Long
+//                    ABS(PosError)  > Zone3_Limit → Pulse_Max
+//
+//   After each pulse: solenoid off → wait SettleTime → evaluate position → repeat or done.
+//   Direction (extend/retract) is auto-selected each pulse from PosError sign.
+//   The solenoid is never on longer than the selected pulse duration.
+//
+// ─── ADDING A NEW CYLINDER ───────────────────────────────────────────────────
+//   1) Add new instance DBs to 02_DataBlocks.scl:
+//        DATA_BLOCK "DB_Cylinder2" ... "FB_CylinderControl"
+//        DATA_BLOCK "DB_Sen_Cyl2_Setpt" ... "FB_DigitalSensor"
+//   2) Define physical tags in TIA Portal
+//   3) Add calls to 08_Main_OB1.scl (sensors before cylinder FB)
+//   4) Connect physical outputs: Output_Cyl2_SolA/B := DB_Cylinder2.Sol_A/B
+// -----------------------------------------------------------------------------
+FUNCTION_BLOCK "FB_CylinderControl"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 3.0
+    VAR_INPUT
+        // Valve type -- set once during commissioning (by FC_LoadConfig or HMI)
+        ValveType       : Byte := 2;        // 1=5/2_spring  2=5/3_blocked  3=5/3_exhaust
+
+        // Safety -- connected in OB1
+        SafetyOK        : Bool := FALSE;    // E-Stop OK → output permission
+
+        // Commands -- HMI writes to instance DB, not connected in OB1
+        Cmd_Extend      : Bool := FALSE;    // Extend: move to setpoint (Mode 1) or TargetPos (Mode 2)
+        Cmd_ExtendFull  : Bool := FALSE;    // Full extend: bypass sensors/ruler, timeout = done; release = stop (pulse use)
+        Cmd_Retract     : Bool := FALSE;    // Retract
+        Cmd_RetractFull : Bool := FALSE;    // Full retract: bypass sensors/ruler, timeout = done; release = stop (pulse use)
+
+        // Sensor inputs -- connected from FB_DigitalSensor.State in OB1 (Modes 0/1)
+        Sen_AtSetpoint  : Bool := FALSE;    // Mid/target point magnetic switch (Mode 1)
+        Sen_AtRetract   : Bool := FALSE;    // Retract end magnetic switch (optional)
+
+        // Timeout -- Modes 0, 1, and 3
+        Timeout_Extend  : Time := T#5S;
+        Timeout_Retract : Time := T#5S;
+
+        // Positioning mode -- set from HMI during commissioning
+        // 0 = No sensor:     Cmd_Extend acts as full stroke; timeout = done, no error
+        // 1 = Magn. switch:  Cmd_Extend waits for Sen_AtSetpoint; timeout = error 16#0501
+        // 2 = Linear ruler:  Zone-pulse positioning toward TargetPos; ValveType must be 2
+        // 3 = Ruler setpoint: Extend until RulerValue >= TargetPos; solenoid cuts immediately; timeout = error 16#0506
+        PositioningMode : Byte := 0;
+
+        // Ruler inputs (Modes 2 and 3) -- connect in OB1
+        Cmd_GotoPos     : Bool := FALSE;    // Rising edge: go to TargetPos (Mode 2 = zone-pulse, Mode 3 = extend until reached)
+        RulerValue      : Real := 0.0;      // [Modes 2+3] Current position (mm) -- connect to DB_LinearRuler.Value
+        RulerValid      : Bool := FALSE;    // [Modes 2+3] Measurement valid -- connect to DB_LinearRuler.Valid
+        TargetPos       : Real := 0.0;      // [Modes 2+3] Target position (mm); clamped by MinPos/MaxPos
+
+        // Ruler position clamp (Modes 2 and 3, 0 = disabled)
+        MaxPos          : Real := 0.0;      // Max allowed position (mm); clamps TargetPos
+        MinPos          : Real := 0.0;      // Min allowed position (mm); clamps TargetPos
+
+        // [Mode 2 - Zone-pulse] Accuracy
+        Tolerance       : Real := 20.0;      // Acceptable position error (mm)
+        MaxCorrections  : Int  := 10;       // Max total pulses before error 16#0505
+
+        // [Mode 2 - Zone-pulse] Timing
+        SettleTime      : Time := T#300ms;  // Wait after each pulse before evaluating position
+
+        // [Mode 2 - Zone-pulse] Zone thresholds and pulse durations -- all HMI-configurable
+        // Pulse duration is selected by ABS(PosError):
+        //   ABS(error) <= Zone1_Limit              → Pulse_Short   (fine correction, near target)
+        //   Zone1_Limit < ABS(error) <= Zone2_Limit → Pulse_Medium
+        //   Zone2_Limit < ABS(error) <= Zone3_Limit → Pulse_Long
+        //                ABS(error)  > Zone3_Limit  → Pulse_Max    (large initial move)
+        Zone1_Limit     : Real := 10.0;     // [Mode 2 - Zone-pulse] Fine zone boundary (mm)
+        Zone2_Limit     : Real := 50.0;     // [Mode 2 - Zone-pulse] Medium zone boundary (mm)
+        Zone3_Limit     : Real := 100.0;    // [Mode 2 - Zone-pulse] Coarse zone boundary (mm)
+        Pulse_Short     : Time := T#50ms;  // [Mode 2 - Zone-pulse] Finest correction pulse
+        Pulse_Medium    : Time := T#100ms;  // [Mode 2 - Zone-pulse]
+        Pulse_Long      : Time := T#250ms;  // [Mode 2 - Zone-pulse]
+        Pulse_Max       : Time := T#1000ms; // [Mode 2 - Zone-pulse] Large initial move pulse
+    END_VAR
+    VAR_OUTPUT
+        Sol_A       : Bool;                 // Extend solenoid output
+        Sol_B       : Bool;                 // Retract solenoid output (5/3 only)
+        State       : Int;                  // State code
+        StateText   : String[14];           // HMI state text
+        AtSetpoint  : Bool;                 // Held at setpoint sensor (Modes 0/1)
+        AtRetract   : Bool;                 // Confirmed at retract end (Modes 0/1)
+        AtTarget    : Bool;                 // Mode 2: within Tolerance of TargetPos
+        PosError    : Real;                 // Mode 2: RulerValue - TargetPos (mm)
+        Error       : Bool;                 // Active error
+        ErrorID     : Word;                 // Error code (16#05xx)
+    END_VAR
+    VAR
+        extendFull      : Bool;             // ExtendFull mode active (Modes 0/1)
+        retractFull     : Bool;             // RetractFull mode active
+        gotoTargetLatch : Bool;             // GotoPos latch for Mode 3: keeps extending after button release
+        tExtend         : TON;              // Extend timeout (Modes 0/1/3)
+        tRetract        : TON;              // Retract timeout (Modes 0/1)
+        // Recipe CMD=40 gain: TargetPos = Param × Cmd40_Gain (mm).
+        // Set in FC_LoadConfig; adjustable from HMI at runtime.
+        Cmd40_Gain      : Real := 1.0;
+        prevCmdGotoPos  : Bool;             // Previous Cmd_GotoPos value (rising edge detection)
+        corrAttempts    : Int;              // Total pulses fired this move (reset on new command)
+        tPulse          : TON;              // Mode 2: pulse duration timer (State 5)
+        pulseExtend     : Bool;             // Mode 2: TRUE = current pulse is extend direction
+        calculatedPulse : Time;             // Mode 2: zone-selected pulse duration
+        tSettle         : TON;              // Mode 2: post-pulse settle timer (State 7)
+        inSettling      : Bool;             // Mode 2: TRUE = waiting for piston to stop
+        // CMD=41 atmosphere override (BackSupport only; unused/FALSE on all other cylinders)
+        // Written by FB_RecipeHandler; consumed as OR override in OB1 output assignment.
+        SolB_Cmd41      : Bool := FALSE;    // CMD=41 Param=1: hold Sol_B ON independently of state machine
+        SolAtmo_Cmd     : Bool := FALSE;    // CMD=41 Param=1: ON / Param=2: OFF
+    END_VAR
+    VAR_TEMP
+        effectiveTarget : Real;             // TargetPos clamped to MinPos/MaxPos
+        absError        : Real;             // ABS(PosError) used for zone selection
+    END_VAR
+BEGIN
+    // ── Safety: SafetyOK=FALSE → all outputs off, state=-1 ───────────────────
+    IF NOT #SafetyOK THEN
+        #Sol_A      := FALSE;
+        #Sol_B      := FALSE;
+        #State      := -1;
+        #StateText  := 'E-Stop';
+        #AtSetpoint := FALSE;
+        #AtRetract  := FALSE;
+        RETURN;
+    END_IF;
+
+    // ── Sensor conflict check (Modes 0/1) ────────────────────────────────────
+    IF #Sen_AtSetpoint AND #Sen_AtRetract THEN
+        #Sol_A     := FALSE;
+        #Sol_B     := FALSE;
+        #State     := 10;
+        #Error     := TRUE;
+        #ErrorID   := 16#0503;
+        #StateText := 'ERROR';
+        RETURN;
+    END_IF;
+
+    // ── Timeout timers (Modes 0/1 only -- States 1 and 2) ────────────────────
+    #tExtend(IN  := (#State = 1), PT := #Timeout_Extend);
+    #tRetract(IN := (#State = 2), PT := #Timeout_Retract);
+
+    // ── Effective target: clamp TargetPos to MinPos/MaxPos ───────────────────
+    IF #MaxPos > 0.0 AND #TargetPos > #MaxPos THEN
+        #effectiveTarget := #MaxPos;
+    ELSIF #MinPos > 0.0 AND #TargetPos < #MinPos THEN
+        #effectiveTarget := #MinPos;
+    ELSE
+        #effectiveTarget := #TargetPos;
+    END_IF;
+
+    // ── State machine ─────────────────────────────────────────────────────────
+    CASE #State OF
+
+        -1: // E-Stop cleared → go to Idle
+            #State := 0;
+
+        0: // IDLE -- waiting for command
+            #Error           := FALSE;
+            #ErrorID         := 16#0000;
+            #AtTarget        := FALSE;
+            #PosError        := 0.0;
+            #corrAttempts    := 0;
+            #inSettling      := FALSE;
+            #gotoTargetLatch := FALSE;
+
+            IF #Cmd_ExtendFull THEN
+                // Full stroke: ignores all sensors, timeout = mechanical end = done
+                #extendFull := TRUE;
+                #State      := 1;
+
+            ELSIF #Cmd_Extend THEN
+                CASE #PositioningMode OF
+                    0: // No sensor -- full stroke
+                        #extendFull := TRUE;
+                        #State      := 1;
+                    1: // Magnetic switch
+                        #extendFull := FALSE;
+                        #State      := 1;
+                    2: // Ruler -- zone-pulse toward TargetPos (direction auto-selected)
+                        IF NOT #RulerValid THEN
+                            #State := 10; #Error := TRUE; #ErrorID := 16#0504;
+                        ELSE
+                            #State := 5;
+                        END_IF;
+                    3: // Ruler setpoint -- extend until RulerValue >= TargetPos
+                        IF NOT #RulerValid THEN
+                            #State := 10; #Error := TRUE; #ErrorID := 16#0504;
+                        ELSIF #effectiveTarget > 0.0 AND #RulerValue >= #effectiveTarget THEN
+                            #State := 3;   // Already at or past target position: lock immediately
+                        ELSE
+                            #extendFull := FALSE;
+                            #State      := 1;
+                        END_IF;
+                    ELSE:
+                        #extendFull := TRUE;
+                        #State      := 1;
+                END_CASE;
+
+            ELSIF #Cmd_Retract THEN
+                IF #PositioningMode = 2 THEN
+                    // Ruler mode: zone-pulse toward TargetPos (direction auto-selected)
+                    IF NOT #RulerValid THEN
+                        #State := 10; #Error := TRUE; #ErrorID := 16#0504;
+                    ELSE
+                        #State := 5;
+                    END_IF;
+                ELSE
+                    #State := 2;
+                END_IF;
+
+            ELSIF #Cmd_RetractFull THEN
+                // Full retract: bypass all sensors and ruler, retract while held
+                #retractFull := TRUE;
+                #State := 2;
+
+            ELSIF #Cmd_GotoPos AND NOT #prevCmdGotoPos AND (#PositioningMode = 2 OR #PositioningMode = 3) THEN
+                // Rising edge: go to configured target (Mode 2 = zone-pulse, Mode 3 = extend to level)
+                IF #PositioningMode = 2 THEN
+                    IF NOT #RulerValid THEN
+                        #State := 10; #Error := TRUE; #ErrorID := 16#0504;
+                    ELSIF ABS(#RulerValue - #effectiveTarget) <= #Tolerance THEN
+                        #State := 7;   // Already within tolerance -- lock immediately
+                    ELSE
+                        #State := 5;
+                    END_IF;
+                ELSE // Mode 3: latched extend to TargetPos
+                    IF NOT #RulerValid THEN
+                        #State := 10; #Error := TRUE; #ErrorID := 16#0504;
+                    ELSIF #effectiveTarget > 0.0 AND #RulerValue >= #effectiveTarget THEN
+                        #State := 3;   // Already at or past target -- lock immediately
+                    ELSE
+                        #gotoTargetLatch := TRUE;
+                        #extendFull      := FALSE;
+                        #State           := 1;
+                    END_IF;
+                END_IF;
+            END_IF;
+            #prevCmdGotoPos := #Cmd_GotoPos;
+
+        1: // EXTENDING -- Sol_A=TRUE, waiting for setpoint or timeout (Modes 0/1/3)
+            IF #PositioningMode = 3 AND NOT #extendFull THEN
+                // Mode 3: watch ruler every scan; cut solenoid when position reached
+                IF NOT #RulerValid THEN
+                    #State := 10; #Error := TRUE; #ErrorID := 16#0504;
+                ELSIF #effectiveTarget > 0.0 AND #RulerValue >= #effectiveTarget THEN
+                    #State := 3;                  // Position reached: solenoid cuts next scan
+                ELSIF #tExtend.Q THEN
+                    #State := 10; #Error := TRUE; #ErrorID := 16#0506;
+                ELSIF NOT #Cmd_Extend AND NOT #Cmd_ExtendFull AND NOT #gotoTargetLatch THEN
+                    #State := 0;
+                END_IF;
+            ELSIF #Sen_AtSetpoint AND NOT #extendFull AND #PositioningMode = 1 THEN
+                #State      := 3;
+                #extendFull := FALSE;
+            ELSIF #tExtend.Q THEN
+                IF #extendFull THEN
+                    // ExtendFull: timeout = mechanical end = success
+                    #extendFull := FALSE;
+                    #State      := 3;
+                ELSE
+                    #State := 10; #Error := TRUE; #ErrorID := 16#0501;
+                END_IF;
+            ELSIF NOT #Cmd_Extend AND NOT #Cmd_ExtendFull THEN
+                #State      := 0;
+                #extendFull := FALSE;
+            END_IF;
+
+        2: // RETRACTING -- 5/3:Sol_B=TRUE / 5/2:spring (Modes 0/1)
+            IF #Sen_AtRetract THEN
+                #retractFull := FALSE;
+                #State := 4;
+            ELSIF #tRetract.Q THEN
+                // Timeout = normal completion (no sensor, or sensor absent)
+                #retractFull := FALSE;
+                IF #PositioningMode = 0 THEN
+                    #State := 4;   // Mode 0: hold retract solenoid until extend commanded
+                ELSE
+                    #State := 0;
+                END_IF;
+            ELSIF NOT #Cmd_Retract AND NOT #Cmd_RetractFull THEN
+                #retractFull := FALSE;
+                #State := 0;
+            END_IF;
+
+        3: // AT SETPOINT -- held at sensor (Mode 1/3)
+            #gotoTargetLatch := FALSE;
+            IF #Cmd_Retract OR #Cmd_RetractFull THEN
+                #retractFull := #Cmd_RetractFull;
+                #State := 2;
+            ELSIF #Cmd_ExtendFull THEN
+                // Pulse extend from locked position: bypass ruler/sensor
+                #extendFull := TRUE;
+                #State := 1;
+            ELSIF #ValveType = 1 AND NOT #Cmd_Extend AND NOT #Cmd_ExtendFull AND #PositioningMode <> 0 THEN
+                // 5/2: Cmd_Extend released → spring retracts (Mode 0: hold until retract commanded)
+                #State := 2;
+            END_IF;
+
+        4: // AT RETRACT -- confirmed by Sen_AtRetract=TRUE (Mode 1)
+            IF #Cmd_ExtendFull THEN
+                #extendFull := TRUE;
+                #State      := 1;
+            ELSIF #Cmd_Extend THEN
+                CASE #PositioningMode OF
+                    0:
+                        #extendFull := TRUE;
+                        #State      := 1;
+                    1:
+                        #extendFull := FALSE;
+                        #State      := 1;
+                    2:
+                        IF NOT #RulerValid THEN
+                            #State := 10; #Error := TRUE; #ErrorID := 16#0504;
+                        ELSE
+                            #State := 5;
+                        END_IF;
+                    3: // Ruler setpoint -- extend until RulerValue >= TargetPos
+                        IF NOT #RulerValid THEN
+                            #State := 10; #Error := TRUE; #ErrorID := 16#0504;
+                        ELSIF #effectiveTarget > 0.0 AND #RulerValue >= #effectiveTarget THEN
+                            #State := 3;   // Already at or past target position
+                        ELSE
+                            #extendFull := FALSE;
+                            #State      := 1;
+                        END_IF;
+                    ELSE:
+                        #extendFull := TRUE;
+                        #State      := 1;
+                END_CASE;
+            ELSIF #Cmd_GotoPos AND NOT #prevCmdGotoPos AND (#PositioningMode = 2 OR #PositioningMode = 3) THEN
+                IF #PositioningMode = 2 THEN
+                    IF NOT #RulerValid THEN
+                        #State := 10; #Error := TRUE; #ErrorID := 16#0504;
+                    ELSIF ABS(#RulerValue - #effectiveTarget) <= #Tolerance THEN
+                        #State := 7;
+                    ELSE
+                        #corrAttempts := 0; #State := 5;
+                    END_IF;
+                ELSE // Mode 3: latched extend to TargetPos
+                    IF NOT #RulerValid THEN
+                        #State := 10; #Error := TRUE; #ErrorID := 16#0504;
+                    ELSIF #effectiveTarget > 0.0 AND #RulerValue >= #effectiveTarget THEN
+                        #State := 3;
+                    ELSE
+                        #gotoTargetLatch := TRUE;
+                        #extendFull      := FALSE;
+                        #State           := 1;
+                    END_IF;
+                END_IF;
+            END_IF;
+
+        5: // RULER_PULSE -- fires solenoid for zone-calculated duration (Mode 2)
+            //
+            // On first scan in this state (tPulse not yet running):
+            //   1. Calculate PosError and direction (pulseExtend).
+            //   2. Select pulse duration from zone table.
+            //   3. Start tPulse.
+            // On subsequent scans: hold solenoid on until tPulse.Q.
+            // No operator escape during pulse -- SettleTime is short, wait for State 7.
+            // Only exception: ruler loss → immediate fault.
+            IF NOT #RulerValid THEN
+                // Safety: ruler lost during pulse -- cut solenoid and fault
+                #tPulse(IN := FALSE, PT := T#0ms);
+                #State := 10; #Error := TRUE; #ErrorID := 16#0504;
+            ELSE
+                // Entry: calculate direction and zone-pulse duration
+                IF #tPulse.ET = T#0ms THEN
+                    #PosError    := #RulerValue - #effectiveTarget;
+                    #pulseExtend := #PosError < 0.0;    // undershoot → extend; overshoot → retract
+                    #absError    := ABS(#PosError);
+
+                    IF #absError <= #Zone1_Limit THEN
+                        #calculatedPulse := #Pulse_Short;
+                    ELSIF #absError <= #Zone2_Limit THEN
+                        #calculatedPulse := #Pulse_Medium;
+                    ELSIF #absError <= #Zone3_Limit THEN
+                        #calculatedPulse := #Pulse_Long;
+                    ELSE
+                        #calculatedPulse := #Pulse_Max;
+                    END_IF;
+                END_IF;
+
+                // Run pulse timer
+                #tPulse(IN := TRUE, PT := #calculatedPulse);
+
+                IF #tPulse.Q THEN
+                    // Pulse complete: cut solenoid, go to settle + evaluate
+                    #tPulse(IN := FALSE, PT := #calculatedPulse);
+                    #corrAttempts := #corrAttempts + 1;
+                    #inSettling   := TRUE;
+                    #State        := 7;
+                END_IF;
+            END_IF;
+
+        7: // RULER_HOLD -- both solenoids off, 5/3 mechanical lock (Mode 2)
+            //
+            // Phase 1 (inSettling=TRUE): wait SettleTime for piston to stop.
+            // Phase 2 (inSettling=FALSE): evaluate position.
+            //   - Within Tolerance → AtTarget=TRUE, hold here.
+            //   - Not at target, pulses remaining → fire next pulse (State 5).
+            //   - Not at target, pulses exhausted → error 16#0505.
+            // Operator commands always take priority in Phase 2.
+            // During Phase 1: wait it out (SettleTime is short).
+            #tSettle(IN := #inSettling, PT := #SettleTime);
+            IF #tSettle.Q THEN
+                #inSettling := FALSE;
+                #tSettle(IN := FALSE, PT := #SettleTime);
+            END_IF;
+
+            IF NOT #inSettling THEN
+                // Phase 2: evaluate position
+                #PosError := #RulerValue - #effectiveTarget;
+                #AtTarget := ABS(#PosError) <= #Tolerance;
+
+                // Operator commands take priority
+                IF #Cmd_GotoPos AND NOT #prevCmdGotoPos THEN
+                    // Re-issue (e.g. TargetPos changed): restart pulse loop
+                    IF #RulerValid AND NOT #AtTarget THEN
+                        #corrAttempts := 0; #inSettling := TRUE; #State := 5;
+                    END_IF;
+                ELSIF #Cmd_ExtendFull THEN
+                    // Full stroke override
+                    #AtTarget := FALSE; #PosError := 0.0; #corrAttempts := 0;
+                    #extendFull := TRUE; #State := 1;
+                ELSIF #Cmd_Retract OR #Cmd_Extend THEN
+                    // Manual command while holding: restart toward TargetPos only if not already there
+                    IF NOT #AtTarget THEN
+                        #AtTarget := FALSE; #PosError := 0.0; #corrAttempts := 0;
+                        #inSettling := TRUE; #State := 5;
+                    END_IF;
+                ELSIF NOT #AtTarget AND #corrAttempts < #MaxCorrections THEN
+                    // Auto: fire next correction pulse
+                    #inSettling := TRUE; #State := 5;
+                ELSIF NOT #AtTarget AND #corrAttempts >= #MaxCorrections THEN
+                    #State := 10; #Error := TRUE; #ErrorID := 16#0505;
+                END_IF;
+            END_IF;
+
+        10: // ERROR -- clears on next command
+            IF #Cmd_Extend OR #Cmd_ExtendFull OR #Cmd_Retract OR #Cmd_RetractFull THEN
+                #Error   := FALSE;
+                #ErrorID := 16#0000;
+                #State   := 0;
+            ELSIF #Cmd_GotoPos AND NOT #prevCmdGotoPos AND (#PositioningMode = 2 OR #PositioningMode = 3) THEN
+                // GotoPos rising edge clears error and restarts motion
+                #Error := FALSE; #ErrorID := 16#0000; #corrAttempts := 0;
+                IF #PositioningMode = 2 THEN
+                    IF NOT #RulerValid THEN
+                        #State := 10; #Error := TRUE; #ErrorID := 16#0504;
+                    ELSIF ABS(#RulerValue - #effectiveTarget) <= #Tolerance THEN
+                        #State := 7;
+                    ELSE
+                        #State := 5;
+                    END_IF;
+                ELSE // Mode 3
+                    IF NOT #RulerValid THEN
+                        #State := 10; #Error := TRUE; #ErrorID := 16#0504;
+                    ELSIF #effectiveTarget > 0.0 AND #RulerValue >= #effectiveTarget THEN
+                        #State := 3;
+                    ELSE
+                        #gotoTargetLatch := TRUE;
+                        #extendFull      := FALSE;
+                        #State           := 1;
+                    END_IF;
+                END_IF;
+            END_IF;
+
+        ELSE
+            #State := 0;
+
+    END_CASE;
+
+    // ── Solenoid outputs ──────────────────────────────────────────────────────
+    CASE #State OF
+        1: // EXTENDING (Modes 0/1)
+            #Sol_A := TRUE;
+            #Sol_B := FALSE;
+        2: // RETRACTING (Modes 0/1)
+            IF #ValveType = 1 THEN
+                #Sol_A := FALSE;
+                #Sol_B := FALSE;
+            ELSE
+                #Sol_A := FALSE;
+                #Sol_B := TRUE;
+            END_IF;
+        3: // AT SETPOINT (Mode 0/1/3)
+            IF #PositioningMode = 0 THEN
+                #Sol_A := TRUE;                              // Mode 0: hold until retract commanded
+                #Sol_B := FALSE;
+            ELSIF #ValveType = 1 THEN
+                #Sol_A := #Cmd_Extend OR #Cmd_ExtendFull;   // pressure hold
+                #Sol_B := FALSE;
+            ELSE
+                #Sol_A := FALSE;                             // 5/3 blocked: mechanical lock
+                #Sol_B := FALSE;
+            END_IF;
+        5: // RULER_PULSE: fire in zone-calculated direction (Mode 2)
+            IF #pulseExtend THEN
+                #Sol_A := TRUE;
+                #Sol_B := FALSE;
+            ELSE
+                #Sol_A := FALSE;
+                #Sol_B := TRUE;     // 5/3 blocked: active retract
+            END_IF;
+        4: // AT RETRACT (Mode 0/1)
+            IF #PositioningMode = 0 AND #ValveType <> 1 THEN
+                #Sol_A := FALSE;
+                #Sol_B := TRUE;                              // Mode 0 + 5/3: hold retract solenoid
+            ELSE
+                #Sol_A := FALSE;                             // Mode 1 or 5/2: both off
+                #Sol_B := FALSE;
+            END_IF;
+        7: // RULER_HOLD: mechanical lock (Mode 2)
+            #Sol_A := FALSE;
+            #Sol_B := FALSE;
+        ELSE
+            // IDLE, E-STOP, ERROR: both off
+            #Sol_A := FALSE;
+            #Sol_B := FALSE;
+    END_CASE;
+
+    // ── Edge latch for Cmd_GotoPos -- updated every scan after state machine ──
+    #prevCmdGotoPos := #Cmd_GotoPos;
+
+    // ── State text ────────────────────────────────────────────────────────────
+    CASE #State OF
+        -1: #StateText := 'E-Stop';
+         0: #StateText := 'Idle';
+         1: IF #extendFull THEN
+                #StateText := 'Extend Full';
+            ELSE
+                #StateText := 'Extending';
+            END_IF;
+         2: IF #retractFull THEN
+                #StateText := 'Retract Full';
+            ELSE
+                #StateText := 'Retracting';
+            END_IF;
+         3: #StateText := 'At Setpoint';
+         4: #StateText := 'At Retract';
+         5: IF #pulseExtend THEN
+                #StateText := 'Pulse Extend';
+            ELSE
+                #StateText := 'Pulse Retract';
+            END_IF;
+         7: #StateText := 'Ruler Hold';
+        10: #StateText := 'ERROR';
+        ELSE: #StateText := '?';
+    END_CASE;
+
+    // ── Position confirmation outputs ─────────────────────────────────────────
+    #AtSetpoint := (#State = 3);
+    #AtRetract  := (#State = 4);
+    // AtTarget and PosError are updated continuously in State 7 (RULER_HOLD)
+END_FUNCTION_BLOCK
+
+
+// =============================================================================
+// FC_CylinderDispatch -- Routes manual cylinder commands to the selected cylinder
+// =============================================================================
+//
+// Reads command fields from DB_Manual.SelectedCylinder and related fields,
+// writes them to the corresponding DB_CylinderX instance, then mirrors
+// status back to DB_Manual.SelCyl_* for HMI display.
+//
+// Called from OB1 AFTER all cylinder FB calls so status reflects the current scan.
+// Commands have a one-scan delay relative to the HMI write -- imperceptible in practice.
+//
+// ADDING A CYLINDER:
+//   1. Add DATA_BLOCK "DB_CylinderN" in 02_DataBlocks.scl
+//   2. Add sensor FB calls + DB_CylinderN() call + solenoid outputs in OB1
+//   3. Copy CASE 1 block below, change all DB_Cylinder1 → DB_CylinderN,
+//      and update SelCyl_Name string.
+// =============================================================================
+FUNCTION "FC_CylinderDispatch" : Void
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+BEGIN
+    // Apply cylinder config on rising edge of Btn_ApplyType (PositioningMode + Tolerance)
+    IF "DB_Manual".Btn_ApplyType AND NOT "DB_Manual".prevBtn_ApplyType THEN
+        CASE "DB_Manual".SelectedCylinder OF
+            1: "DB_Cylinder_BackSupport".PositioningMode  := INT_TO_BYTE("DB_Manual".SelCyl_SetType);
+               "DB_Cylinder_BackSupport".Tolerance        := "DB_Manual".Cyl_Tolerance;
+            // 2: SheetHolder removed from project
+            3: "DB_Cylinder_ToolHeadLock".PositioningMode := INT_TO_BYTE("DB_Manual".SelCyl_SetType);
+               "DB_Cylinder_ToolHeadLock".Tolerance       := "DB_Manual".Cyl_Tolerance;
+            4: "DB_Cylinder_MandrelLock".PositioningMode  := INT_TO_BYTE("DB_Manual".SelCyl_SetType);
+               "DB_Cylinder_MandrelLock".Tolerance        := "DB_Manual".Cyl_Tolerance;
+        END_CASE;
+    END_IF;
+    "DB_Manual".prevBtn_ApplyType := "DB_Manual".Btn_ApplyType;
+
+    CASE "DB_Manual".SelectedCylinder OF
+
+        1: // BackSupport -- linear ruler, PositioningMode=3
+            "DB_Manual".SelCyl_Name      := 'BackSupport';
+            "DB_Cylinder_BackSupport".Cmd_ExtendFull := "DB_Manual".Btn_CylExtendFull;
+            "DB_Cylinder_BackSupport".Cmd_RetractFull:= "DB_Manual".Btn_CylRetractFull;
+            "DB_Cylinder_BackSupport".Cmd_GotoPos    := "DB_Manual".Btn_CylGotoPos;
+            "DB_Cylinder_BackSupport".TargetPos      := "DB_Manual".Cyl_TargetPos;
+            "DB_Manual".SelCyl_State     := "DB_Cylinder_BackSupport".State;
+            "DB_Manual".SelCyl_StateText := "DB_Cylinder_BackSupport".StateText;
+            "DB_Manual".SelCyl_AtSetpoint:= "DB_Cylinder_BackSupport".AtSetpoint;
+            "DB_Manual".SelCyl_AtRetract := "DB_Cylinder_BackSupport".AtRetract;
+            "DB_Manual".SelCyl_AtTarget  := FALSE;
+            "DB_Manual".SelCyl_PosError  := 0.0;
+            "DB_Manual".SelCyl_Error     := "DB_Cylinder_BackSupport".Error;
+            "DB_Manual".SelCyl_ErrorID   := "DB_Cylinder_BackSupport".ErrorID;
+            "DB_Manual".SelCyl_ActualPos := "DB_Cylinder_LinearRuler_BackSupport".Value;
+            "DB_Manual".SelCyl_Type      := BYTE_TO_INT("DB_Cylinder_BackSupport".PositioningMode);
+            "DB_Manual".SelCyl_Toleranse := "DB_Cylinder_BackSupport".Tolerance;
+            "DB_Manual".SelCyl_MaxPos    := "DB_Cylinder_BackSupport".MaxPos;
+            "DB_Manual".SelCyl_MinPos    := "DB_Cylinder_BackSupport".MinPos;
+
+        // 2: SheetHolder removed from project
+
+        3: // ToolHeadLock -- magnetic sensor, PositioningMode=1
+            // CRITICAL: This cylinder locks the tool head. When extended (Sol_A=TRUE),
+            // tool axis movement is blocked at the process level.
+            // Manual extend/retract is allowed here for commissioning only.
+            "DB_Manual".SelCyl_Name      := 'ToolHeadLock';
+            "DB_Cylinder_ToolHeadLock".Cmd_ExtendFull := "DB_Manual".Btn_CylExtendFull;
+            "DB_Cylinder_ToolHeadLock".Cmd_RetractFull:= "DB_Manual".Btn_CylRetractFull;
+            "DB_Cylinder_ToolHeadLock".Cmd_GotoPos    := "DB_Manual".Btn_CylGotoPos;
+            "DB_Cylinder_ToolHeadLock".TargetPos      := "DB_Manual".Cyl_TargetPos;
+            "DB_Manual".SelCyl_State     := "DB_Cylinder_ToolHeadLock".State;
+            "DB_Manual".SelCyl_StateText := "DB_Cylinder_ToolHeadLock".StateText;
+            "DB_Manual".SelCyl_AtSetpoint:= "DB_Cylinder_ToolHeadLock".AtSetpoint;
+            "DB_Manual".SelCyl_AtRetract := "DB_Cylinder_ToolHeadLock".AtRetract;
+            "DB_Manual".SelCyl_AtTarget  := FALSE;
+            "DB_Manual".SelCyl_PosError  := 0.0;
+            "DB_Manual".SelCyl_Error     := "DB_Cylinder_ToolHeadLock".Error;
+            "DB_Manual".SelCyl_ErrorID   := "DB_Cylinder_ToolHeadLock".ErrorID;
+            "DB_Manual".SelCyl_ActualPos := 0.0;
+            "DB_Manual".SelCyl_Type      := BYTE_TO_INT("DB_Cylinder_ToolHeadLock".PositioningMode);
+            "DB_Manual".SelCyl_Toleranse := "DB_Cylinder_ToolHeadLock".Tolerance;
+            "DB_Manual".SelCyl_MaxPos    := "DB_Cylinder_ToolHeadLock".MaxPos;
+            "DB_Manual".SelCyl_MinPos    := "DB_Cylinder_ToolHeadLock".MinPos;
+
+        4: // MandrelLock -- no sensor, PositioningMode=0
+            "DB_Manual".SelCyl_Name      := 'MandrelLock';
+            "DB_Cylinder_MandrelLock".Cmd_ExtendFull := "DB_Manual".Btn_CylExtendFull;
+            "DB_Cylinder_MandrelLock".Cmd_RetractFull:= "DB_Manual".Btn_CylRetractFull;
+            "DB_Cylinder_MandrelLock".Cmd_GotoPos    := "DB_Manual".Btn_CylGotoPos;
+            "DB_Cylinder_MandrelLock".TargetPos      := "DB_Manual".Cyl_TargetPos;
+            "DB_Manual".SelCyl_State     := "DB_Cylinder_MandrelLock".State;
+            "DB_Manual".SelCyl_StateText := "DB_Cylinder_MandrelLock".StateText;
+            "DB_Manual".SelCyl_AtSetpoint:= "DB_Cylinder_MandrelLock".AtSetpoint;
+            "DB_Manual".SelCyl_AtRetract := "DB_Cylinder_MandrelLock".AtRetract;
+            "DB_Manual".SelCyl_AtTarget  := FALSE;
+            "DB_Manual".SelCyl_PosError  := 0.0;
+            "DB_Manual".SelCyl_Error     := "DB_Cylinder_MandrelLock".Error;
+            "DB_Manual".SelCyl_ErrorID   := "DB_Cylinder_MandrelLock".ErrorID;
+            "DB_Manual".SelCyl_ActualPos := 0.0;
+            "DB_Manual".SelCyl_Type      := BYTE_TO_INT("DB_Cylinder_MandrelLock".PositioningMode);
+            "DB_Manual".SelCyl_Toleranse := "DB_Cylinder_MandrelLock".Tolerance;
+            "DB_Manual".SelCyl_MaxPos    := "DB_Cylinder_MandrelLock".MaxPos;
+            "DB_Manual".SelCyl_MinPos    := "DB_Cylinder_MandrelLock".MinPos;
+
+        ELSE:
+            // Unknown selector -- show N/A, no commands routed
+            "DB_Manual".SelCyl_Name      := '---';
+            "DB_Manual".SelCyl_State     := 0;
+            "DB_Manual".SelCyl_StateText := 'N/A';
+            "DB_Manual".SelCyl_AtSetpoint:= FALSE;
+            "DB_Manual".SelCyl_AtRetract := FALSE;
+            "DB_Manual".SelCyl_AtTarget  := FALSE;
+            "DB_Manual".SelCyl_PosError  := 0.0;
+            "DB_Manual".SelCyl_Error     := FALSE;
+            "DB_Manual".SelCyl_ErrorID   := 16#0000;
+            "DB_Manual".SelCyl_ActualPos := 0.0;
+            "DB_Manual".SelCyl_Type      := 0;
+            "DB_Manual".SelCyl_Toleranse := 0.0;
+            "DB_Manual".SelCyl_MaxPos    := 0.0;
+            "DB_Manual".SelCyl_MinPos    := 0.0;
+
+    END_CASE;
+END_FUNCTION

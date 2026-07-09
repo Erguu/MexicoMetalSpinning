@@ -1,0 +1,826 @@
+// =============================================================================
+// Version_Recipe - 02_DataBlocks.scl
+// Memory-optimized data blocks for 5 recipe programs
+// Target: CPU 1214C (100KB work memory)
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram1 - Recipe data for Program 1 (max 1000 lines = 12KB)
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram1"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box
+        Lines  : Array[0..599] of "RecipeLine"; // 1000 lines × 12 byte = 12 KB
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram2 - Recipe data for Program 2
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram2"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";
+        Lines  : Array[0..599] of "RecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram3 - Recipe data for Program 3
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram3"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";
+        Lines  : Array[0..599] of "RecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram4 - Recipe data for Program 4
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram4"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";
+        Lines  : Array[0..599] of "RecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram5 - Recipe data for Program 5
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram5"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";
+        Lines  : Array[0..599] of "RecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_HMI - Human Machine Interface data
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_HMI"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.3
+NON_RETAIN
+    VAR 
+        // ===========================================================
+        // BUTTONS (Input) - Version_GCODE compatible
+        // ===========================================================
+        Btn_Start : Bool;           // Start machine
+        Btn_Stop : Bool;            // Stop machine
+        Btn_Pause : Bool;           // Pause/Resume toggle
+        Btn_Reset : Bool;           // Reset program to beginning
+        Btn_ApplyToolConfig : Bool;  // Apply tool-slot codes from HMI to DB_ToolConfig
+        Btn_AckError : Bool;        // Acknowledge error → transitions from STATE_ERROR to STOPPED
+        Btn_Continue : Bool;        // Continue from pause (PAUSED) -- STATE_PAUSED → RUNNING
+        Btn_Restart : Bool;         // STATE_ERROR or PAUSED → STOPPED (restart with Start)
+        Btn_ProdReset : Bool;       // Reset production counters + history
+        Btn_LastCycleReset : Bool;  // Reset last cycle summary only (counters preserved)
+                                    // NOTE: Btn_ProdReset already does this too.
+                                    // If not adding both as separate HMI buttons, Btn_LastCycleReset
+                                    // is redundant -- do not connect to HMI if unused.
+        
+        // ===========================================================
+        // MODE SELECTION (Input)
+        // ===========================================================
+        ProductSelect : Int := 1;           // Recipe selector (1-5)
+        FeedrateOverride : Real := 100.0;   // Speed % for G1 moves (50-200, 100=normal)
+        RapidOverride : Real := 100.0;      // Speed % for G0 rapid moves (50-200)
+        SingleStepMode : Bool := FALSE;     // TRUE = stop after each line, wait for StepNext
+        StepNext : Bool := FALSE;           // Pulse to advance one step in SingleStepMode
+        
+        // Program names and validity -- PLC does NOT write to these tags.
+        // Written by CAM post-processor or HMI operator.
+        // Can be read for displaying the program list on HMI.
+        ProgramNames : Array[1..5] of String[20];  // Operator-defined program names
+        ProgramValid : Array[1..5] of Bool;        // Is program loaded? (written by HMI/CAM)
+        
+        // Tool slot codes editable from HMI. Enter external codes like 101, 406 etc.
+        // These are copied to DB_ToolConfig.ToolCode_List when operator presses Apply.
+        ToolSlotCode : Array[1..4] of Int := [101, 102, 103, 104];
+        
+        // ===========================================================
+        // POSITION DISPLAYS (Output)
+        // ===========================================================
+        ActualX : Real;             // Current X position (mm)
+        ActualZ : Real;             // Current Z position (mm)
+        
+        // ===========================================================
+        // STATUS DISPLAYS (Output)
+        // ===========================================================
+        StatusMsg : String[50];     // Status message text
+        MachineState : Int;         // State machine state
+        CurrentLine : Int;          // Current line being executed
+        TotalLines : Int;           // Total lines in program
+        ProgressPercent : Real;     // Progress 0-100%
+        CurrentTool : Int;          // Active tool (1-4)
+        FeedrateActive : Real;      // Actual feedrate (mm/min)
+        // ⚠️ UNUSED: PLC code does not write to the Axis_Status_* tags below anywhere.
+        // They will always be 0 / empty if connected to HMI. Reserved for future use
+        // -- do not display on HMI for now.
+        Axis_Status_X        : Int;
+        Axis_Status_Z        : Int;
+        Axis_Status_Spindle  : Int;
+        Axis_Status_Toolhead : Int;
+        Axis_Status_X_Str        : String[10];
+        Axis_Status_Z_Str        : String[10];
+        Axis_Status_Spindle_Str  : String[10];
+        Axis_Status_Toolhead_Str : String[10];
+        // ===========================================================
+        // STATUS LAMPS (Output)
+        // ===========================================================
+        IsRunning : Bool;           // Machine is running
+        IsPaused : Bool;            // Machine is paused
+        HasError : Bool;            // Error is active
+        ElapsedTime : Time;         // Program elapsed time
+        ElapsedSeconds : DInt;      // Elapsed time in seconds (for HMI display)
+        CycleCount : Int;           // Number of completed programs
+        
+        // ===========================================================
+        // ERROR DISPLAY (Output)
+        // ===========================================================
+        ErrorID : Word;             // Error code (0=OK)
+        ErrorText : String[50];     // Error description
+        ErrorDetail : String[70];   // Additional error info
+
+        // ===========================================================
+        // WARNING DISPLAY (Output)
+        // ===========================================================
+        HasWarning : Bool;          // TRUE when a non-blocking warning is active
+        WarningText : String[70];   // Warning message text (e.g. bypass active)
+        ResumeLine : Int := -1;     // Saved recipe line for warm restart (-1 = none). Set in STATE_ERROR, cleared on Btn_Restart.
+        
+        // ===========================================================
+        // BYPASS SWITCHES (for testing) - Version_GCODE compatible
+        // ⚠️ All bypasses reset to FALSE on restart (FC_LoadConfig).
+        // All must be FALSE in production.
+        // ===========================================================
+        Bypass_EStop        : Bool := FALSE;  // Used in FB_SafetyMonitor ✅
+        Bypass_Door         : Bool := TRUE;  // Used in FB_SafetyMonitor ✅
+        Bypass_AirPressure  : Bool := TRUE;  // Used in FB_SafetyMonitor ✅
+        Bypass_Drives       : Bool := FALSE;  // Used in FB_SafetyMonitor ✅
+        Bypass_Spindle      : Bool := FALSE;  // Skips spindle commands in recipe (FB_RecipeHandler) -- dry run / commissioning
+        Bypass_ToolChanger  : Bool := FALSE;  // ⚠️ UNUSED -- not in safety monitor
+        
+        // ===========================================================
+        // BOUNDING BOX (Output - from pre-scan)
+        // ===========================================================
+        BoundingBox_MinX : Real;
+        BoundingBox_MaxX : Real;
+        BoundingBox_MinZ : Real;
+        BoundingBox_MaxZ : Real;
+        BoundingBox_Valid : Bool;
+        PreScanProgress : Real := 0.0;  // Pre-scan progress 0-100% (written during STATE_PRE_SCAN)
+
+        // ===========================================================
+        // MANUAL > MANAGE: Contactor & Enable controls (Input)
+        // HMI writes these; PLC drives physical outputs in OB1.
+        // Buttons are toggles (maintained, not momentary).
+        // ===========================================================
+        Btn_Contactor_X       : Bool;   // Energize X driver contactor
+        Btn_Contactor_Z       : Bool;   // Energize Z driver contactor
+        Btn_Contactor_Tool    : Bool;   // Energize Tool driver contactor
+        Btn_Contactor_Spindle : Bool;   // Energize Spindle driver contactor
+        Btn_Enable_X          : Bool;   // Send enable signal to X drive
+        Btn_Enable_Z          : Bool;   // Send enable signal to Z drive
+
+        // MANUAL > MANAGE: Status feedback (Output) for HMI lamps
+        // PLC writes these back after applying safety interlock.
+        Contactor_X_On       : Bool;
+        Contactor_Z_On       : Bool;
+        Contactor_Tool_On    : Bool;
+        Contactor_Spindle_On : Bool;
+        Enable_X_On          : Bool;
+        Enable_Z_On          : Bool;
+
+        // ===========================================================
+        // E-STOP DUAL CHANNEL STATUS (Output - PLC writes, HMI reads)
+        // ===========================================================
+        EStop_Ch1_OK      : Bool;   // Channel 1 contact state (TRUE=closed=safe)
+        EStop_Ch2_OK      : Bool;   // Channel 2 contact state (TRUE=closed=safe)
+        EStop_Discrepancy : Bool;   // Ch1 ≠ Ch2 → contact fault, service required
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_MachineConfig - Machine configuration parameters
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_MachineConfig"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.2
+NON_RETAIN
+    VAR
+        // =====================================================================
+        // HMI-EDITABLE: Machine Physical Limits (mm)
+        // These values are NOT overwritten by FC_LoadConfig.
+        // Can be changed from HMI Setup screen; preserved on PLC restart.
+        // =====================================================================
+        SoftLimit_MinX : Real := -20.0;     // X minimum (home=0)
+        SoftLimit_MaxX : Real := 200.0;   // X maximum travel (mm)
+        SoftLimit_MinZ : Real := -100.0;  // Z minimum (negative = mandrel front / clearance)
+        SoftLimit_MaxZ : Real := 490.0;   // Z maximum (forming depth)
+
+        // HMI-EDITABLE: Safe Positions (mm)
+        SafePos_X : Real := 0.0;         // "Go Safe" X target
+        SafePos_Z : Real := 0.0;        // "Go Safe" Z target (clearance zone)
+
+        // HMI-EDITABLE: Homing Parameters
+        HomeOffset_X : Real := 0.0;       // X set value after homing
+        HomeOffset_Z : Real := 0.0;       // Z set value after homing
+        HomeVelocity : Real := 10.0;      // Homing clearance velocity (mm/s)
+        PostHome_Clearance : Real := 10.0; // Distance to clear PNP zone after homing (mm)
+        AlwaysHomeOnAutoStart : Bool := TRUE; // TRUE = home all axes on every auto start (recommended)
+
+        // ⚠️ UNUSED: The following two parameters are not read anywhere in PLC code.
+        // Recipe handler takes its own feedrate from the recipe line.
+        // Do not connect to HMI. May be used if manual tool change sequence is added later.
+        ToolChangePos_X : Real := 0.0;   // (Unused) Safe X for manual tool change
+        ToolChangePos_Z : Real := 0.0;  // (Unused) Safe Z for manual tool change
+        DefaultFeedrate : Real := 300.0;  // (Unused) Default feedrate
+
+        // =====================================================================
+        // FIXED: Hardware/TO Limits -- must not be changed from HMI
+        // FC_LoadConfig (OB100) writes these values on every restart.
+        // =====================================================================
+        MaxVelocity : Real := 40.0;     // mm/s - TO max velocity
+        RapidVelocity : Real := 40.0;   // mm/s - G0 rapid speed
+        MinVelocity : Real := 1.0;      // mm/s - TO minimum
+        FeedrateConvFactor : Real := 6.0; // divisor to convert recipe F (mm/min) to axis velocity (mm/s)
+
+        // Tool Configuration -- HMI-EDITABLE: active slot count (1-4)
+        ToolCount    : Int  := 3;
+        ToolVelocity : Real := 50.0;   // deg/s -- turret rotation speed (clamped by TO max)
+
+        // Hardware configuration -- set TRUE if this axis is not physically connected to the machine
+        // (different from HMI bypasses: this is a hardware presence flag)
+        Bypass_ToolAxis : Bool := FALSE;
+
+        // Spindle deceleration wait: time between RunCmd=FALSE and next RunCmd=TRUE.
+        // Set to match VFD deceleration ramp time. HMI-editable.
+        SpindleDecelTime : Time := T#2S;
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// DB_ErrorCodes removed -- error codes are used as inline hex constants.
+// Severity: 0=info, 1=warn, 2=error, 3=fatal
+
+// -----------------------------------------------------------------------------
+// DB_Error - Centralized error snapshot for debugging (non-invasive to HMI)
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_Error"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Active    : Bool := FALSE;       // TRUE when an active error is present
+        Code      : Word := 0;           // Error code (matches DB_ErrorCodes)
+        Severity  : Byte := 0;           // 0=info,1=warn,2=error,3=fatal
+        Source    : String[20];          // Originating FB or category (e.g. 'Recipe', 'Safety')
+        Line      : Int := -1;           // Recipe line (if applicable) or -1
+        TimeStamp : DTL;                 // Timestamp captured with RD_SYS_T
+        Details   : String[80];          // Free text details / ActiveErrorText
+        // History ring buffer (last 10 errors) for post-mortem analysis
+        History_Code    : Array[1..10] of Word;
+        History_Time    : Array[1..10] of DTL;
+        History_Source  : Array[1..10] of String[20];
+        History_Details : Array[1..10] of String[80];
+        History_Index   : Int := 0;      // 1..10
+        History_Count   : Int := 0;      // Number of valid entries (<=10)
+        TotalErrorCount : DInt := 0;     // Lifetime error count (incremented on each new error)
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_ToolConfig - Tool changer configuration
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_ToolConfig"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.2
+NON_RETAIN
+    VAR
+        // Slot angles -- automatically calculated by FC_ToolAngleCalc (AutoCalcAngles=TRUE)
+        // or manually entered from HMI Tool page (AutoCalcAngles=FALSE).
+        Tool1_Position : Real := 0.0;     // Slot 1 angle (degrees)
+        Tool2_Position : Real := 120.0;    // Slot 2 angle (degrees)
+        Tool3_Position : Real := 240.0;   // Slot 3 angle (degrees)
+        Tool4_Position : Real := 360.0;   // Slot 4 angle (degrees)
+
+        // Slot code mapping -- can be entered from HMI Tool page.
+        // Operator enters which head code is in which slot.
+        ToolCode_List : Array[1..4] of Int := [101, 102, 103, 104];
+
+        CurrentTool : Int := 1;           // Active slot number (1-4)
+
+        // HMI Tool page: automatic angle calculation
+        // TRUE = calculate evenly spaced based on ToolCount (e.g. 4 slots → 0/90/180/270)
+        // FALSE = Tool1..4_Position open for manual entry
+        AutoCalcAngles : Bool := TRUE;
+
+        // Calculated step angle -- displayed on HMI for information (e.g. "90°/slot")
+        ToolStepAngle_Calc : Real := 120.0;
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_Spindle - Spindle configuration and status
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_Spindle"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.2
+NON_RETAIN
+    VAR
+        // Configuration
+        MinSpeed : Real := 100.0;         // Minimum spindle speed (RPM)
+        MaxSpeed : Real := 3000.0;        // Maximum spindle speed (RPM)
+        DefaultSpeed : Real := 1000.0;    // Default spindle speed (RPM)
+        SpeedTolerance : Real := 5.0;     // Speed tolerance for AtSpeed (%)
+        
+        // Commands (input from HMI/Program)
+        Cmd_SetSpeed : Real;              // Commanded speed
+        Cmd_Direction : Int;              // 1=CW, -1=CCW
+        SpeedOverride : Real := 100.0;    // Speed override (%)
+        
+        // Status (output)
+        IsRunning : Bool := FALSE;
+        AtSpeed : Bool := FALSE;
+        ActualSpeed : Real := 0.0;
+        CommandedSpeed : Real := 0.0;
+        Error : Bool := FALSE;
+        ErrorID : Word := 0;
+
+        // =====================================================================
+        // DIAGNOSTICS -- written every scan; read from HMI watch table
+        // Use these to trace the spindle start chain without TIA Portal online.
+        // Chain:  ReqStart → bSpindleStart → StartInput → PrevStart → StartEdge → state
+        // =====================================================================
+        Diag_SpindleState  : Int;   // FB_SpindleControl state (0=Idle, 10=Starting, 20=Running, 30=Stopping, 999=Error)
+        Diag_StartInput    : Bool;  // Actual Start pin arriving at FB_SpindleControl (Manual OR bSpindleStart)
+        Diag_StopInput     : Bool;  // Actual Stop pin arriving at FB_SpindleControl
+        Diag_EnableInput   : Bool;  // Actual Enable pin (bDrivesEnable)
+        Diag_StartEdge     : Bool;  // Rising edge computed inside FB_SpindleControl (TRUE = spindle command accepted)
+        Diag_PrevStart     : Bool;  // prevStart latch inside FB_SpindleControl (must go FALSE between starts)
+        Diag_bSpindleStart : Bool;  // FB_Process internal flag bSpindleStart (set by recipe or RUNNING state)
+        Diag_bSpindleStop  : Bool;  // FB_Process internal flag bSpindleStop
+        Diag_ReqStart      : Bool;
+        Diag_ReqStop       : Bool;
+        Diag_MoveVelBusy   : Bool;  // MC_MoveVelocity.Busy   -- TO is processing the velocity command
+        Diag_MoveVelInVel  : Bool;  // MC_MoveVelocity.InVelocity -- motor reached commanded speed
+
+        // =====================================================================
+        // HISTORY RING BUFFER -- last 20 state-change snapshots
+        // A new entry is pushed whenever SpindleState, PrevStart, ReqStart or
+        // StartEdge changes, capturing every meaningful transition in sequence.
+        //
+        // How to read:
+        //   1. Hist_Count tells you how many valid entries exist (0..20).
+        //   2. Hist_Head-1 (mod 20) is the MOST RECENT entry.
+        //   3. Entries are indexed [0..19]; read them in Seq order.
+        //   4. Write Hist_Clear := TRUE from HMI to wipe and start fresh.
+        // =====================================================================
+        Hist_Head  : Int := 0;          // Next write position (0..19, wraps)
+        Hist_Count : Int := 0;          // Number of valid entries (0..20)
+        Hist_SeqNum : Int := 0;         // Rolling sequence counter
+        Hist_Clear  : Bool := FALSE;    // HMI: write TRUE to clear buffer (auto-resets)
+        Hist_Log   : Array[0..19] of "UDT_SpindleSnap";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_Diagnostic - Runtime diagnostics and debugging
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_Diagnostic"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        // =========================================================
+        // PROCESS STATE
+        // =========================================================
+        Process_State : Int;
+        Process_SafeToRun : Bool;
+        Process_DrivesEnable : Bool;
+
+        // =========================================================
+        // RECIPE HANDLER STATE
+        // =========================================================
+        Recipe_CurrentProgram : Int;    // Active program number (1-5)
+        Recipe_CurrentLine : Int;       // Current line being executed
+        Recipe_TotalLines : Int;        // Total lines in program
+        Recipe_TargetX : Real;          // Current target X
+        Recipe_TargetZ : Real;          // Current target Z
+        Recipe_Velocity : Real;         // Current velocity
+        // Pre-scan results
+        PreScan_Complete : Bool;
+        PreScan_Valid : Bool;           // No limit violations found
+        PreScan_ErrorLine : Int;        // Line with limit error (-1 if none)
+
+        // =========================================================
+        // MOVE STATUS
+        // =========================================================
+        MoveX_Busy : Bool;
+        MoveX_Done : Bool;
+        MoveX_Error : Bool;
+        MoveZ_Busy : Bool;
+        MoveZ_Done : Bool;
+        MoveZ_Error : Bool;
+        bMoveX : Bool;                  // X axis needs to move
+        bMoveZ : Bool;                  // Z axis needs to move
+
+        // =========================================================
+        // AXIS INFO (commissioning)
+        // =========================================================
+        Axis_X_Pos : Real;
+        Axis_Z_Pos : Real;
+        Axis_X_Enabled : Bool;
+        Axis_Z_Enabled : Bool;
+        Axis_X_Homed : Bool;
+        Axis_Z_Homed : Bool;
+        
+        // =========================================================
+        // ERROR CONTEXT
+        // =========================================================
+        Error_ProcessState : Int;
+        Error_Line : Int;
+        Error_Code : Word;
+        // TO error codes -- raw WORD codes from Siemens MC_ function blocks.
+        // Converted to readable text via FC_TO_ErrorText; compare with TIA Portal TO Diagnostics.
+        MoveX_ErrorID  : Word;    // MC_MoveAbsolute X axis TO code
+        MoveZ_ErrorID  : Word;    // MC_MoveAbsolute Z axis TO code
+        HomeX_ErrorID  : Word;    // MC_Home X axis TO code
+        HomeZ_ErrorID    : Word;   // MC_Home Z axis TO code
+        HomeTool_ErrorID : Word;  // MC_Home Tool axis TO code
+        Power_X_ErrorID : Word;   // MC_Power X axis TO code
+        Power_Z_ErrorID : Word;   // MC_Power Z axis TO code
+        Spindle_TO_ErrorID : Word; // MC_Power/MC_MoveVelocity/MC_Halt spindle TO code
+        Error_Text   : String[50];
+        // Error_Detail removed -- not written anywhere, Error_Text is used instead
+        // Readable description for the last TO error code (FC_TO_ErrorText output)
+        TO_ErrorText : String[20];
+
+        // =========================================================
+        // CYLINDER DIAGNOSTICS -- indexed by cylinder number (1-based, max 8)
+        // No new fields needed when adding cylinders -- write to CylDiag[N] in OB1.
+        // =========================================================
+        CylDiag : Array[1..8] of "UDT_CylDiag";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_Manual - Manual mode control
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_Manual"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.3
+NON_RETAIN
+    VAR
+        ManualModeActive : Bool;
+        SelectedAxis : Int := 0;        // 0=X, 1=Z, 2=Tool, 3=Spindle
+        ActiveAxis : Int := -1;         // Currently active axis (-1 = none)
+        JogSpeed : Real := 10.0;        // mm/s
+        JogIncrement : Real := 1.0;     // mm per step
+        HomingMode : Int := 3;          // 0=Passive, 2=Active, 3=Active+Zero
+        HomePosition : Real := 0.0;     // Home position offset
+        
+        // Jog buttons (both naming conventions)
+        Btn_JogPlus : Bool;
+        Btn_JogMinus : Bool;
+        Jog_Plus : Bool;                // Alias
+        Jog_Minus : Bool;               // Alias
+        Btn_StepPlus : Bool;            // Incremental step +
+        Btn_StepMinus : Bool;           // Incremental step -
+        
+        // Homing buttons
+        Btn_Home : Bool;
+        Btn_HomeAxis : Bool;            // Alias for Btn_Home
+        Btn_HomeAll : Bool;             // Home all axes
+        Btn_GoSafe : Bool;
+        Btn_GoZero : Bool;
+        
+        // Absolute move
+        MoveToPosition : Real := 0.0;   // Target position
+        Btn_MoveAbsolute : Bool;        // Execute move
+        
+        // Tool step buttons
+        Btn_ToolStepCW : Bool;          // Tool step clockwise
+        Btn_ToolStepCCW : Bool;         // Tool step counter-clockwise
+        ToolStepAngle : Real := 90.0;   // Step angle (degrees)
+        ToolStepSpeed : Real := 30.0;   // Tool step velocity (deg/s)
+        ToolPosition : Real;            // Current tool position (degrees)
+        
+        // Spindle manual control
+        Btn_SpindleStart : Bool;        // Start spindle
+        Btn_SpindleStop : Bool;         // Stop spindle
+        Btn_SpindleAckError : Bool;     // Acknowledge spindle error only (machine reset not required)
+        Manual_SpindleSpeed : Real := 500.0;  // Spindle speed (RPM)
+        Manual_SpindleDir : Int := 1;   // 1=CW, -1=CCW
+        
+        // Status (multiple naming conventions for HMI compatibility)
+        JogBusy : Bool;
+        ManualBusy : Bool;              // Alias for JogBusy
+        JogError : Bool;
+        ManualError : Bool;             // Alias for JogError
+        JogErrorID : Word;
+        ManualErrorID : Word;           // Alias for JogErrorID
+        
+        // Selected axis info (output)
+        SelectedAxisName : String[10];
+        SelectedAxisPos : Real;
+        SelectedAxisHomed : Bool;
+        SelectedAxisReady : Bool;
+
+        // ===========================================================
+        // CYLINDER MANUAL CONTROL
+        // One HMI screen controls all cylinders via SelectedCylinder.
+        // HMI writes to these fields; FC_CylinderDispatch routes to
+        // the correct DB_CylinderX instance each scan.
+        // To add a cylinder: add DB_CylinderN in 02_DataBlocks.scl,
+        // add OB1 calls, and add a CASE branch in FC_CylinderDispatch.
+        // ===========================================================
+        SelectedCylinder    : Int  := 1;    // Active cylinder (1..N)
+        Btn_CylExtend       : Bool;         // Extend command
+        Btn_CylExtendFull   : Bool;         // Full extend (ignore sensor)
+        Btn_CylRetract      : Bool;         // Retract command
+        Btn_CylGotoPos      : Bool;         // Rising edge: go to ruler TargetPos
+        Cyl_TargetPos       : Real := 0.0;  // Ruler target position (mm)
+        // Selected cylinder status (PLC → HMI)
+        SelCyl_Name         : String[10];   // "Cylinder 1" etc.
+        SelCyl_State        : Int;          // State code
+        SelCyl_StateText    : String[14];   // State text
+        SelCyl_AtSetpoint   : Bool;         // Held at setpoint sensor
+        SelCyl_AtRetract    : Bool;         // At retract end
+        SelCyl_AtTarget     : Bool;         // Ruler mode: within Tolerance
+        SelCyl_PosError     : Real;         // Ruler mode: error = actual - target (mm)
+        SelCyl_Error        : Bool;         // Active error
+        SelCyl_ErrorID      : Word;         // Error code (16#05xx)
+        SelCyl_ActualPos    : Real;         // Current position (mm) from analog sensor
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_HMI_Errors - Error bits + Word triggers for HMI Alarm View
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_HMI_Errors"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        // Alarm Words (for HMI Discrete Alarm view)
+        AlarmWord_Axis : Word;
+        AlarmWord_Limits : Word;
+        AlarmWord_Tool : Word;
+        AlarmWord_Recipe : Word;
+        AlarmWord_Safety : Word;
+        AlarmWord_Spindle : Word;
+        AlarmWord_TO : Word;
+        // Individual Bool flags
+        Err_X_MoveFailed : Bool;
+        Err_Z_MoveFailed : Bool;
+        Err_X_HomingFailed : Bool;
+        Err_Z_HomingFailed : Bool;
+        Err_DriveFault : Bool;
+        Err_ToolMoveFailed : Bool;
+        Err_ToolHomingFailed : Bool;
+        Err_MotionTimeout : Bool;
+        Err_SoftLimit_X_Min : Bool;
+        Err_SoftLimit_X_Max : Bool;
+        Err_SoftLimit_Z_Min : Bool;
+        Err_SoftLimit_Z_Max : Bool;
+        Err_HWLimit_X_Min : Bool;
+        Err_HWLimit_X_Max : Bool;
+        Err_HWLimit_Z_Min : Bool;
+        Err_HWLimit_Z_Max : Bool;
+        Err_InvalidToolNum : Bool;
+        Err_ToolOutOfRange : Bool;
+        Err_ToolRotTimeout : Bool;
+        Err_ToolRetractFail : Bool;
+        Err_ToolRotFailed : Bool;
+        Err_Recipe_InvalidCmd : Bool;
+        Err_Recipe_ParseErr : Bool;
+        Err_Recipe_Empty : Bool;
+        Err_Recipe_NoLines : Bool;
+        Err_PreScan_Limits : Bool;
+        Err_Recipe_Feedrate : Bool;
+        Err_Recipe_Timeout : Bool;
+        Err_Recipe_ToolNum : Bool;
+        Err_EStop : Bool;
+        Err_EStop_Discrepancy : Bool;   // E-Stop contact discrepancy (channel fault)
+        Err_DoorOpen : Bool;
+        Err_DrivesNotReady : Bool;
+        Err_AirPressure : Bool;
+        Err_SafetyInterlock : Bool;
+        Err_Spindle_Power : Bool;
+        Err_Spindle_Run : Bool;
+        Err_Spindle_Halt : Bool;
+        Err_Spindle_Speed : Bool;
+        Err_TO_Position : Bool;
+        Err_TO_Velocity : Bool;
+        Err_TO_NotReady : Bool;
+        Err_TO_NotEnabled : Bool;
+        Err_TO_LimitExceeded : Bool;
+        // Summary flags
+        AnyError : Bool;
+        AnySafetyError : Bool;
+        AnyAxisError : Bool;
+        AnyLimitError : Bool;
+        AnyToolError : Bool;
+        AnyRecipeError : Bool;
+        AnySpindleError : Bool;
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_Production - Production counters and last cycles
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_Production"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        // Overall counters
+        TotalStarted  : DInt := 0;       // All cycles that entered PRE_SCAN
+        TotalOK       : DInt := 0;       // Completed successfully (STATE=100)
+        TotalNOK      : DInt := 0;       // Ended in ERROR (STATE=999)
+        TotalStopped  : DInt := 0;       // Stopped by operator (STOP sequence)
+        
+        // Current active cycle
+        CurrentActive    : Bool := FALSE;
+        CurrentProgram   : Int := 0;     // Active program number
+        CurrentStartTime : DTL;          // Cycle start timestamp
+
+        // Last cycle summary
+        // 0=None, 1=OK, 2=NOK, 3=STOP
+        LastResult     : Byte := 0;
+        LastProgram    : Int := 0;
+        LastDuration_s : DInt := 0;      // Duration in seconds
+        LastErrorCode  : Word := 0;      // 0 if OK/STOP
+        LastErrorLine  : Int := -1;      // -1 if not applicable
+        LastEndTime    : DTL;            // End timestamp
+
+        // History buffer (ring) - last 100 cycles
+        Hist_Index     : Int := 0;       // 1..100
+        Hist_Count     : Int := 0;       // Number of valid entries (<=100)
+        Hist_Result    : Array[1..100] of Byte;
+        Hist_Program   : Array[1..100] of Int;
+        Hist_Duration_s: Array[1..100] of DInt;
+        Hist_ErrorCode : Array[1..100] of Word;
+        Hist_ErrorLine : Array[1..100] of Int;
+        Hist_Time      : Array[1..100] of DTL;
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_fbSpindle -- FB_SpindleControl instance (NO LONGER CALLED IN OB1)
+// Spindle is now controlled exclusively via fbSpindleControl inside FB_Process (fbProcess DB).
+// This DB is retained so TIA Portal does not lose the symbol. Do not call from OB1.
+// DB_Spindle (separate) → spindle status + HMI outputs (IsRunning, AtSpeed, etc.)
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_fbSpindle"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_SpindleControl"
+BEGIN
+END_DATA_BLOCK
+
+// =============================================================================
+// SENSOR AND ACTUATOR INSTANCE DATA BLOCKS
+// =============================================================================
+// These DBs are instances of the FBs defined in 09_Sensors_Actuators.scl.
+// HMI reads/writes these DBs directly -- no separate interface DB needed.
+//
+// To add a new cylinder:
+//   1. Add DB_Cylinder2 / DB_Sen_Cyl2_Ext / DB_Sen_Cyl2_Ret
+//   2. Add FB call entries in OB1
+//   3. Define physical I/O tags in TIA Portal
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Cylinder 1 -- FB_CylinderControl instance
+// HMI Cylinder page reads/writes this DB.
+//
+// HMI WRITABLE:   ValveType, Cmd_Extend, Cmd_ExtendFull, Cmd_Retract,
+//                 Timeout_Extend, Timeout_Retract
+// HMI READ-ONLY:  Sol_A, Sol_B, State, StateText, AtSetpoint, AtRetract,
+//                 Error, ErrorID
+// CONNECTED IN OB1: SafetyOK, Sen_AtSetpoint, Sen_AtRetract
+//
+// ValveType=2 (5/3 blocked center) default -- for mid-position hold.
+// Change to ValveType=1 if using 5/2 (via FC_LoadConfig or HMI).
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_Cylinder1"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.2
+NON_RETAIN
+"FB_CylinderControl"
+BEGIN
+    ValveType       := 3;       // 5/3 blocked center
+    Cmd_Extend      := FALSE;
+    Cmd_ExtendFull  := FALSE;
+    Cmd_Retract     := FALSE;
+    Timeout_Extend  := T#5S;
+    Timeout_Retract := T#5S;
+    // Positioning mode: 0=NoSensor  1=MagneticSwitch  2=LinearRuler
+    PositioningMode := 2;       // Linear ruler (requires DB_LinearRuler connected in OB1)
+    TargetPos       := 300.0;   // Default: full extend position (mm)
+    MaxPos            := 300.0;   // mm: max allowed extend position (= ruler stroke). 0=disabled.
+    MinPos            := 0.0;     // mm: min allowed retract position. 0=disabled.
+    ExtendOffset      := 5.0;     // mm: tune on site (higher = stops earlier)
+    RetractOffset     := 5.0;     // mm: tune on site
+    Tolerance         := 10.0;    // mm: acceptable error window
+    CorrectionFactor  := 2.0;    // ms/mm: pulse duration per mm of error. Tune on site.
+    MaxCorrections    := 20;       // max correction attempts before error 16#0505
+    ScanTime_ms       := 10.0;    // ms: set to actual OB1 cycle time (check in TIA Portal → CPU diagnostics)
+    ReactionTime_ms   := 800.0;    // ms: valve + piston reaction time. Start at 60, tune by observing overshoot.
+    SettleTime        := T#500ms; // wait after stop or correction before measuring position
+    MinCorrPulse_ms   := 40.0;    // ms: minimum correction pulse -- must open valve fully (~30-50ms typical)
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// Cylinder 1 -- Mid/target point magnetic switch (FB_DigitalSensor instance)
+// Physical I/O tag: "In_Cyl1_AtSetpoint" (to be defined in TIA Portal)
+// When cylinder reaches this position, Cmd_Extend is cleared and locked via 5/3 valve.
+//
+// HMI WRITABLE:   IsNC, DebounceTime
+// HMI READ-ONLY:  State, RisingEdge, FallingEdge
+// CONNECTED IN OB1: RawInput
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_Sen_Cyl1_Setpt"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_DigitalSensor"
+BEGIN
+    IsNC         := FALSE;    // NO magnetic switch -- TRUE when cylinder arrives
+    DebounceTime := T#10ms;
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// Cylinder 1 -- Retract end magnetic switch (FB_DigitalSensor instance) [OPTIONAL]
+// Physical I/O tag: "In_Cyl1_AtRetract"
+// If not connected: Sen_AtRetract parameter is not connected in OB1 → stays FALSE →
+//   ends on retract timeout, no error generated.
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_Sen_Cyl1_Ret"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_DigitalSensor"
+BEGIN
+    IsNC         := FALSE;
+    DebounceTime := T#10ms;
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// Linear ruler -- FB_AnalogSensor instance
+// Physical I/O tag: "AI_LinearRuler" (INT, TIA Portal AI channel)
+//
+// WRITABLE from HMI Ruler Calibration page:
+//   Raw_Min, Raw_Max, Phys_Min, Phys_Max, InvertSignal, Hi_Limit, Lo_Limit
+// READ from HMI:
+//   Value (mm), Valid, Hi_Alarm, Lo_Alarm
+// NOTE: "Position_mm" was the old name; it is now "Value".
+//       Update HMI connections to DB_LinearRuler.Value.
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_LinearRuler1"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.2
+NON_RETAIN
+"FB_AnalogSensor"
+BEGIN
+    Raw_Min      := 0;        // AI at full extend (~0V)
+    Raw_Max      := 31433;    // AI at full retract (measured; update once hardware is within 0-10V)
+    Phys_Min     := 0.0;      // mm physical reference at Raw_Min end
+    Phys_Max     := 300.0;    // mm physical reference at Raw_Max end (full stroke)
+    InvertSignal := TRUE;     // Sensor wired reverse: 0V = full extend (300mm), ~10V = retracted (0mm)
+    Hi_Limit     := 295.0;    // mm -- alarm near full extend
+    Lo_Limit     := 5.0;      // mm -- alarm near full retract
+END_DATA_BLOCK
+

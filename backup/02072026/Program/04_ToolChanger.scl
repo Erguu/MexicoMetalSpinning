@@ -1,0 +1,167 @@
+// =============================================================================
+// 04_ToolChanger.scl
+// FB_ToolChanger -- Turret rotation controller
+//
+// Purpose:
+//   Rotates the turret to the target tool angle only.
+//   X/Z axis movement is NOT the responsibility of this FB.
+//   In auto mode, the caller (FB_RecipeHandler/FB_Process) handles positioning.
+//   In manual mode, FB_ManualMode handles it.
+//
+// Usage:
+//   Execute = TRUE (level) → rotation starts and Busy=TRUE until complete.
+//   Execute = FALSE → FB resets (Done/Error cleared).
+//   ToolNumber (1-4) → angle is read from DB_ToolConfig and turret moves there.
+//
+// Error codes:
+//   16#0202 -- Invalid tool number (outside ToolCount range)
+//   16#0205 -- Turret rotation failed (TO/drive error)
+//   16#0206 -- Turret rotation timeout (Done not received within 30s)
+// =============================================================================
+
+FUNCTION_BLOCK "FB_ToolChanger"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.2
+    VAR_INPUT
+        Execute    : Bool;  // TRUE = start and hold rotation; FALSE = reset
+        ToolNumber : Int;   // Target tool number (1 - DB_MachineConfig.ToolCount)
+    END_VAR
+    VAR_OUTPUT
+        Done        : Bool;  // Rotation completed successfully (remains while Execute TRUE)
+        Busy        : Bool;  // Rotation in progress
+        Error       : Bool;  // Error occurred (see ErrorID)
+        ErrorID     : Word;  // Error code (16#0202 or 16#0205)
+        CurrentTool : Int;   // Active tool number after successful change
+    END_VAR
+    VAR_IN_OUT
+        Axis_Tool : TO_PositioningAxis;  // Turret servo Technology Object
+    END_VAR
+    VAR
+        state        : Int;   // Internal state machine
+        targetToolPos : Real; // Target turret angle (degrees)
+        fbMoveTool   : "FB_Axis_AbsPos";  // Absolute position FB instance
+        bExecMoveTool : Bool;             // FB_Axis_AbsPos Execute trigger flag
+        tonTimeout   : TON;               // 30s rotation timeout
+    END_VAR
+
+BEGIN
+    // -------------------------------------------------------------------------
+    // Execute = FALSE: reset all outputs (caller preparing new command)
+    // -------------------------------------------------------------------------
+    IF NOT #Execute THEN
+        #state        := 0;
+        #Done         := FALSE;
+        #Busy         := FALSE;
+        #Error        := FALSE;
+        #ErrorID      := 0;
+        #bExecMoveTool := FALSE;
+        // BUG FIX: fbMoveTool must be called every scan, even while idle.
+        // RETURNing without this call froze the inner FB_Axis_AbsPos when a tool
+        // change was aborted mid-rotation (stop/error dropped Execute): its
+        // internal latches stayed at "command already sent", so the next tool
+        // change never generated a rising edge for MC_MoveAbsolute -- the turret
+        // stood still until the 30s timeout (16#0206). Calling with Execute=FALSE
+        // lets it process Done/Error/CommandAborted and rearm itself; Siemens MC
+        // instructions must be called cyclically while a job is active anyway.
+        #fbMoveTool(
+            Execute  := FALSE,
+            Position := #targetToolPos,
+            Velocity := "DB_MachineConfig".ToolVelocity,
+            Axis     := #Axis_Tool
+        );
+        RETURN;
+    END_IF;
+
+    #Busy := TRUE;
+
+    CASE #state OF
+
+        // ---------------------------------------------------------------
+        // STATE 0: Validate tool number, read target angle from DB
+        // ---------------------------------------------------------------
+        0:
+            IF #ToolNumber < 1 OR #ToolNumber > "DB_MachineConfig".ToolCount THEN
+                // Invalid tool number -- recipe or operator error
+                #ErrorID := 16#0202;
+                "DB_Diagnostic".Error_Text   := 'ToolChanger: Invalid tool number';
+                "DB_Diagnostic".Error_Code   := #ErrorID;
+                #state := 999;
+            ELSE
+                // Read physical turret angle from DB_ToolConfig
+                CASE #ToolNumber OF
+                    1: #targetToolPos := "DB_ToolConfig".Tool1_Position;
+                    2: #targetToolPos := "DB_ToolConfig".Tool2_Position;
+                    3: #targetToolPos := "DB_ToolConfig".Tool3_Position;
+                    4: #targetToolPos := "DB_ToolConfig".Tool4_Position;
+                END_CASE;
+                #state := 10;
+            END_IF;
+
+        // ---------------------------------------------------------------
+        // STATE 10: Start turret rotation
+        // ---------------------------------------------------------------
+        10:
+            #bExecMoveTool := TRUE;
+            #tonTimeout(IN := FALSE, PT := "DB_MachineConfig".Timeout_ToolChange);  // Reset timer
+            #state := 20;
+
+        // ---------------------------------------------------------------
+        // STATE 20: Wait for rotation to complete
+        // ---------------------------------------------------------------
+        20:
+            #tonTimeout(IN := TRUE, PT := "DB_MachineConfig".Timeout_ToolChange);
+            IF #fbMoveTool.Done THEN
+                // Rotation complete -- update active tool
+                #bExecMoveTool  := FALSE;
+                #CurrentTool    := #ToolNumber;
+                #state          := 99;
+            ELSIF #tonTimeout.Q THEN
+                // Done not received within 30s -- mechanical blockage or TO issue
+                #bExecMoveTool := FALSE;
+                #ErrorID       := 16#0206;
+                "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'ToolChanger: Timeout T', IN2 := INT_TO_STRING(#ToolNumber));
+                "DB_Diagnostic".Error_Code := #ErrorID;
+                "DB_HMI".ErrorText    := CONCAT(IN1 := 'Tool change timeout T', IN2 := INT_TO_STRING(#ToolNumber));
+                "DB_HMI".ErrorText_ES := CONCAT(IN1 := 'Tiempo excedido cambio herramienta T', IN2 := INT_TO_STRING(#ToolNumber));
+                #state := 999;
+            ELSIF #fbMoveTool.Error THEN
+                // TO/drive error -- turret could not reach target angle
+                #bExecMoveTool := FALSE;
+                #ErrorID       := 16#0205;
+                "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #fbMoveTool.ErrorID);
+                "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'ToolChanger: Rotation failed T',
+                                              IN2 := CONCAT(IN1 := INT_TO_STRING(#ToolNumber),
+                                              IN2 := CONCAT(IN1 := ' TO:', IN2 := "DB_Diagnostic".TO_ErrorText)));
+                "DB_Diagnostic".Error_Code := #ErrorID;
+                "DB_HMI".ErrorText      := CONCAT(IN1 := 'Tool change failed T', IN2 := INT_TO_STRING(#ToolNumber));
+                "DB_HMI".ErrorText_ES   := CONCAT(IN1 := 'Fallo en cambio herramienta T', IN2 := INT_TO_STRING(#ToolNumber));
+                "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                #state := 999;
+            END_IF;
+
+        // ---------------------------------------------------------------
+        // STATE 99: Completed successfully
+        // ---------------------------------------------------------------
+        99:
+            #Done := TRUE;
+            #Busy := FALSE;
+
+        // ---------------------------------------------------------------
+        // STATE 999: Error state -- remains until Execute goes FALSE
+        // ---------------------------------------------------------------
+        999:
+            #Error := TRUE;
+            #Busy  := FALSE;
+
+    END_CASE;
+
+    // FB_Axis_AbsPos called every scan -- Execute flag managed by state machine
+    #fbMoveTool(
+        Execute  := #bExecMoveTool,
+        Position := #targetToolPos,
+        Velocity := "DB_MachineConfig".ToolVelocity,
+        Axis     := #Axis_Tool
+    );
+
+END_FUNCTION_BLOCK

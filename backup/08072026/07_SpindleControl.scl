@@ -1,0 +1,267 @@
+// =============================================================================
+// 07_SpindleControl.scl
+// FB_SpindleControl -- Spindle speed control (simplified)
+//
+// Purpose:
+//   Controls the spindle in velocity mode using MC_MoveVelocity (PTO output).
+//   VFD run direction: CW only -- no direction pin.
+//   RunForward signal enables VFD run.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// OPERATING RULES (enforced by the CALLER, not by this FB):
+//
+//   1. Set SetSpeed while RunCmd = FALSE.
+//   2. Set RunCmd = TRUE  → MC_MoveVelocity starts + RunForward goes TRUE.
+//      Keep RunCmd TRUE for the entire run.
+//   3. To stop:  set RunCmd = FALSE  → RunForward goes FALSE, PTO halts.
+//      Do NOT touch SetSpeed during stop.
+//   4. To change speed:
+//        a. RunCmd = FALSE  (spindle coasts / stops on VFD ramp)
+//        b. Write new SetSpeed
+//        c. RunCmd = TRUE   (spindle restarts at new speed)
+//
+// This FB does NOT add any delays or intermediate states.
+// Timing handshakes (coast-down waits, PTO stabilise, etc.) are the CALLER's
+// responsibility if they are needed.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// Speed calculation:
+//   effectiveSpeed = CLAMP(SetSpeed, MinSpeed, MaxSpeed)
+//   PTO conversion: velocity (pulse/s) = effectiveRPM × 500 / 60
+//   MinSpeed and MaxSpeed are read from DB_Spindle.
+//
+// Error codes:
+//   16#0502 -- MC_MoveVelocity runtime error
+//
+// States (Diag_SpindleState):
+//   0   = IDLE     -- RunCmd FALSE, all outputs safe
+//   20  = RUNNING  -- RunCmd TRUE, PTO active, RunForward TRUE
+//   999 = ERROR    -- cleared by AckError or Reset
+//
+// Change log:
+//   2026-05-09  Complete rewrite: RunCmd level input replaces Start/Stop edges.
+//               Removed STARTING and STOPPING delay states and mid-run
+//               velocity-change handshake.  Caller owns all sequencing.
+//   2026-05-09  Previous version: 4-state machine (was 7-state before that).
+// =============================================================================
+
+FUNCTION_BLOCK "FB_SpindleControl"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 3.0
+    VAR_INPUT
+        Enable        : Bool;  // Drive power enable -- from bDrivesEnable; stays TRUE during normal operation
+        RunCmd        : Bool;  // Level signal: TRUE = run, FALSE = stop/idle.
+                               //   Set speed first, then raise RunCmd.
+                               //   Lower RunCmd to stop; do not change speed while RunCmd is TRUE.
+        SetSpeed      : Real;  // Commanded speed in RPM (set while RunCmd = FALSE)
+        SpeedOverride : Real;  // Speed override % (100 = normal speed)
+        Reset         : Bool;  // Full system reset -- clears ERROR, returns to IDLE
+        AckError      : Bool;  // Acknowledge spindle error only (no full system reset needed)
+    END_VAR
+    VAR_OUTPUT
+        Running        : Bool;  // TRUE while RunCmd is TRUE and no error
+        AtSpeed        : Bool;  // TRUE when actual speed is within SpeedTolerance of commanded
+        ActualSpeed    : Real;  // Measured speed (RPM)
+        CommandedSpeed : Real;  // Override-applied target speed (RPM)
+        Error          : Bool;  // Error active
+        ErrorID        : Word;  // Error code
+        RunForward     : Bool;  // VFD Run Forward digital output -- mirrors RunCmd (except in ERROR)
+    END_VAR
+    VAR_IN_OUT
+        Axis_Spindle : TO_PositioningAxis;  // Spindle Technology Object
+    END_VAR
+    VAR
+        state            : Int;   // 0 = IDLE, 20 = RUNNING, 999 = ERROR
+
+        // Speed calculation
+        effectiveRPM     : Real;  // RPM after override and clamping
+        targetVelocity   : Real;  // Velocity in pulse/s sent to MC_MoveVelocity
+
+        // Motion FB instances
+        MC_Power_Inst        : MC_Power;
+        MC_MoveVelocity_Inst : MC_MoveVelocity;
+
+        // Internal execute flag
+        bMoveVelExec : Bool;
+
+        // AtSpeed helpers
+        speedDiff    : Real;
+        speedPercent : Real;
+
+        // AckError edge detection
+        prevAck  : Bool;
+        ackEdge  : Bool;
+    END_VAR
+
+BEGIN
+    // =========================================================================
+    // 1. EDGE DETECTION
+    // =========================================================================
+    #ackEdge := #AckError AND NOT #prevAck;
+    #prevAck := #AckError;
+
+    // =========================================================================
+    // 2. RESET (full system reset -- takes priority over everything)
+    // =========================================================================
+    IF #Reset THEN
+        #state        := 0;
+        #Error        := FALSE;
+        #ErrorID      := 0;
+        #bMoveVelExec := FALSE;
+        #RunForward   := FALSE;
+    END_IF;
+
+    // =========================================================================
+    // 3. SPEED CALCULATION (runs every scan)
+    // =========================================================================
+    #effectiveRPM := #SetSpeed * (#SpeedOverride / 100.0);
+    IF #effectiveRPM < "DB_Spindle".MinSpeed THEN
+        #effectiveRPM := "DB_Spindle".MinSpeed;
+    END_IF;
+    IF #effectiveRPM > "DB_Spindle".MaxSpeed THEN
+        #effectiveRPM := "DB_Spindle".MaxSpeed;
+    END_IF;
+    #CommandedSpeed  := #effectiveRPM;
+    #targetVelocity  := #effectiveRPM * 500.0 / 60.0;  // RPM → pulse/s
+
+    // =========================================================================
+    // 4. STATE MACHINE
+    // =========================================================================
+    CASE #state OF
+
+        // -----------------------------------------------------------------
+        // STATE 0: IDLE
+        // All outputs safe.  Transition to RUNNING when RunCmd goes TRUE.
+        // -----------------------------------------------------------------
+        0:
+            #Running      := FALSE;
+            #AtSpeed      := FALSE;
+            #bMoveVelExec := FALSE;
+            #RunForward   := FALSE;
+
+            IF #RunCmd THEN
+                #bMoveVelExec := TRUE;  // pre-load velocity; RunForward still FALSE
+                #state        := 10;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // STATE 10: PRELOAD
+        // Execute TRUE so the PTO frequency is stable before the VFD is
+        // enabled.  RunForward stays FALSE this scan; transitions to RUNNING
+        // on the very next scan.
+        // -----------------------------------------------------------------
+        10:
+            #Running      := FALSE;
+            #AtSpeed      := FALSE;
+            #bMoveVelExec := TRUE;
+            #RunForward   := FALSE;
+            #state        := 20;
+
+        // -----------------------------------------------------------------
+        // STATE 20: RUNNING
+        // RunCmd TRUE → MC_MoveVelocity active, RunForward TRUE.
+        // The CALLER is responsible for sequencing (speed-change stops,
+        // coast-down waits, PTO-stabilise delays, etc.).
+        // Transition back to IDLE when RunCmd goes FALSE.
+        // -----------------------------------------------------------------
+        20:
+            IF NOT #RunCmd THEN
+                // Caller dropped RunCmd → stop immediately
+                #Running      := FALSE;
+                #AtSpeed      := FALSE;
+                #bMoveVelExec := FALSE;
+                #RunForward   := FALSE;
+                #state        := 0;
+
+            ELSE
+                // Normal running
+                #Running      := TRUE;
+                #bMoveVelExec := TRUE;
+                #RunForward   := TRUE;
+
+                // AtSpeed check
+                #speedDiff    := ABS(#ActualSpeed - #effectiveRPM);
+                #speedPercent := 0.0;
+                IF #effectiveRPM > 1.0 THEN
+                    #speedPercent := (#speedDiff / #effectiveRPM) * 100.0;
+                END_IF;
+                #AtSpeed := (#speedPercent <= "DB_Spindle".SpeedTolerance);
+
+                // MC_MoveVelocity error check
+                IF #MC_MoveVelocity_Inst.Error THEN
+                    #ErrorID      := 16#0502;
+                    #bMoveVelExec := FALSE;
+                    #RunForward   := FALSE;
+                    "DB_Diagnostic".Spindle_TO_ErrorID := #MC_MoveVelocity_Inst.ErrorID;
+                    "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #MC_MoveVelocity_Inst.ErrorID);
+                    "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Spindle move failed: ',
+                                                          IN2 := "DB_Diagnostic".TO_ErrorText);
+                    "DB_Diagnostic".Error_Code := #ErrorID;
+                    // Single-writer: report via queue -> FB_AlarmManager latches DB_Error and
+                    // drives DB_HMI.ErrorText through the mirror. (The old direct ErrorText
+                    // write here was overwritten by the mirror one scan later and the error
+                    // never reached DB_Error/history at all.)
+                    "FC_ReportError"(Code := #ErrorID,
+                                     Details := "DB_Diagnostic".Error_Text,
+                                     Source := 'Spindle');
+                    "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                    "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                    #state := 999;
+                END_IF;
+            END_IF;
+
+        // -----------------------------------------------------------------
+        // STATE 999: ERROR
+        // AckError: clears spindle error, returns to IDLE.
+        // Reset:    handled above (takes priority, clears everything).
+        // -----------------------------------------------------------------
+        999:
+            #Error        := TRUE;
+            #Running      := FALSE;
+            #AtSpeed      := FALSE;
+            #bMoveVelExec := FALSE;
+            #RunForward   := FALSE;
+
+            IF #ackEdge THEN
+                #Error   := FALSE;
+                #ErrorID := 0;
+                #state   := 0;
+                // DB_HMI error text is owned by FB_AlarmManager (mirror) — Ack clears it
+                // there; STATE_STOPPED clears ErrorDetail. No HMI writes from this FB.
+            END_IF;
+
+    END_CASE;
+
+    // =========================================================================
+    // 5. MC_ FUNCTION BLOCK CALLS (every scan)
+    // =========================================================================
+    #MC_Power_Inst(
+        Axis   := #Axis_Spindle,
+        Enable := #Enable
+    );
+    #MC_MoveVelocity_Inst(
+        Axis      := #Axis_Spindle,
+        Execute   := #bMoveVelExec,
+        Velocity  := #targetVelocity,
+        Direction := 1              // CW only -- no direction pin
+    );
+
+    // Actual speed: TO velocity (pulse/s) → RPM
+    #ActualSpeed := ABS(#Axis_Spindle.ActualVelocity) * 60.0 / 500.0;
+
+    // =========================================================================
+    // 6. WRITE STATUS TO DB_Spindle (read by HMI and other FBs)
+    // =========================================================================
+    "DB_Spindle".IsRunning      := #Running;
+    "DB_Spindle".AtSpeed        := #AtSpeed;
+    "DB_Spindle".ActualSpeed    := #ActualSpeed;
+    "DB_Spindle".CommandedSpeed := #CommandedSpeed;
+    "DB_Spindle".Error          := #Error;
+    "DB_Spindle".ErrorID        := #ErrorID;
+
+    // Diagnostics (written every scan for watch-table tracing)
+    "DB_Spindle".Diag_SpindleState  := #state;    // 0=Idle, 10=Preload, 20=Running, 999=Error
+    "DB_Spindle".Diag_MoveVelBusy   := #MC_MoveVelocity_Inst.Busy;
+    "DB_Spindle".Diag_MoveVelInVel  := #MC_MoveVelocity_Inst.InVelocity;
+
+END_FUNCTION_BLOCK

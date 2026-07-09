@@ -1,0 +1,77 @@
+// =============================================================================
+// 02b_RecipePrograms.scl
+// Recipe program data blocks (DB_RecipeProgram1..5)
+// Kept separate from 02_DataBlocks.scl so real recipe data is not overwritten
+// when 02_DataBlocks.scl is regenerated.
+// Depends on: 01_DataTypes.scl (RecipeHeader, RecipeLine UDTs)
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram1 - Recipe data for Program 1
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram1"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box
+        Lines  : Array[0..199] of "RecipeLine"; // 200 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram2 - Recipe data for Program 2
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram2"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";
+        Lines  : Array[0..199] of "RecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram3 - Recipe data for Program 3
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram3"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";
+        Lines  : Array[0..199] of "RecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram4 - Recipe data for Program 4
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram4"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";
+        Lines  : Array[0..199] of "RecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram5 - Recipe data for Program 5
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram5"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";
+        Lines  : Array[0..199] of "RecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK

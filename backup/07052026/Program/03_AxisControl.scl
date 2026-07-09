@@ -1,0 +1,353 @@
+// =============================================================================
+// 03_AxisControl.scl
+// Axis control wrapper function blocks
+//
+// This file wraps Siemens PLCopen MC_ commands with project-specific thin wrappers.
+// All FBs accept a TO_PositioningAxis VAR_IN_OUT reference.
+//
+// FB List:
+//   FB_Axis_AbsPos  -- Absolute position move (MC_MoveAbsolute wrapper)
+//   FB_Axis_Power   -- Drive enable/disable (MC_Power wrapper)
+//   FB_Axis_Home    -- Homing (MC_Home wrapper)
+//   FB_Axis_Halt    -- Controlled stop (MC_Halt wrapper)
+//   FB_Axis_Jog     -- Continuous jog (MC_MoveJog wrapper)
+//   FB_Axis_Reset   -- TO error reset (MC_Reset wrapper)
+//
+// Units: mm and mm/s (must match Technology Object configuration).
+// =============================================================================
+
+
+// =============================================================================
+// FB_Axis_AbsPos -- Absolute position move
+//
+// Behavior:
+//   Starts a new move on the rising edge of Execute.
+//   Done = TRUE remains set while Execute is TRUE after completion.
+//   Clearing Execute also clears Done -- ready for the next command.
+//
+// Usage note:
+//   Used by FB_RecipeHandler and FB_ManualMode.
+//   Two simultaneous Execute signals must not be sent to the same axis.
+// =============================================================================
+FUNCTION_BLOCK "FB_Axis_AbsPos"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+    VAR_INPUT
+        Execute  : Bool;  // Rising edge = new move command
+        Position : Real;  // Target position (mm)
+        Velocity : Real;  // Move velocity (mm/s)
+    END_VAR
+    VAR_OUTPUT
+        Done    : Bool;  // Move completed
+        Busy    : Bool;  // Move in progress
+        Error   : Bool;  // TO/drive error
+        ErrorID : Word;  // MC_ error code (compare with TO diagnostics)
+    END_VAR
+    VAR_IN_OUT
+        Axis : TO_PositioningAxis;
+    END_VAR
+    VAR
+        MC_MoveAbsolute_Instance : MC_MoveAbsolute;
+        execLatch  : Bool;  // MC_MoveAbsolute Execute latch -- ensures single command
+        doneLatch  : Bool;  // Holds Done result until Execute goes FALSE
+        prevExecute : Bool; // Previous Execute value for edge detection
+    END_VAR
+BEGIN
+    // Rising edge: new command starting -- clear previous Done
+    IF #Execute AND NOT #prevExecute THEN
+        #doneLatch := FALSE;
+    END_IF;
+    #prevExecute := #Execute;
+
+    // If Execute is active, not yet done, and latch not set -- start move
+    IF #Execute AND NOT #execLatch AND NOT #doneLatch THEN
+        #execLatch := TRUE;
+    END_IF;
+
+    // MC_MoveAbsolute call
+    #MC_MoveAbsolute_Instance(
+        Axis     := #Axis,
+        Execute  := #execLatch,
+        Position := #Position,
+        Velocity := #Velocity,
+        Done     => #Done,
+        Busy     => #Busy,
+        Error    => #Error,
+        ErrorID  => #ErrorID
+    );
+
+    // Done or Error: release latch, hold done
+    IF #MC_MoveAbsolute_Instance.Done OR #MC_MoveAbsolute_Instance.Error THEN
+        #execLatch := FALSE;
+        #doneLatch := TRUE;
+    END_IF;
+
+    // Done: latch or MC instant done -- visible while Execute is TRUE
+    #Done  := #doneLatch OR #MC_MoveAbsolute_Instance.Done;
+    #Error := #MC_MoveAbsolute_Instance.Error;
+END_FUNCTION_BLOCK
+
+
+// =============================================================================
+// FB_Axis_RelPos -- Relative position move (MC_MoveRelative wrapper)
+//
+// Unlike MC_MoveAbsolute, does not require homing.
+// Distance: positive = forward, negative = backward.
+// =============================================================================
+FUNCTION_BLOCK "FB_Axis_RelPos"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_INPUT
+        Execute  : Bool;
+        Distance : Real;    // Relative distance (mm or degrees)
+        Velocity : Real;
+    END_VAR
+    VAR_OUTPUT
+        Done    : Bool;
+        Busy    : Bool;
+        Error   : Bool;
+        ErrorID : Word;   // TO error code (MC_MoveRelative.ErrorID)
+    END_VAR
+    VAR_IN_OUT
+        Axis : TO_PositioningAxis;
+    END_VAR
+    VAR
+        MC_MoveRelative_Instance {InstructionName := 'MC_MoveRelative'; LibVersion := '8.0'} : MC_MoveRelative;
+        execLatch  : Bool;
+        prevExec   : Bool;
+        doneLatch  : Bool;
+    END_VAR
+BEGIN
+    IF #Execute AND NOT #prevExec THEN
+        #doneLatch := FALSE;
+        #execLatch := TRUE;
+    END_IF;
+    #prevExec := #Execute;
+
+    #MC_MoveRelative_Instance(
+        Axis     := #Axis,
+        Execute  := #execLatch,
+        Distance := #Distance,
+        Velocity := #Velocity,
+        Done     => #Done,
+        Busy     => #Busy,
+        Error    => #Error
+    );
+    #ErrorID := #MC_MoveRelative_Instance.ErrorID;
+
+    IF #MC_MoveRelative_Instance.Done OR #MC_MoveRelative_Instance.Error THEN
+        #execLatch  := FALSE;
+        #doneLatch  := TRUE;
+    END_IF;
+END_FUNCTION_BLOCK
+
+
+// =============================================================================
+// FB_Axis_Power -- Drive power enable/disable
+//
+// Enable = TRUE  → MC_Power called, drive enabled.
+// Enable = FALSE → MC_Power stopped, drive disabled.
+// Status = TRUE  → Drive ready and enabled.
+// =============================================================================
+FUNCTION_BLOCK "FB_Axis_Power"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.2
+    VAR_INPUT
+        Enable : Bool;  // TRUE = enable drive
+    END_VAR
+    VAR_OUTPUT
+        Status  : Bool;  // TRUE = drive active and ready
+        Error   : Bool;  // Drive enable error
+        ErrorID : Word;  // MC_Power TO error code -- for drive fault details
+    END_VAR
+    VAR_IN_OUT
+        Axis : TO_PositioningAxis;
+    END_VAR
+    VAR
+        MC_Power_Instance : MC_Power;
+    END_VAR
+BEGIN
+    #MC_Power_Instance(
+        Axis    := #Axis,
+        Enable  := #Enable,
+        Status  => #Status,
+        Error   => #Error,
+        ErrorID => #ErrorID
+    );
+END_FUNCTION_BLOCK
+
+
+// =============================================================================
+// FB_Axis_Home -- Homing
+//
+// Mode options (MC_Home Mode parameter):
+//   0 -- Passive: only set current position to Position value
+//   2 -- Active:  go to reference switch, zero encoder
+//   3 -- Active + Zero: go to reference switch, set Position value
+//
+// Default mode = 3 (matches DB_Manual.HomingMode).
+//
+// Safety note: Execute is rising-edge triggered -- even if Execute stays TRUE
+// after Done/Error, a new homing will not start. Same pattern as FB_Axis_AbsPos.
+// =============================================================================
+FUNCTION_BLOCK "FB_Axis_Home"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.4
+    VAR_INPUT
+        Execute  : Bool;        // Rising edge = start homing
+        Mode     : Int := 3;    // Homing mode (0=Passive, 2=Active, 3=Active+Zero)
+        Position : Real := 0.0; // Position value after homing (usually 0.0)
+    END_VAR
+    VAR_OUTPUT
+        Done    : Bool;
+        Busy    : Bool;
+        Error   : Bool;
+        ErrorID : Word;  // MC_Home TO error code -- converted to readable text via FC_TO_ErrorText
+    END_VAR
+    VAR_IN_OUT
+        Axis : TO_PositioningAxis;
+    END_VAR
+    VAR
+        MC_Home_Instance : MC_Home;
+        execInternal     : Bool;  // Actual Execute sent to MC_Home
+        prevExecute      : Bool;  // Previous Execute value for edge detection
+        doneLatch        : Bool;  // Prevents re-trigger after Done/Error
+    END_VAR
+BEGIN
+    // Rising edge: new command -- clear doneLatch
+    IF #Execute AND NOT #prevExecute THEN
+        #doneLatch := FALSE;
+    END_IF;
+    #prevExecute := #Execute;
+
+    // execInternal: run if new command and not yet done, OR still busy
+    // This ensures Execute staying TRUE after Done does not restart homing
+    #execInternal := (#Execute AND NOT #doneLatch) OR #MC_Home_Instance.Busy;
+
+    #MC_Home_Instance(
+        Axis     := #Axis,
+        Execute  := #execInternal,
+        Position := #Position,
+        Mode     := #Mode,
+        Done     => #Done,
+        Busy     => #Busy,
+        Error    => #Error
+    );
+
+    // Done or Error: set doneLatch -- cannot re-trigger without Execute FALSE→TRUE
+    IF #MC_Home_Instance.Done OR #MC_Home_Instance.Error THEN
+        #doneLatch := TRUE;
+    END_IF;
+
+    // Pass TO error code out -- written to DB_Diagnostic in FB_Process
+    #ErrorID := #MC_Home_Instance.ErrorID;
+END_FUNCTION_BLOCK
+
+
+// =============================================================================
+// FB_Axis_Halt -- Controlled stop
+//
+// Execute = TRUE → MC_Halt called, axis decelerates to a stop.
+// Cancels any active MC_MoveAbsolute.
+// Done = TRUE → axis has fully stopped.
+// =============================================================================
+FUNCTION_BLOCK "FB_Axis_Halt"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.2
+    VAR_INPUT
+        Execute : Bool;  // TRUE = issue stop command
+    END_VAR
+    VAR_OUTPUT
+        Done    : Bool;
+        Busy    : Bool;
+        Error   : Bool;
+        ErrorID : Word;  // MC_Halt TO error code -- available for diagnostics on halt failure
+    END_VAR
+    VAR_IN_OUT
+        Axis : TO_PositioningAxis;
+    END_VAR
+    VAR
+        MC_Halt_Instance : MC_Halt;
+    END_VAR
+BEGIN
+    #MC_Halt_Instance(
+        Axis    := #Axis,
+        Execute := #Execute,
+        Done    => #Done,
+        Busy    => #Busy,
+        Error   => #Error,
+        ErrorID => #ErrorID
+    );
+END_FUNCTION_BLOCK
+
+
+// =============================================================================
+// FB_Axis_Jog -- Continuous jog move
+//
+// JogForward and JogBackward are level inputs (not edge).
+// Axis decelerates when button is released.
+// Velocity: jog speed (mm/s) -- fed from DB_Manual.JogSpeed.
+// =============================================================================
+FUNCTION_BLOCK "FB_Axis_Jog"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_INPUT
+        JogForward  : Bool;  // Continuous jog in positive direction (level)
+        JogBackward : Bool;  // Continuous jog in negative direction (level)
+        Velocity    : Real;  // Jog speed (mm/s)
+    END_VAR
+    VAR_OUTPUT
+        Busy  : Bool;
+        Error : Bool;
+    END_VAR
+    VAR_IN_OUT
+        Axis : TO_PositioningAxis;
+    END_VAR
+    VAR
+        MC_MoveJog_Instance : MC_MoveJog;
+    END_VAR
+BEGIN
+    #MC_MoveJog_Instance(
+        Axis        := #Axis,
+        JogForward  := #JogForward,
+        JogBackward := #JogBackward,
+        Velocity    := #Velocity,
+        Busy        => #Busy,
+        Error       => #Error
+    );
+END_FUNCTION_BLOCK
+
+
+// =============================================================================
+// FB_Axis_Reset -- TO error reset
+//
+// When a TO enters an error state (e.g. limit switch, drive fault),
+// MC_Reset clears it. Will not re-execute until the fault is resolved.
+// Triggered by FB_Process when AckError or Reset button is pressed.
+// =============================================================================
+FUNCTION_BLOCK "FB_Axis_Reset"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_INPUT
+        Execute : Bool;  // Rising edge = reset TO error
+    END_VAR
+    VAR_OUTPUT
+        Done  : Bool;
+        Busy  : Bool;
+        Error : Bool;
+    END_VAR
+    VAR_IN_OUT
+        Axis : TO_PositioningAxis;
+    END_VAR
+    VAR
+        MC_Reset_Instance : MC_Reset;
+    END_VAR
+BEGIN
+    #MC_Reset_Instance(
+        Axis    := #Axis,
+        Execute := #Execute,
+        Done    => #Done,
+        Busy    => #Busy,
+        Error   => #Error
+    );
+END_FUNCTION_BLOCK

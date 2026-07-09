@@ -1,0 +1,120 @@
+================================================================================
+CHANGELOG -- MexicoMetalSpinning PLC Program
+================================================================================
+
+--------------------------------------------------------------------------------
+2026-05-02 | Session: Cylinder bug fixes, InvertSignal, Diagnostic improvements
+--------------------------------------------------------------------------------
+
+BUG FIX | 09_Sensors_Actuators.scl | FB_CylinderControl -- effectiveTarget
+  - effectiveTarget (VAR_TEMP) was never initialized from TargetPos.
+    Being a TEMP variable it was always 0.0 every scan.
+  - In State 5 (RULER_EXTEND): condition "RulerValue >= (effectiveTarget -
+    ExtendOffset)" evaluated as "RulerValue >= -5.0" which is always TRUE.
+    Result: cylinder jumped from State 5 to State 7 (Ruler Hold) in a single
+    scan without moving. Sol_A and Sol_B remained FALSE -- no physical motion.
+  - Retract was unaffected because State 6 condition "RulerValue <= 5.0" is
+    FALSE when the cylinder is in an extended position.
+  - No error code was generated; State 7 is a valid hold state.
+  - Fix: changed condition and assignment to use TargetPos:
+      Before: IF MaxPos > 0.0 AND #effectiveTarget > MaxPos THEN
+                  effectiveTarget := MaxPos;
+              ELSE
+                  effectiveTarget := effectiveTarget;  // no-op
+      After:  IF MaxPos > 0.0 AND TargetPos > MaxPos THEN
+                  effectiveTarget := MaxPos;
+              ELSE
+                  effectiveTarget := TargetPos;        // correct
+
+BUG FIX | 09_Sensors_Actuators.scl | FB_CylinderControl -- State 4 UseRulerPos
+  - From State 4 (AT_RETRACT), Cmd_Extend transitioned directly to State 1
+    (sensor-based extend) regardless of UseRulerPos setting.
+  - State 0 (IDLE) correctly checked UseRulerPos before choosing State 1 or 5,
+    but State 4 did not, creating an inconsistency.
+  - Fix: added UseRulerPos check in State 4:
+      Before: #State := 1;
+      After:  IF UseRulerPos THEN #State := 5; ELSE #State := 1; END_IF;
+
+FEATURE | 09_Sensors_Actuators.scl | FB_AnalogSensor -- InvertSignal
+  - Added InvertSignal : Bool := FALSE to VAR section.
+  - When InvertSignal = TRUE, the normalized value is flipped (1.0 - norm)
+    before applying the Phys_Min/Phys_Max scaling formula.
+  - Replaces the previous implicit reverse technique of setting Phys_Min >
+    Phys_Max, which was confusing and hard to explain on HMI.
+  - Formula:
+      norm = (AI_Raw - Raw_Min) / (Raw_Max - Raw_Min)
+      IF InvertSignal: norm = 1.0 - norm
+      Value = norm * (Phys_Max - Phys_Min) + Phys_Min
+
+CHANGE | 02_DataBlocks.scl | DB_Cylinder1 -- TargetPos default
+  - TargetPos default changed from 0.0 to 300.0 mm.
+  - Rationale: with UseRulerPos=TRUE and MaxPos=300.0, default target should
+    be the full extend position so the cylinder behaves predictably at startup.
+
+CHANGE | 02_DataBlocks.scl | DB_LinearRuler -- InvertSignal, Phys_Min/Max
+  - Phys_Min changed from 300.0 to 0.0 (natural physical reference order).
+  - Phys_Max changed from 0.0 to 300.0 (natural physical reference order).
+  - InvertSignal := TRUE added (0V = full extend = 300mm, ~10V = retracted = 0mm).
+  - Sensor output is identical to before; representation is now explicit and
+    readable.
+
+FEATURE | 02_DataBlocks.scl | DB_Manual -- SelCyl_ActualPos
+  - Added SelCyl_ActualPos : Real field.
+  - Holds the current analog position (mm) of the selected cylinder.
+  - Written by FC_CylinderDispatch every scan from DB_LinearRuler.Value.
+  - HMI can now display "current position in mm" directly from DB_Manual
+    without binding a separate DB_LinearRuler.Value tag.
+
+FEATURE | 02_DataBlocks.scl | DB_Diagnostic -- Cylinder 1 fields
+  - Added 6 new fields under a CYLINDER DIAGNOSTICS section:
+      Cyl1_State   : Int    -- State code (-1=EStop, 0=Idle, 1=Extending, ...)
+      Cyl1_Pos     : Real   -- Analog position (mm) from DB_LinearRuler.Value
+      Cyl1_Sol_A   : Bool   -- Solenoid A (extend coil) state
+      Cyl1_Sol_B   : Bool   -- Solenoid B (retract coil) state
+      Cyl1_Error   : Bool   -- Active cylinder error flag
+      Cyl1_ErrorID : Word   -- Error code (16#05xx)
+  - Written every scan from OB1 after the cylinder FB call.
+  - Allows commissioning and debugging without monitoring FB instance DBs
+    directly. The "extend does not work, no diagnostic message" scenario that
+    triggered this session would now be visible as Cyl1_State oscillating
+    between 5 and 7 with Sol_A=FALSE.
+
+CHANGE | 09_Sensors_Actuators.scl | FC_CylinderDispatch -- SelCyl_ActualPos routing
+  - CASE 1: "DB_Manual".SelCyl_ActualPos := "DB_LinearRuler".Value
+  - ELSE:   "DB_Manual".SelCyl_ActualPos := 0.0
+
+CHANGE | 08_Main_OB1.scl | OB1 -- Cylinder diagnostic writes
+  - Added 6 lines after solenoid output assignment to write cylinder state
+    to DB_Diagnostic every scan.
+
+CHANGE | 00_Configuration.scl | FC_LoadConfig Section 6
+  - Updated DB_LinearRuler calibration writes to match new Phys_Min/Max order
+    and added InvertSignal := TRUE write.
+
+CHANGE | 00_Configuration.scl | FC_LoadConfig Section 7
+  - Replaced empty placeholder with full documentation of Cylinder 1 factory
+    defaults and explanation of why VAR_INPUT fields cannot be written from FC.
+
+CHANGE | 00_Configuration.scl | Header comments
+  - Updated WHERE TO LOOK section references (Section 7, 8, 9).
+  - Updated RULER CALIBRATION HMI screen map to include InvertSignal,
+    Value, and Valid tags.
+
+--------------------------------------------------------------------------------
+FILES MODIFIED IN THIS SESSION
+--------------------------------------------------------------------------------
+  Program/09_Sensors_Actuators.scl
+  Program/02_DataBlocks.scl
+  Program/08_Main_OB1.scl
+  Program/00_Configuration.scl
+
+--------------------------------------------------------------------------------
+TIA PORTAL ACTIONS REQUIRED AFTER IMPORT
+--------------------------------------------------------------------------------
+  1. Recompile FB_AnalogSensor (new VAR field: InvertSignal)
+  2. Initialize all instance DBs of FB_AnalogSensor (DB_LinearRuler)
+  3. Initialize DB_Diagnostic (new Cyl1_* fields)
+  4. Initialize DB_Manual (new SelCyl_ActualPos field)
+  5. Full compile + download to CPU
+
+================================================================================

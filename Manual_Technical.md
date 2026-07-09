@@ -5,8 +5,6 @@
 
 ## 1. System Architecture
 
-![PLC Software Architecture](img_architecture.png)
-
 The system follows a hierarchical structure:
 - **OB1** calls FB_Process every scan cycle
 - **FB_Process** orchestrates all sub-systems
@@ -18,34 +16,48 @@ The system follows a hierarchical structure:
 
 ## 2. Main State Machine
 
-![FB_Process State Machine](img_state_machine.png)
-
 | State | ID | Description |
 |-------|-----|-------------|
 | STOPPED | 0 | Idle, waiting for Start |
-| STARTING | 10 | Checking if homing needed |
-| HOMING | 15 | Referencing axes |
-| RUNNING | 20 | Executing G-code |
-| PAUSED | 25 | Halted, waiting for Resume |
+| MANUAL | 5 | Manual jog mode active |
+| STARTING | 10 | Drive enable + pre-checks |
+| PRE_SCAN | 12 | Validating recipe limits before run |
+| PRE_HOME_CLR | 13 | Clearance move out of PNP zone before homing |
+| SHEET_WAIT | 14 | Sheet loading: Ph1 SheetHolder extends + HMI prompt; Ph2 MandrelLock clamps (5 s); Ph3 SheetHolder retracts (5 s) → LOCK_EXTEND_WAIT |
+| HOMING | 15 | Referencing axes (X → Z → Tool) |
+| POST_HOME_CLR | 16 | Clearance move away from PNP zone after homing → SHEET_WAIT |
+| LOCK_EXTEND_WAIT | 17 | ToolHeadLock engaging before RUNNING |
+| STOPPING | 18 | Controlled stop: halt axes → LOCK_RETRACT_WAIT → STOP_GOHOME |
+| STOP_GOHOME | 19 | Post-stop: home X → Z → Tool |
+| RUNNING | 20 | Executing recipe |
+| STOP_GOTOZERO | 21 | Post-stop: move axes to zero position |
+| PNP_HALT | 22 | PNP zone — halt active, reverse jog only |
+| PAUSED | 25 | Halted, waiting for Continue |
+| LOCK_RETRACT_WAIT | 29 | ToolHeadLock releasing before tool change or homing |
 | TOOL_CHANGE | 30 | Initiating tool change |
 | TOOL_WAIT | 35 | Waiting for tool changer |
+| COMPLETE | 100 | Program finished successfully |
 | ERROR | 999 | Error active, needs Reset |
 
 ---
 
 ## 3. File Structure
 
-| File | Purpose | Size |
-|------|---------|------|
-| `01_DataTypes.scl` | UDT_RecipeData | 3 KB |
-| `02_DataBlocks.scl` | All DBs | 13 KB |
-| `03_AxisControl.scl` | Motion wrappers | 8 KB |
-| `04_ToolChanger.scl` | Tool sequence | 8 KB |
-| `05_GcodeHandler.scl` | G-code execution | 25 KB |
-| `06_MainProcess.scl` | Main + safety | 34 KB |
-| `07_SpindleControl.scl` | VFD control | 12 KB |
+| File | Purpose |
+|------|---------|
+| `00_Configuration.scl` | FC_LoadConfig — factory defaults, called by OB100 |
+| `01_DataTypes.scl` | All UDTs: RecipeLine, RecipeHeader, AlarmEntry |
+| `02_DataBlocks.scl` | All DBs |
+| `03_AxisControl.scl` | MC_* wrapper FBs |
+| `04_ToolChanger.scl` | FB_ToolChanger — turret rotation |
+| `05_RecipeHandler.scl` | FB_RecipePreScan + FB_RecipeHandler (critical) |
+| `06_MainProcess.scl` | FB_Process + FB_SafetyMonitor + FB_ManualMode + FB_AlarmManager (largest) |
+| `07_SpindleControl.scl` | FB_SpindleControl — MC_MoveVelocity |
+| `07_ReportError.scl` | FC_ReportError + FC_TO_ErrorText + DB_SystemEvents ring buffer |
+| `08_Main_OB1.scl` | OB1 entry point + OB100 + FC_ContactorControl + FB_EStopDualChannel |
+| `09_Sensors_Actuators.scl` | FB_DigitalSensor, FB_AnalogSensor, FB_CylinderControl |
 
-**Import Order:** 01 → 02 → 03 → 04 → 05 → 06 → 07
+**Import Order:** 01 → 02 → 03 → 04 → 05 → 07_SpindleControl → 07_ReportError → 09 → 06 → 08 → 00
 
 ---
 
@@ -64,19 +76,19 @@ The system follows a hierarchical structure:
                              │
                              ▼
 ┌────────────────────────────────────────────────────────────────┐
-│  FB_Process ─────► FB_GcodeParser ─────► FB_Axis_AbsPos       │
+│  FB_Process ────► FB_RecipeHandler ────► FB_Axis_AbsPos        │
 │      │                   │                     │               │
 │      │              Motion Cmds           MC_MoveAbsolute      │
 │      │                   │                     │               │
 │      ▼                   ▼                     ▼               │
-│  FB_Safety          DB_MachineConfig      Technology Objects   │
-│  FB_Limits         (Limits, Speeds)        (Axis_X, Axis_Z)    │
-│  FB_Alarm                                                      │
+│  FB_SafetyMonitor   DB_MachineConfig      Technology Objects   │
+│  FB_LimitMonitor   (Limits, Speeds)        (Axis_X, Axis_Z)    │
+│  FB_AlarmManager                                               │
 └────────────────────────────────────────────────────────────────┘
                              │
                              ▼
 ┌────────────────────────────────────────────────────────────────┐
-│               DB_Diagnostics, DB_AlarmHistory                  │
+│               DB_Diagnostic, DB_Error (alarm history)          │
 └────────────────────────────┬───────────────────────────────────┘
                              │
                              ▼
@@ -115,7 +127,25 @@ The system follows a hierarchical structure:
 
 ---
 
-## 6. Linear Interpolation
+## 6. Pneumatic Cylinders
+
+| Slot | Name | DB | Valve | Mode | Sensor | Sol outputs |
+|------|------|----|-------|------|--------|-------------|
+| CylDiag[1] | BackSupport | `DB_Cylinder_BackSupport` | 5/3 blocked center (ValveType=2) | 3 — analog ruler setpoint | Linear ruler 0–300 mm | Sol_A, Sol_B |
+| CylDiag[2] | SheetHolder | `DB_Cylinder_SheetHolder` | 5/2 spring return (ValveType=1) | 0 — full stroke, timed | None | Sol_A only |
+| CylDiag[3] | ToolHeadLock | `DB_Cylinder_ToolHeadLock` | 5/2 spring return (ValveType=1) | 1 — magnetic sensor | Digital sensor at extend setpoint | Sol_A only |
+| CylDiag[4] | MandrelLock | `DB_Cylinder_MandrelLock` | 5/2 spring return (ValveType=1) | 0 — full stroke, timed | None | Sol_A only |
+
+**SheetHolder sequence (STATE_SHEET_WAIT):**
+1. Extends at state entry (holds form while operator places sheet blank)
+2. Operator presses both Start buttons → MandrelLock extends, 5 s open-loop wait
+3. MandrelLock assumed clamped → SheetHolder retracts, 5 s open-loop wait → proceed to LOCK_EXTEND_WAIT
+
+**TIA Portal output tags:** `Output_Cyl_<Name>_SolA` (and `SolB` for BackSupport only).
+
+---
+
+## 7. Linear Interpolation
 
 Both axes finish simultaneously using velocity scaling:
 
@@ -128,7 +158,7 @@ Velocities: velX = deltaX / moveTime
 
 ---
 
-## 7. Technology Objects
+## 8. Technology Objects
 
 | Name | Type | Purpose |
 |------|------|---------|
@@ -139,7 +169,7 @@ Velocities: velX = deltaX / moveTime
 
 ---
 
-## 8. Key Design Decisions
+## 9. Key Design Decisions
 
 | Decision | Rationale |
 |----------|-----------|

@@ -1,0 +1,9 @@
+TYPE "AlarmEntry"
+VERSION : 0.1
+    STRUCT
+        Timestamp : DTL;
+        ErrorCode : Word;
+        ProgramNum : Int;
+        LineNum : Int;
+    END_STRUCT;
+END_TYPE

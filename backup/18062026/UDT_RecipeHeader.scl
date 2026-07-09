@@ -1,0 +1,13 @@
+TYPE "RecipeHeader"
+VERSION : 0.1
+    STRUCT
+        sName : String[20];     // Program name (max 20 chars)
+        LineCount : Int;        // Total lines in program (0-999)
+        Valid : Bool;           // Program is valid and loaded
+        PreScanned : Bool;      // Pre-scan completed
+        MinX : Real;            // Bounding box Min X
+        MaxX : Real;            // Bounding box Max X
+        MinZ : Real;            // Bounding box Min Z
+        MaxZ : Real;            // Bounding box Max Z
+    END_STRUCT;
+END_TYPE

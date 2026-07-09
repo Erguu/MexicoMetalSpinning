@@ -1,0 +1,299 @@
+// =============================================================================
+// Version_Recipe - 08_Main_OB1.scl
+// Main organization block - entry point for cyclic execution
+// =============================================================================
+
+// =============================================================================
+// FB_EStopDualChannel -- Dual-channel emergency stop (E-Stop) monitoring
+//
+// Physical wiring:
+//   Safety_Estop_Ch1 → PLC DI  NC contact -- normally CLOSED (TRUE)
+//   Safety_Estop_Ch2 → PLC DI  NO contact -- normally OPEN   (FALSE)
+//   Safety_Estop     → Marker (%M), written by this FB
+//
+// Normal state (button not pressed):
+//   NC=TRUE,  NO=FALSE  →  EStop_OK=TRUE  (machine may run)
+//
+// Emergency stop (button pressed):
+//   NC=FALSE, NO=TRUE   →  EStop_OK=FALSE (controlled stop)
+//
+// Discrepancy (contact/wiring fault):
+//   NC=TRUE,  NO=TRUE   →  EStop_OK=FALSE + DiscrepancyAlarm  (NO contact stuck)
+//   NC=FALSE, NO=FALSE  →  EStop_OK=FALSE + DiscrepancyAlarm  (NC contact stuck)
+//   In both cases the machine fails safe.
+//
+// Discrepancy alarm behavior:
+//   If channels remain inconsistent for DiscrepancyTimeout, DiscrepancyAlarm is TRUE for one scan.
+//   This alarm generates error code 16#0406 via FC_ReportError.
+//   HMI: DB_HMI.EStop_Discrepancy + DB_HMI.EStop_Ch1_OK + DB_HMI.EStop_Ch2_OK
+// =============================================================================
+FUNCTION_BLOCK "FB_EStopDualChannel"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.1
+    VAR_INPUT
+        Ch1_NC : Bool;                           // NC contact -- normal: TRUE (closed)
+        Ch2_NO : Bool;                           // NO contact -- normal: FALSE (open)
+        DiscrepancyTimeout : Time := T#500ms;   // Discrepancy debounce time
+    END_VAR
+    VAR_OUTPUT
+        EStop_OK         : Bool;   // TRUE = button not pressed = machine may run
+        Discrepancy      : Bool;   // TRUE = channels inconsistent = contact/wiring fault (instantaneous)
+        DiscrepancyAlarm : Bool;   // TRUE = timeout exceeded → generate alarm (rising edge)
+    END_VAR
+    VAR
+        tonDiscrepancy : TON;      // Discrepancy debounce timer
+        prevTimerQ     : Bool;     // Previous timer output for rising edge detection
+    END_VAR
+BEGIN
+    // Safe state: NC closed (TRUE) AND NO open (FALSE)
+    // E-Stop OK as long as neither channel breaks this condition
+    #EStop_OK := #Ch1_NC AND NOT #Ch2_NO;
+
+    // Discrepancy: channels must always be opposite (NC≠NO)
+    // When NC=NO (both TRUE or both FALSE) → contact fault
+    #Discrepancy := NOT (#Ch1_NC XOR #Ch2_NO);
+
+    // Debounce: filter simultaneous switching delays
+    #tonDiscrepancy(IN := #Discrepancy, PT := #DiscrepancyTimeout);
+
+    // Alarm: rising edge -- triggered once per discrepancy event
+    #DiscrepancyAlarm := #tonDiscrepancy.Q AND NOT #prevTimerQ;
+    #prevTimerQ := #tonDiscrepancy.Q;
+END_FUNCTION_BLOCK
+
+// Instance data block for FB_EStopDualChannel
+DATA_BLOCK "DB_fbEStop"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+NON_RETAIN
+"FB_EStopDualChannel"
+BEGIN
+    DiscrepancyTimeout := T#500ms;
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// FC_ToolAngleCalc -- Automatically calculates tool slot angles based on slot count
+//
+// When DB_ToolConfig.AutoCalcAngles = TRUE, evenly-spaced angles are calculated
+// each scan according to ToolCount:
+//   1 slot: [0°]
+//   2 slot: [0°, 180°]
+//   3 slot: [0°, 120°, 240°]
+//   4 slot: [0°, 90°,  180°, 270°]
+//   General: stepDeg = 360 / ToolCount
+//
+// When AutoCalcAngles = FALSE, no calculation is performed and Tool1..4_Position
+// can be entered manually from the HMI Tool page.
+//
+// HMI Tool page mapping:
+//   DB_MachineConfig.ToolCount        → slot count (1-4, writable)
+//   DB_ToolConfig.ToolCode_List[1..4] → slot code (writable, e.g. T101)
+//   DB_ToolConfig.Tool1..4_Position   → slot angle (writable when AutoCalcAngles=FALSE)
+//   DB_ToolConfig.ToolStepAngle_Calc  → calculated step angle (read-only info)
+//   DB_ToolConfig.AutoCalcAngles      → calculation mode (writable)
+// -----------------------------------------------------------------------------
+FUNCTION "FC_ToolAngleCalc" : Void
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_TEMP
+        tc      : Int;
+        stepDeg : Real;
+    END_VAR
+BEGIN
+    IF NOT "DB_ToolConfig".AutoCalcAngles THEN
+        RETURN;   // Manual mode: do not touch angles
+    END_IF;
+
+    // Clamp slot count to 1-4
+    tc := LIMIT(MN := 1, IN := "DB_MachineConfig".ToolCount, MX := 4);
+    "DB_MachineConfig".ToolCount := tc;   // write back clamped value
+
+    // Step angle: 0 for 1 slot (no rotation), equal division for 2+
+    IF tc = 1 THEN
+        stepDeg := 0.0;
+    ELSE
+        stepDeg := 360.0 / INT_TO_REAL(tc);
+    END_IF;
+    "DB_ToolConfig".ToolStepAngle_Calc := stepDeg;   // for HMI info display
+
+    // Populate slot positions (unused slots remain at 0)
+    "DB_ToolConfig".Tool1_Position := 0.0;
+    "DB_ToolConfig".Tool2_Position := SEL(G := tc >= 2, IN0 := 0.0, IN1 := stepDeg);
+    "DB_ToolConfig".Tool3_Position := SEL(G := tc >= 3, IN0 := 0.0, IN1 := stepDeg * 2.0);
+    "DB_ToolConfig".Tool4_Position := SEL(G := tc >= 4, IN0 := 0.0, IN1 := stepDeg * 3.0);
+END_FUNCTION
+
+// -----------------------------------------------------------------------------
+// FC_ContactorControl -- Manages physical drive contactor and enable outputs.
+//
+// Safety condition: no output is active without E-Stop OK (physical or bypass).
+// On error (MachineError): contactors and enable signals are dropped.
+// Enable interlock: Enable can only be active when the associated contactor is also on.
+//
+// Sequence: Contactor ON → Enable ON → MC_Power.Enable := TRUE → drive ready
+// -----------------------------------------------------------------------------
+FUNCTION "FC_ContactorControl" : Void
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_TEMP
+        eStopOK     : Bool;  // E-Stop cleared (physical or bypass)
+        drivePermit : Bool;  // Only E-Stop controls contactor permission
+        modePermit  : Bool;  // State-based interlock: prevents contactor in STATE_STOPPED (0) only
+    END_VAR
+BEGIN
+    eStopOK     := "Safety_Estop" OR "DB_HMI".Bypass_EStop;
+    drivePermit := eStopOK;  // Only E-Stop cuts contactor power -- NC/PNP/errors do NOT cut power
+
+    // Mode interlock: contactors blocked only in STATE_STOPPED (0).
+    // STATE_ERROR (999) is ALLOWED so contactors stay on after a PNP/NC halt --
+    // operator can jog away from limit zone without a full restart cycle.
+    // In auto states (>=10), FB_Process writes Btn_Contactor_* programmatically.
+    modePermit := "DB_HMI".MachineState > 0;
+
+    // Contactor outputs
+    "Output_Contactor_X"       := "DB_HMI".Btn_Contactor_X       AND drivePermit AND modePermit;
+    "Output_Contactor_Z"       := "DB_HMI".Btn_Contactor_Z       AND drivePermit AND modePermit;
+    "Output_Contactor_Tool"    := "DB_HMI".Btn_Contactor_Tool    AND drivePermit AND modePermit;
+    "Output_Contactor_Spindle" := "DB_HMI".Btn_Contactor_Spindle AND drivePermit AND modePermit;
+
+    // Enable outputs -- associated contactor must also be on (interlock)
+    "Output_Enable_X" := "DB_HMI".Btn_Enable_X AND "DB_HMI".Btn_Contactor_X AND drivePermit AND modePermit;
+    "Output_Enable_Z" := "DB_HMI".Btn_Enable_Z AND "DB_HMI".Btn_Contactor_Z AND drivePermit AND modePermit;
+
+    // HMI lamp feedback
+    "DB_HMI".Contactor_X_On       := "Output_Contactor_X";
+    "DB_HMI".Contactor_Z_On       := "Output_Contactor_Z";
+    "DB_HMI".Contactor_Tool_On    := "Output_Contactor_Tool";
+    "DB_HMI".Contactor_Spindle_On := "Output_Contactor_Spindle";
+    "DB_HMI".Enable_X_On          := "Output_Enable_X";
+    "DB_HMI".Enable_Z_On          := "Output_Enable_Z";
+END_FUNCTION
+
+// -----------------------------------------------------------------------------
+// OB1 -- Main cyclic loop entry point
+// -----------------------------------------------------------------------------
+ORGANIZATION_BLOCK "Main"
+TITLE = "Main Program Sweep (Cycle)"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_TEMP
+        tempRetVal : Int;
+    END_VAR
+BEGIN
+    // =========================================================================
+    // E-STOP DUAL CHANNEL -- Must run BEFORE all other FB calls
+    // =========================================================================
+    // Safety_Estop_Ch1 and Safety_Estop_Ch2: physical DI (%I) addresses in TIA Portal tag table.
+    // Safety_Estop: Marker (%M) -- computed combined signal.
+    "DB_fbEStop"(Ch1_NC := "Safety_Estop_Ch1", Ch2_NO := "Safety_Estop_Ch2");
+
+    // Combined E-Stop signal: safe when both channels are closed
+    "Safety_Estop" := "DB_fbEStop".EStop_OK;
+
+    // HMI status update
+    "DB_HMI".EStop_Ch1_OK      := "Safety_Estop_Ch1";
+    "DB_HMI".EStop_Ch2_OK      := "Safety_Estop_Ch2";
+    "DB_HMI".EStop_Discrepancy := "DB_fbEStop".Discrepancy;
+
+    // Discrepancy alarm: triggered once after timeout → FB_AlarmManager generates 16#0406
+    IF "DB_fbEStop".DiscrepancyAlarm THEN
+        "FC_ReportError"(Code    := 16#0406,
+                         Details := 'E-Stop contact discrepancy - check wiring/contacts',
+                         Source  := 'Safety');
+    END_IF;
+
+    // Main process state machine
+    "fbProcess"(
+        Panel_Start    := "Panel_Start_A" AND "Panel_Start_B",
+        Panel_Stop     := "Panel_Stop",
+        Panel_Pause    := "Panel_Pause",
+        Panel_Reset    := "Panel_Reset",
+        Rem_Start      := FALSE,
+        Rem_Stop       := FALSE,
+        EStop_OK       := "Safety_Estop",
+        Door_Closed    := "Safety_Door",
+        AirPressure_OK := "Safety_Air",
+        HW_NC_X_Min    := "Limit_NC_X_Min",
+        HW_NC_X_Max    := "Limit_NC_X_Max",
+        HW_NC_Z_Min    := "Limit_NC_Z_Min",
+        HW_NC_Z_Max    := "Limit_NC_Z_Max",
+        HW_PNP_X_Min   := "Limit_PNP_X_Min",
+        HW_PNP_X_Max   := "Limit_PNP_X_Max",
+        HW_PNP_Z_Min   := "Limit_PNP_Z_Min",
+        HW_PNP_Z_Max   := "Limit_PNP_Z_Max",
+        Axis_X         := "TO_AxisX",
+        Axis_Z         := "TO_AxisZ",
+        Axis_Tool      := "TO_AxisTool",
+        Axis_Spindle   := "TO_AxisSpindle"
+    );
+
+    // =========================================================================
+    // PNEUMATIC CYLINDERS
+    // To add Cylinder N:
+    //   1. 02_DataBlocks.scl        : add DB_CylinderN, DB_Sen_CylN_Setpt,
+    //                                  (DB_Sen_CylN_Ret optional), (DB_LinearRulerN if ruler)
+    //   2. TIA Portal tag table     : define physical I/O tags (sensors + solenoids)
+    //   3. Below                    : copy the ── Cylinder N template ── block, rename 1→N
+    //   4. FC_CylinderDispatch      : copy CASE 1 block in 09_Sensors_Actuators.scl, rename 1→N
+    // ValveType per cylinder: 1=5/2 spring  2=5/3 blocked  3=5/3 exhaust  (set in DB defaults or HMI)
+    // =========================================================================
+
+    // ── Cylinder 1 ────────────────────────────────────────────────────────────
+    "DB_Sen_Cyl1_Setpt"(RawInput := "In_Cyl1_AtSetpoint");
+    "DB_Sen_Cyl1_Ret"(RawInput   := "In_Cyl1_AtRetract");
+    "DB_LinearRuler1"(AI_Raw := "AI_LinearRuler");
+    "DB_Cylinder1"(
+        SafetyOK       := "Safety_Estop" OR "DB_HMI".Bypass_EStop,
+        Sen_AtSetpoint := "DB_Sen_Cyl1_Setpt".State,
+        Sen_AtRetract  := "DB_Sen_Cyl1_Ret".State,
+        RulerValue     := "DB_LinearRuler1".Value,
+        RulerValid     := "DB_LinearRuler1".Valid
+    );
+    "Output_Cyl1_SolA" := "DB_Cylinder1".Sol_A;
+    "Output_Cyl1_SolB" := "DB_Cylinder1".Sol_B;
+    "DB_Diagnostic".CylDiag[1].State   := "DB_Cylinder1".State;
+    "DB_Diagnostic".CylDiag[1].Pos     := "DB_LinearRuler1".Value;
+    "DB_Diagnostic".CylDiag[1].Sol_A   := "DB_Cylinder1".Sol_A;
+    "DB_Diagnostic".CylDiag[1].Sol_B   := "DB_Cylinder1".Sol_B;
+    "DB_Diagnostic".CylDiag[1].Error   := "DB_Cylinder1".Error;
+    "DB_Diagnostic".CylDiag[1].ErrorID := "DB_Cylinder1".ErrorID;
+
+    // ── Cylinder N template (copy block above, rename 1→N; remove ruler lines if unused) ──
+    // "DB_Sen_CylN_Setpt"(RawInput := "In_CylN_AtSetpoint");
+    // "DB_Sen_CylN_Ret"(RawInput   := "In_CylN_AtRetract");   // optional
+    // "DB_LinearRulerN"(AI_Raw := "AI_LinearRulerN");          // remove if no ruler
+    // "DB_CylinderN"(
+    //     SafetyOK       := "Safety_Estop" OR "DB_HMI".Bypass_EStop,
+    //     Sen_AtSetpoint := "DB_Sen_CylN_Setpt".State,
+    //     Sen_AtRetract  := "DB_Sen_CylN_Ret".State,
+    //     RulerValue     := "DB_LinearRulerN".Value,           // remove if no ruler
+    //     RulerValid     := "DB_LinearRulerN".Valid            // remove if no ruler
+    // );
+    // "Output_CylN_SolA" := "DB_CylinderN".Sol_A;
+    // "Output_CylN_SolB" := "DB_CylinderN".Sol_B;
+    // "DB_Diagnostic".CylDiag[N].State   := "DB_CylinderN".State;
+    // "DB_Diagnostic".CylDiag[N].Pos     := "DB_LinearRulerN".Value;  // 0.0 if no ruler
+    // "DB_Diagnostic".CylDiag[N].Sol_A   := "DB_CylinderN".Sol_A;
+    // "DB_Diagnostic".CylDiag[N].Sol_B   := "DB_CylinderN".Sol_B;
+    // "DB_Diagnostic".CylDiag[N].Error   := "DB_CylinderN".Error;
+    // "DB_Diagnostic".CylDiag[N].ErrorID := "DB_CylinderN".ErrorID;
+
+    // Cylinder manual command dispatch (selected cylinder → DB_Manual SelCyl_* status)
+    // Must run AFTER all cylinder FB calls so status reflects the current scan.
+    "FC_CylinderDispatch"();
+
+    // Contactor and enable outputs
+    "FC_ContactorControl"();
+
+    // Automatically update tool slot angles based on slot count
+    "FC_ToolAngleCalc"();
+END_ORGANIZATION_BLOCK
+
+// Instance Data Block for FB_Process
+DATA_BLOCK "fbProcess"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_Process"
+BEGIN
+END_DATA_BLOCK

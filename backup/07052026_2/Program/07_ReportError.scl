@@ -1,0 +1,120 @@
+// =============================================================================
+// Version_Recipe - 07_ReportError.scl
+// Central helper to report errors from any FB/FC/FCU without duplicating logic.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// DB_SystemEvents - small DB for inter-block requests (error reporting)
+// ---------------------------------------------------------------------------
+DATA_BLOCK "DB_SystemEvents"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.2
+NON_RETAIN
+    VAR
+        // Error queue: ring buffer (4 slots) -- prevents silent loss when two errors
+        // occur in the same scan before FB_AlarmManager can consume the first entry.
+        // FC_ReportError enqueues; FB_AlarmManager dequeues one item per scan.
+        EQ_Head    : Int := 0;              // Next slot to dequeue (read index)
+        EQ_Tail    : Int := 0;              // Next slot to enqueue (write index)
+        EQ_Count   : Int := 0;             // Number of pending items (0..4)
+        EQ_Code    : Array[0..3] of Word;
+        EQ_Details : Array[0..3] of String[80];
+        EQ_Source  : Array[0..3] of String[20];
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// ---------------------------------------------------------------------------
+// FC_TO_ErrorText -- Converts a Siemens TO (Technology Object) error code to a
+// readable short string. All MC_ error outputs (MC_Home, MC_MoveAbsolute, etc.)
+// return a 16-bit WORD; this FC converts it to String[20].
+//
+// Reference: TIA Portal Help → S7-1200 Technology Objects → ErrorIDs
+// Full list: TIA Portal → Online → TO Diagnostics → Error Description
+//
+// Usage:
+//   detail := FC_TO_ErrorText(Code := fbMoveX.ErrorID);
+//   → 'FollowError', 'NotHomed', '+HWLimit', etc.
+// ---------------------------------------------------------------------------
+FUNCTION "FC_TO_ErrorText" : String[20]
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+    VAR_INPUT
+        Code : Word;  // TO error code from MC_ function block
+    END_VAR
+BEGIN
+    // Siemens S7-1200/1500 TO motion error codes (most common)
+    CASE #Code OF
+        16#0000: FC_TO_ErrorText := 'OK';
+        // State / command errors
+        16#8001: FC_TO_ErrorText := 'AxisDisabled';      // Axis is disabled
+        16#8002: FC_TO_ErrorText := 'CmdNotAccepted';    // Command rejected in current state
+        16#8003: FC_TO_ErrorText := 'HomingRequired';    // Homing must be done first
+        16#8004: FC_TO_ErrorText := 'AxisInError';       // Axis is in error state
+        16#8005: FC_TO_ErrorText := 'LimitedByCfg';      // Vel/acc limited by TO config
+        16#8010: FC_TO_ErrorText := 'NotHomed';          // Homing not done
+        16#8011: FC_TO_ErrorText := 'AxisBusy';          // Axis busy with another command
+        16#8012: FC_TO_ErrorText := 'HomingActive';      // Homing already in progress
+        16#8013: FC_TO_ErrorText := 'NotEnabled';        // MC_Power not enabled
+        16#8014: FC_TO_ErrorText := 'DriveNotReady';     // Drive not ready (STO active?)
+        16#8015: FC_TO_ErrorText := 'STOActive';         // Safe Torque Off active
+        16#8016: FC_TO_ErrorText := 'SafeStopActive';    // Safe Stop function active
+        // Config / parameter errors
+        16#8100: FC_TO_ErrorText := 'ConfigError';       // TO configuration error
+        16#8101: FC_TO_ErrorText := 'InvalidParam';      // Parameter out of TO range
+        16#8102: FC_TO_ErrorText := 'HomingModeErr';     // Homing mode not supported
+        // Velocity / acceleration errors
+        16#8200: FC_TO_ErrorText := 'VelTooHigh';        // Velocity exceeds TO limit
+        16#8201: FC_TO_ErrorText := 'AccTooHigh';        // Acceleration exceeds TO limit
+        16#8202: FC_TO_ErrorText := 'JerkTooHigh';       // Jerk exceeds TO limit
+        // Stop / emergency
+        16#8500: FC_TO_ErrorText := 'EmergencyStop';     // TO emergency stop
+        16#8501: FC_TO_ErrorText := 'PowerRemoved';      // Power removed (E-Stop?)
+        16#8502: FC_TO_ErrorText := 'ErrorStop';         // Error-triggered stop
+        // Limit switch errors
+        16#8600: FC_TO_ErrorText := '+SoftLimit';        // Positive soft limit exceeded
+        16#8601: FC_TO_ErrorText := '-SoftLimit';        // Negative soft limit exceeded
+        16#8602: FC_TO_ErrorText := '+HWLimit';          // Positive hardware limit switch
+        16#8603: FC_TO_ErrorText := '-HWLimit';          // Negative hardware limit switch
+        16#8604: FC_TO_ErrorText := 'DriveFault';        // Servo drive fault
+        16#8605: FC_TO_ErrorText := 'EncoderErr';        // Encoder error
+        16#8606: FC_TO_ErrorText := 'DriveCommsLost';    // Drive communication timeout
+        // Following / deviation errors
+        16#8A00: FC_TO_ErrorText := 'FollowError';       // Following error too large
+        16#8A01: FC_TO_ErrorText := 'PosDeviation';      // Position deviation exceeded
+        16#8A02: FC_TO_ErrorText := 'SpdDeviation';      // Speed deviation exceeded
+        16#8A03: FC_TO_ErrorText := 'TorqueLimited';     // Torque limit active
+        ELSE
+            // Unknown code -- use TIA Portal Online → TO Diagnostics for details
+            FC_TO_ErrorText := 'UnknownTO';
+    END_CASE;
+END_FUNCTION
+
+// ---------------------------------------------------------------------------
+// FC_ReportError - Utility to request a centralized error handling via DB_SystemEvents
+// Usage: FC_ReportError(Code := <word>, Details := 'text', Source := 'Recipe');
+// ---------------------------------------------------------------------------
+FUNCTION "FC_ReportError" : Void
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.1
+    VAR_INPUT
+        Code : Word;
+        Details : String;
+        Source : String;
+    END_VAR
+    VAR_TEMP
+        tail : Int;
+    END_VAR
+BEGIN
+    // Enqueue into ring buffer. If full (4 concurrent errors in one scan) the entry is
+    // silently dropped -- in practice this cannot happen with the current call sites.
+    IF "DB_SystemEvents".EQ_Count < 4 THEN
+        #tail := "DB_SystemEvents".EQ_Tail;
+        "DB_SystemEvents".EQ_Code[#tail]    := #Code;
+        "DB_SystemEvents".EQ_Details[#tail] := #Details;
+        "DB_SystemEvents".EQ_Source[#tail]  := #Source;
+        "DB_SystemEvents".EQ_Tail  := (#tail + 1) MOD 4;
+        "DB_SystemEvents".EQ_Count := "DB_SystemEvents".EQ_Count + 1;
+    END_IF;
+END_FUNCTION
+

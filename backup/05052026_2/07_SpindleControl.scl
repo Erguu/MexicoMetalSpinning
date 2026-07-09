@@ -1,0 +1,284 @@
+// =============================================================================
+// 07_SpindleControl.scl
+// FB_SpindleControl -- Spindle speed control
+//
+// Purpose:
+//   Controls the spindle in velocity mode using MC_MoveVelocity.
+//   Start → enable drive → reach target speed → AtSpeed → Running.
+//   Stop  → MC_Halt → disable drive → Idle.
+//
+// Speed calculation:
+//   effectiveSpeed = SetSpeed × (SpeedOverride / 100)
+//   Clamped by DB_Spindle.MinSpeed and MaxSpeed.
+//   Direction = 1 → CW (negative velocity), -1 → CCW (positive velocity).
+//   (Sign convention may vary depending on TO configuration.)
+//
+// Error codes:
+//   16#0501 -- MC_Power enable failed (drive fault)
+//   16#0502 -- MC_MoveVelocity runtime error
+//   16#0503 -- MC_Halt failed
+//
+// NOTE: This FB will be updated when switching to Modbus spindle control (TODO).
+//       The DB_Spindle interface (IsRunning, AtSpeed, ActualSpeed) will remain unchanged.
+// =============================================================================
+
+FUNCTION_BLOCK "FB_SpindleControl"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 1.0
+    VAR_INPUT
+        Start         : Bool;  // Start spindle (rising edge)
+        Stop          : Bool;  // Stop spindle (rising edge)
+        SetSpeed      : Real;  // Commanded speed (RPM)
+        Direction     : Int;   // 1=CW, -1=CCW
+        SpeedOverride : Real;  // Speed override % (100=normal)
+        Reset         : Bool;  // Reset entire system (full reset)
+        AckError      : Bool;  // Acknowledge spindle error only -- full reset not required
+    END_VAR
+    VAR_OUTPUT
+        Running        : Bool;  // Spindle running
+        AtSpeed        : Bool;  // Target speed reached (within tolerance)
+        ActualSpeed    : Real;  // Measured actual speed (RPM or mm/s -- per TO)
+        CommandedSpeed : Real;  // Override-applied target speed
+        Error          : Bool;  // Error active
+        ErrorID        : Word;  // Error code
+    END_VAR
+    VAR_IN_OUT
+        Axis_Spindle : TO_PositioningAxis;  // Spindle Technology Object
+    END_VAR
+    VAR
+        state           : Int;
+        targetSpeed     : Real;  // Signed velocity sent to TO
+        speedWithOverride : Real; // Target speed after override
+        // Previous values for edge detection
+        prevStart, prevStop : Bool;
+        startEdge, stopEdge : Bool;
+        prevAck : Bool;
+        ackEdge : Bool;
+        // MC_ FB instances
+        MC_Power_Inst        : MC_Power;
+        MC_MoveVelocity_Inst : MC_MoveVelocity;
+        MC_Halt_Inst         : MC_Halt;
+        // MC_ Execute flags
+        bPowerEnable   : Bool;
+        bMoveVelExec   : Bool;
+        bHaltExec      : Bool;
+        // Timers
+        tonPowerEnable : TON;  // Timeout for drive enable wait in state 10
+        // AtSpeed calculation
+        speedDiff    : Real;
+        speedPercent : Real;
+    END_VAR
+
+BEGIN
+    // -------------------------------------------------------------------------
+    // Rising edge detection (Start / Stop / AckError buttons)
+    // -------------------------------------------------------------------------
+    #startEdge := #Start AND NOT #prevStart;
+    #stopEdge  := #Stop  AND NOT #prevStop;
+    #ackEdge   := #AckError AND NOT #prevAck;
+    #prevStart := #Start;
+    #prevStop  := #Stop;
+    #prevAck   := #AckError;
+
+    // -------------------------------------------------------------------------
+    // Reset: clear error state, return to state 0
+    // -------------------------------------------------------------------------
+    IF #Reset THEN
+        #state       := 0;
+        #Error       := FALSE;
+        #ErrorID     := 0;
+        #bMoveVelExec := FALSE;
+        #bHaltExec   := FALSE;
+    END_IF;
+
+    // -------------------------------------------------------------------------
+    // Apply override and clamp speed to min/max
+    // -------------------------------------------------------------------------
+    #speedWithOverride := #SetSpeed * (#SpeedOverride / 100.0);
+    IF #speedWithOverride < "DB_Spindle".MinSpeed THEN
+        #speedWithOverride := "DB_Spindle".MinSpeed;
+    END_IF;
+    IF #speedWithOverride > "DB_Spindle".MaxSpeed THEN
+        #speedWithOverride := "DB_Spindle".MaxSpeed;
+    END_IF;
+    #CommandedSpeed := #speedWithOverride;
+
+    // Speed unit conversion: TO control type = Pulse, 500 pulses = 1 revolution
+    //   RPM → pulse/s:  pulse/s = RPM × 500 / 60
+    // Direction: 1=CW (positive velocity), -1=CCW (negative velocity).
+    // TO velocity sign controls the physical direction via Q0.7 (VFD forward pin).
+    IF #Direction = -1 THEN
+        #targetSpeed := -(#speedWithOverride * 500.0 / 60.0);
+    ELSE
+        #targetSpeed := #speedWithOverride * 500.0 / 60.0;   // default CW (positive)
+    END_IF;
+
+    // -------------------------------------------------------------------------
+    // State machine
+    // -------------------------------------------------------------------------
+    CASE #state OF
+
+        // ---------------------------------------------------------------
+        // STATE 0: Idle -- spindle stopped, drive disabled
+        // ---------------------------------------------------------------
+        0:
+            #Running      := FALSE;
+            #AtSpeed      := FALSE;
+            #bPowerEnable := FALSE;
+            #bMoveVelExec := FALSE;
+            IF #startEdge THEN
+                // Start command received -- enable drive; reset timeout timer
+                #bPowerEnable := TRUE;
+                #tonPowerEnable(IN := FALSE, PT := T#10S);
+                #state        := 10;
+            END_IF;
+
+        // ---------------------------------------------------------------
+        // STATE 10: Waiting for drive enable
+        // ---------------------------------------------------------------
+        10:
+            #bPowerEnable := TRUE;
+            #tonPowerEnable(IN := TRUE, PT := T#10S);
+            IF #MC_Power_Inst.Status THEN
+                // Drive ready -- issue velocity command
+                #tonPowerEnable(IN := FALSE, PT := T#10S);
+                #bMoveVelExec := TRUE;
+                #state        := 20;
+            ELSIF #MC_Power_Inst.Error THEN
+                // Drive enable failed -- drive fault or wiring issue
+                #tonPowerEnable(IN := FALSE, PT := T#10S);
+                "DB_Diagnostic".Spindle_TO_ErrorID := #MC_Power_Inst.ErrorID;
+                "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #MC_Power_Inst.ErrorID);
+                #ErrorID := 16#0501;
+                "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Spindle PowerOn failed: ',
+                                                      IN2 := "DB_Diagnostic".TO_ErrorText);
+                "DB_Diagnostic".Error_Code := #ErrorID;
+                "DB_HMI".ErrorText   := 'Spindle drive error';
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                #state := 999;
+            ELSIF #tonPowerEnable.Q THEN
+                // Drive did not enable within 10s -- STO active, contactor missing, or wiring fault
+                #tonPowerEnable(IN := FALSE, PT := T#10S);
+                #ErrorID := 16#0505;
+                "DB_Diagnostic".Error_Text := 'Spindle drive enable timeout (10s)';
+                "DB_Diagnostic".Error_Code := #ErrorID;
+                "DB_HMI".ErrorText   := 'Spindle enable timeout';
+                "DB_HMI".ErrorDetail := 'Drive did not respond in 10s - check STO/contactor/wiring';
+                #state := 999;
+            END_IF;
+            // Stop command during drive enable -- go to stop sequence
+            IF #stopEdge THEN #tonPowerEnable(IN := FALSE, PT := T#10S); #state := 30; END_IF;
+
+        // ---------------------------------------------------------------
+        // STATE 20: Running -- speed tracking and AtSpeed check
+        // ---------------------------------------------------------------
+        20:
+            #Running      := TRUE;
+            #bMoveVelExec := TRUE;
+            // AtSpeed check: is the difference between actual and commanded speed within tolerance?
+            #speedDiff := ABS(ABS(#ActualSpeed) - ABS(#CommandedSpeed));
+            IF ABS(#CommandedSpeed) > 0.0 THEN
+                #speedPercent := (#speedDiff / ABS(#CommandedSpeed)) * 100.0;
+            ELSE
+                #speedPercent := 0.0;  // Division-by-zero protection
+            END_IF;
+            #AtSpeed := (#speedPercent <= "DB_Spindle".SpeedTolerance);
+            IF #stopEdge THEN
+                // Stop command -- go to halt sequence
+                #state := 30;
+            END_IF;
+            IF #MC_MoveVelocity_Inst.Error THEN
+                // Drive/TO error while velocity command running
+                "DB_Diagnostic".Spindle_TO_ErrorID := #MC_MoveVelocity_Inst.ErrorID;
+                "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #MC_MoveVelocity_Inst.ErrorID);
+                #ErrorID := 16#0502;
+                "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Spindle velocity failed: ',
+                                                      IN2 := "DB_Diagnostic".TO_ErrorText);
+                "DB_Diagnostic".Error_Code := #ErrorID;
+                "DB_HMI".ErrorText   := 'Spindle motion error';
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                #state := 999;
+            END_IF;
+
+        // ---------------------------------------------------------------
+        // STATE 30: Stopping -- waiting for MC_Halt
+        // ---------------------------------------------------------------
+        30:
+            #bMoveVelExec := FALSE;
+            #bHaltExec    := TRUE;
+            #AtSpeed      := FALSE;
+            IF #MC_Halt_Inst.Done THEN
+                // Spindle stopped safely
+                #bHaltExec    := FALSE;
+                #bPowerEnable := FALSE;
+                #Running      := FALSE;
+                #state        := 0;
+            ELSIF #MC_Halt_Inst.Error THEN
+                // Halt could not complete -- possible mechanical blockage or drive fault
+                "DB_Diagnostic".Spindle_TO_ErrorID := #MC_Halt_Inst.ErrorID;
+                "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #MC_Halt_Inst.ErrorID);
+                #ErrorID := 16#0503;
+                "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Spindle halt failed: ',
+                                                      IN2 := "DB_Diagnostic".TO_ErrorText);
+                "DB_Diagnostic".Error_Code := #ErrorID;
+                "DB_HMI".ErrorText   := 'Spindle halt error';
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
+                #state := 999;
+            END_IF;
+
+        // ---------------------------------------------------------------
+        // STATE 999: Error -- cleared by AckError or Reset
+        // AckError: acknowledges spindle error only; machine stays in STATE_STOPPED
+        // Reset:    resets entire system (managed by FB_Process)
+        // ---------------------------------------------------------------
+        999:
+            #Error        := TRUE;
+            #Running      := FALSE;
+            #AtSpeed      := FALSE;
+            #bMoveVelExec := FALSE;
+            #bHaltExec    := FALSE;
+            #bPowerEnable := FALSE;
+            IF #ackEdge THEN
+                // Clear spindle error -- return to state 0, machine remains stopped
+                #Error   := FALSE;
+                #ErrorID := 0;
+                #state   := 0;
+                "DB_HMI".ErrorText   := '';
+                "DB_HMI".ErrorDetail := '';
+            END_IF;
+
+    END_CASE;
+
+    // -------------------------------------------------------------------------
+    // MC_ function blocks -- called every scan
+    // -------------------------------------------------------------------------
+    #MC_Power_Inst(
+        Axis   := #Axis_Spindle,
+        Enable := #bPowerEnable
+    );
+    #MC_MoveVelocity_Inst(
+        Axis      := #Axis_Spindle,
+        Execute   := #bMoveVelExec,
+        Velocity  := #targetSpeed,
+        Direction := 0    // Always positive direction: Q0.7 HIGH → VFD RUN
+    );
+    #MC_Halt_Inst(
+        Axis    := #Axis_Spindle,
+        Execute := #bHaltExec
+    );
+
+    // Actual speed: read from TO and convert to RPM (ABS -- sign direction irrelevant for HMI)
+    //   pulse/s → RPM:  RPM = pulse/s × 60 / 500
+    #ActualSpeed := ABS(#Axis_Spindle.ActualVelocity) * 60.0 / 500.0;
+
+    // -------------------------------------------------------------------------
+    // Update DB_Spindle -- read by other FBs and HMI
+    // -------------------------------------------------------------------------
+    "DB_Spindle".IsRunning     := #Running;
+    "DB_Spindle".AtSpeed       := #AtSpeed;
+    "DB_Spindle".ActualSpeed   := #ActualSpeed;
+    "DB_Spindle".CommandedSpeed := #CommandedSpeed;
+    "DB_Spindle".Error         := #Error;
+    "DB_Spindle".ErrorID       := #ErrorID;
+
+END_FUNCTION_BLOCK

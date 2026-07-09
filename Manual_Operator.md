@@ -56,7 +56,7 @@ Use **Feedrate Override** slider:
 ### Pause/Resume
 1. Press **PAUSE** to stop
 2. Machine remembers position
-3. Press **PAUSE** again to continue
+3. Press **CONTINUE** to resume (not PAUSE again)
 
 ### Emergency
 - Press red **E-STOP** button
@@ -109,15 +109,35 @@ Use **Feedrate Override** slider:
 
 ## Status Messages
 
-| Message | Meaning |
-|---------|---------|
-| STOPPED - Ready | Ready to start |
-| Homing... | Finding home position |
-| Running | Executing program |
-| PAUSED | Waiting for resume |
-| Tool Change... | Changing tool |
-| Complete! | Finished |
-| ERROR | Problem - see message |
+English and Spanish status text are available on the HMI simultaneously.
+Connect `DB_HMI.StatusMsg` for English or `DB_HMI.StatusMsg_ES` for Spanish.
+
+| Message (EN) | Message (ES) | Meaning |
+|---|---|---|
+| Stopped | Detenido | Ready to start |
+| Homing... | Referenciando... | Finding home position |
+| Waiting for sheet... | Esperando lamina... | Sheet loading sequence — see below |
+| Running | Ejecutando | Executing program |
+| Paused | Pausado | Waiting for resume |
+| Tool Change | Cambio de Herramienta | Changing tool |
+| Program Complete | Programa Completado | Finished |
+| ERROR | ERROR | Problem - see error text |
+
+---
+
+## Sheet Loading Sequence
+
+When the status shows **"Waiting for sheet..."** the machine runs a three-step automatic sequence:
+
+| Step | What happens | What you do |
+|------|-------------|-------------|
+| 1 | Sheet holder cylinder **extends** to hold the form in position | Place the sheet blank onto the mandrel |
+| 2 | HMI shows: *"Insert sheet, then press both start buttons"* | Press and hold **both** Start buttons simultaneously to confirm |
+| 3 | Mandrel lock cylinder **clamps** (5 s) — then sheet holder **retracts** (5 s) | Keep clear of the machine — do not touch |
+
+After step 3 completes, the machine locks the tool head and automatically enters **RUNNING**.
+
+> If you press only one button, the machine will not proceed. Both buttons must be held together.
 
 ---
 

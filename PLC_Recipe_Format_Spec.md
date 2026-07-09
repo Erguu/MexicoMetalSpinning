@@ -32,11 +32,27 @@ This document defines the binary recipe format for the metal spinning machine's 
 |-----|----------------|-----------|---------|--------------------------|-------------------|
 | 0   | RAPID          | Yes       | No      | Ignored                  | G0 Xnnn Znnn      |
 | 1   | LINEAR         | Yes       | Yes     | Ignored                  | G1 Xnnn Znnn Fnnn |
-| 10  | TOOL_CHANGE    | No        | No      | Tool Number (1-4)        | M6 Tn             |
+| 10  | TOOL_CHANGE    | No        | No      | External tool code (Byte, 0-255) | M6 Tn      |
 | 20  | SPINDLE_ON     | No        | No      | Speed ÷ 10 (0-255=0-2550 RPM) | M3 Snnn     |
 | 21  | SPINDLE_OFF    | No        | No      | Ignored                  | M5                |
 | 30  | DWELL          | No        | No      | Time in 100ms (0-25.5s)  | G4 P              |
+| 40  | CYLINDER_GOTO  | No        | No      | Sensor position (1-5)    | —                 |
 | 99  | PROGRAM_END    | No        | No      | Ignored                  | M30               |
+
+---
+
+## Tool Change: External Code Mapping
+
+The recipe does **not** reference physical slot numbers directly. Instead, the `Param` field carries an **external tool code** (the same code used in the CAM program, e.g. T101, T406). The PLC resolves this to a physical turret slot at runtime via a mapping table configured on the HMI.
+
+**Flow:**
+1. Operator enters external codes for each physical slot on the HMI Tool Setup screen (`DB_HMI.ToolSlotCode[1..4]`) and presses Apply.
+2. Apply copies codes into `DB_ToolConfig.ToolCode_List[1..4]`.
+3. When the PLC encounters `CMD=10`, it searches `ToolCode_List` for the Param value.
+   - **Found** → turret rotates to that slot.
+   - **Not found** → recipe halts with error 0x0308. `DB_HMI.ErrorText` and `DB_HMI.ErrorDetail` instruct the operator to open Tool Setup and apply the missing code.
+
+**Encoding limit:** Param is a single Byte (0–255). External tool codes used in the CAM must fit within this range.
 
 ---
 
@@ -51,6 +67,11 @@ Since Param is 1 byte (0-255), spindle speed is encoded as: `Param = RPM / 10`
 | 150   | 1500 RPM   |
 | 200   | 2000 RPM   |
 | 255   | 2550 RPM   |
+
+**In-place speed change:** a second `SPINDLE_ON` (CMD=20) with a different Param while the
+spindle is already running ramps the spindle to the new speed on the fly — no `SPINDLE_OFF`
+and no tool change is required between them. The PLC regenerates the drive command edge
+internally without dropping the VFD run signal.
 
 ---
 
@@ -75,15 +96,15 @@ NON_RETAIN
     END_VAR
 BEGIN
     // Header
-    Header.Name := '[Program Name]';
+    Header.sName := '[Program Name]';
     Header.LineCount := [N];
     Header.Valid := TRUE;
     
     // Recipe Lines
     Lines[0].X := 0.000; Lines[0].Z := 0.000; Lines[0].F := 0; Lines[0].CMD := 20; Lines[0].Param := 100; // Spindle 1000 RPM
-    Lines[1].X := 0.000; Lines[1].Z := -150.000; Lines[1].F := 0; Lines[1].CMD := 0; Lines[1].Param := 0; // G0 Rapid
-    Lines[2].X := 155.944; Lines[2].Z := -55.823; Lines[2].F := 0; Lines[2].CMD := 0; Lines[2].Param := 0; // G0 Rapid
-    Lines[3].X := 155.750; Lines[3].Z := -54.814; Lines[3].F := 300; Lines[3].CMD := 1; Lines[3].Param := 0; // G1 Linear
+    Lines[1].X := 0.000; Lines[1].Z := 150.000; Lines[1].F := 0; Lines[1].CMD := 0; Lines[1].Param := 0; // G0 Rapid
+    Lines[2].X := 155.944; Lines[2].Z := 55.823; Lines[2].F := 0; Lines[2].CMD := 0; Lines[2].Param := 0; // G0 Rapid
+    Lines[3].X := 155.750; Lines[3].Z := 54.814; Lines[3].F := 300; Lines[3].CMD := 1; Lines[3].Param := 0; // G1 Linear
     // ... more lines ...
     Lines[N-2].X := 0.000; Lines[N-2].Z := 0.000; Lines[N-2].F := 0; Lines[N-2].CMD := 21; Lines[N-2].Param := 0; // Spindle Off
     Lines[N-1].X := 0.000; Lines[N-1].Z := 0.000; Lines[N-1].F := 0; Lines[N-1].CMD := 99; Lines[N-1].Param := 0; // End
@@ -129,7 +150,7 @@ END_TYPE
 TYPE "RecipeHeader"
 VERSION : 0.1
     STRUCT
-        Name : String[20];
+        sName : String[20];
         LineCount : Int;
         Valid : Bool;
         PreScanned : Bool;
@@ -151,7 +172,7 @@ END_TYPE
 - **Max feedrate:** 32767 mm/min (Int limit)
 - **Tool numbers:** 1-4
 - **X range:** 0 to 300 mm (soft limit configurable)
-- **Z range:** -200 to 200 mm (soft limit configurable)
+- **Z range:** 0 to 200 mm (positive direction only, soft limit configurable)
 
 ---
 
