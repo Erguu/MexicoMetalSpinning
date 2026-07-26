@@ -56,7 +56,7 @@ Priority: **HIGH** — contains the hard reset block, all actuator command write
       - bMandrelRetractPulse = TRUE before leaving
 - [ ] All TON timers: confirm each has an `IN := FALSE` reset path when the state that drives it exits.
       Timers to check: tonLockWait, tonLockPreDelay, tonMandrelWait, tonDriveReady,
-      tonHomingTimeout, tonElapsed, tonSpindleDecel.
+      tonHomingTimeout, tonElapsed, tonSpindleDecel, tonResumeSpeedup.
 - [ ] HMI fields: HasWarning / WarningText cleared on STATE_SHEET_WAIT phase 1 exit and on HARD RESET.
 - [ ] Cmd_Reset edge: verify that `#fbInputs.Cmd_Reset` triggers bDoHardReset and that this
       path reaches STATE_STOPPED cleanly regardless of current state.
@@ -75,6 +75,19 @@ Priority: **HIGH** — contains the hard reset block, all actuator command write
 - [x] All four MC_Reset axes called on `ackEdge OR Cmd_Reset`. Clean.
 
 **Result: PASS** (3 gaps fixed, 1 acceptable minor note logged above)
+
+**Findings — 2026-07-09 (PAUSE spindle-stop + resume spin-up wait):**
+
+New FB_Process VARs `bResumeSpeedup : Bool` and `tonResumeSpeedup : TON` added for the STATE_PAUSED spindle stop + Continue spin-up wait (`DB_MachineConfig.SpindleResumeSpeedupTime`, default `T#5S`).
+
+- [x] `bDoHardReset` block: `#bResumeSpeedup := FALSE` added. Clean.
+- [x] `STATE_STOPPED (0)`: `#bResumeSpeedup := FALSE` added alongside the spindle flags (runs every scan while idle). Clean.
+- [x] `STATE_ERROR (999)`: `#bResumeSpeedup := FALSE` added (runs every scan) — covers a fault during the spin-up window. Clean.
+- [x] `tonResumeSpeedup`: driven by `IN := #bResumeSpeedup`, which is cleared on hard-reset / STOPPED / ERROR and on the normal PAUSED→RUNNING exit → `ET` resets, no stale fire. Timer is called unconditionally every scan. Clean.
+- [x] Recipe reset (`05_RecipeHandler.scl`): not applicable — `bResumeSpeedup` is FB_Process-only and is not written by any CMD handler.
+- [x] Spindle `RunCmd` gate: the pause-stop term (`State=PAUSED AND NOT bResumeSpeedup`) drops `RunForward` only (no MC_Halt). `RunCmd` already evaluates FALSE in STOPPED/ERROR, so no latched output persists.
+
+**Result: PASS** (no gaps; new flag/timer covered on all four reset checkpoints)
 
 ---
 
@@ -144,6 +157,7 @@ Priority: **MEDIUM** — outputs must be assigned every scan from FB state; no l
 - [x] BackSupport SolAtmosphere: `SolAtmo_Cmd` (L257). Same clear paths as SolB_Cmd41. Clean.
 - [x] MandrelLock Sol_A: L290 — driven from `FB_CylinderControl.Sol_A` only. EStop State -1 path audited in Session 4.
 - [x] ToolHeadLock Sol_A: L277 — driven from `FB_CylinderControl.Sol_A` only. Same EStop path — Session 4.
+- [x] `DB_HMI.Bypass_ToolHeadLock` (2026-07-09): variant flag that skips the state-17 sensor wait. Adds no actuator/timer/HMI-warning; `Cmd_Extend` outside-CASE logic is unchanged (still FALSE outside RUNNING/PAUSED/LOCK_EXTEND_WAIT), so STOPPED/ERROR/reset paths still de-energise the solenoid. Persistent config (not cleared on operator Reset — same as other bypasses); reset to FALSE only by `FC_LoadConfig` on restart. No reset-path action required.
 - [x] Contactors / Enable: `FC_ContactorControl` L151 `modePermit := MachineState > 0` — all four contactors and both enable outputs forced FALSE in STATE_STOPPED (0). STATE_ERROR (999) intentionally allowed so operator can jog away from limit zone without a full restart. By design. Clean.
 - [x] Spindle output: No direct assignment in OB1 — managed by TIA Portal technology object (`TO_AxisSpindle`). FB_SpindleControl calls MC_MoveVelocity/MC_Halt internally. Halt behaviour verified in Session 5.
 

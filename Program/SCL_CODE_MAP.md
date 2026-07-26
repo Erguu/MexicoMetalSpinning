@@ -47,7 +47,7 @@ All User Defined Type definitions in the project are here. This is the first fil
 | Type | Size | Description |
 |------|------|-------------|
 | `RecipeLine` | 12 bytes | A single motion command line |
-| `RecipeHeader` | 48 bytes | Program metadata (name, line count, bounding box) |
+| `RecipeHeader` | ~67 bytes | Program metadata (name, line count, bounding box) + CAM-authored tool table (ProvidesToolConfig, ToolCount, AutoCalcAngles, ToolCode_List[1..4], ToolAngle_List[1..4]) |
 | `ProcessMode` | - | State machine constants (IDLE=0, RUNNING=20, ERROR=999, etc.) |
 | `AlarmEntry` | - | Alarm history record (Timestamp, ErrorCode, Program/Line) |
 
@@ -215,7 +215,7 @@ STATE_STEP_WAIT(65)    → SingleStepMode: wait for StepNext
 STATE_CYL_GOTO(70)     → CMD=40: set BackSupport TargetPos + Cmd_Extend=TRUE
 STATE_CYL_GOTO_WAIT(71)→ CMD=40: wait for BackSupport AtSetpoint or error (16#0309); Pause holds position (blocked-centre valve), resumes via STATE_CYL_GOTO
 STATE_DONE(99)         → Program finished
-STATE_PAUSED(800)      → Halt axes + capture interruption point, then arm retract (spindle keeps running)
+STATE_PAUSED(800)      → Halt axes + capture interruption point, then arm retract (spindle is stopped by FB_Process while paused; spun back up on Continue before 803 return)
 STATE_PAUSE_RETRACT(801)→ Move to retracted (tool-clear) position = interruption + DB_MachineConfig.PauseRetract_X/Z (clamped to soft limits)
 STATE_PAUSE_HOLD(802)  → Held at retracted position, wait for Continue (Pause released)
 STATE_PAUSE_RETURN(803)→ Move back to exact interruption point, then resume pauseReturnState (return-before-resume)
@@ -273,19 +273,22 @@ Bypasses (DB_HMI.Bypass_*) bypass each condition individually.
 STATE 0    STOPPED              → Initial, idle
 STATE 5    MANUAL               → FB_ManualMode active
 STATE 10   STARTING             → Drive enable + pre-checks
-STATE 12   PRE_SCAN             → FB_RecipePreScan running
+STATE 12   PRE_SCAN             → Applies the active recipe's CAM-authored Header tool table
+                                   (ToolCode_List/ToolCount/angles) into DB_ToolConfig+DB_MachineConfig,
+                                   rejects with 0x0311 if Header.ProvidesToolConfig=FALSE, then FB_RecipePreScan runs
 STATE 13   PRE_HOME_CLR         → Clearance move out of PNP zone before homing
 STATE 14   SHEET_WAIT           → Sheet insertion: Phase 1 shows HMI warning, waits Cmd_Start (both buttons);
                                    Phase 2 extends MandrelLock T#5S open-loop, then → LOCK_EXTEND_WAIT
 STATE 15   HOMING               → Reference seek (X → Z → Tool)
 STATE 16   POST_HOME_CLR        → Clearance move away from PNP zone after homing → exits to SHEET_WAIT
 STATE 17   LOCK_EXTEND_WAIT     → ToolHeadLock engaging (AtSetpoint required) before → RUNNING
+                                   DB_HMI.Bypass_ToolHeadLock=TRUE skips the sensor wait → RUNNING immediately (no 0x0012)
 STATE 18   STOPPING             → Halt recipe; X and Z return to zero simultaneously (MC_MoveAbsolute, parallel with spindle decel); MandrelLock releases when both done → LOCK_RETRACT_WAIT → STOPPED
 STATE 19   STOP_GOHOME          → Home X → Z → Tool — legacy, no longer reached on normal stop path
 STATE 20   RUNNING              → FB_RecipeHandler running
 STATE 21   STOP_GOTOZERO        → Move axes to zero post-stop
 STATE 22   PNP_HALT             → PNP zone: halt active, reverse jog allowed
-STATE 25   PAUSED               → Paused (feed hold)
+STATE 25   PAUSED               → Paused (feed hold): axes retract clear of tool + spindle stops (RunCmd gated off, RunForward drops, no MC_Halt). On Continue: spindle spins up for SpindleResumeSpeedupTime (default T#5S) with axes held at retract point, then bPauseActive drops → axes return (RecipeHandler 803) → RUNNING
 STATE 29   LOCK_RETRACT_WAIT    → ToolHeadLock releasing (T#3S spring-return wait); exits to STOPPED (normal stop) or TOOL_CHANGE
 STATE 30   TOOL_CHANGE          → FB_ToolChanger running
 STATE 35   TOOL_WAIT            → Waiting for FB_ToolChanger
@@ -536,6 +539,8 @@ forcing the FB into State 2 (Sol_A=FALSE → spring retracts). The pulse self-cl
 | Tool change sequence | `04_ToolChanger.scl` | FB_ToolChanger state machine |
 | Skip redundant tool change | `06_MainProcess.scl` | FB_Process STATE_RUNNING tool change dispatch (`ToolReqNumber = CurrentTool` → clear request, no ceremony) |
 | Tool angle calculation | `08_Main_OB1.scl` | FC_ToolAngleCalc |
+| Recipe-carried tool table (mapping/count/angles) | `06_MainProcess.scl` | FB_Process STATE_PRE_SCAN(12) header apply + 0x0311 reject |
+| Tool table format for CAM post-processor | `CAM_TOOL_TABLE_HANDOVER.md` | RecipeHeader tool fields |
 | Safety priority order | `06_MainProcess.scl` | FB_SafetyMonitor (lines ~61–130) |
 | Main state machine transitions | `06_MainProcess.scl` | FB_Process |
 | Manual mode jog / homing | `06_MainProcess.scl` | FB_ManualMode |
@@ -566,7 +571,7 @@ higher**; same or lower tier goes to history only. All errors always go to histo
 |------|---------|-------------|
 | 4 | Safety interlock | 0x04xx (E-Stop, door, air, drives), 0x0111–0x011F (HW limit) |
 | 3 | Motion / TO fault | 0x0001–0x002F (axis/homing/power/TO poller), 0x0101–0x0104 (soft limit), 0x0121–0x0124 (PNP), 0x0203–0x0206 (tool motion), 0x05xx (spindle) |
-| 2 | Project error | 0x03xx (recipe), 0x0201–0x0202 (tool config) |
+| 2 | Project error | 0x0300–0x0311 (recipe, incl. 0x0311 missing tool table), 0x0201–0x0202 (tool config) |
 | 1 | Warning / info | 0x0010 (user STOP), unknown codes |
 
 ### Single-Writer Rule for DB_HMI.ErrorText (2026-07-02)
@@ -607,6 +612,7 @@ text; the queue path (`FC_ReportError`) shows its `Details` string as the EN tex
 | 0x030A | RecipeHandler | Spindle at-speed timeout (10s) |
 | 0x030B | RecipeHandler | Spindle stop timeout (15s) |
 | 0x0310 | FB_Process | Recipe not loaded (TotalLines invalid) |
+| 0x0311 | FB_Process | Recipe has no tool table (Header.ProvidesToolConfig=FALSE) — regenerate in CAM |
 | 0x0401 | SafetyMonitor | E-Stop active |
 | 0x0402 | SafetyMonitor | Safety door open |
 | 0x0403 | SafetyMonitor | Drives not ready |

@@ -122,6 +122,7 @@ NON_RETAIN
         Bypass_Spindle      : Bool := FALSE;  // Skips spindle commands in recipe (FB_RecipeHandler) -- dry run / commissioning
         Bypass_ToolChanger  : Bool := FALSE;  // ⚠️ UNUSED -- not in safety monitor
         Bypass_MandrelLock  : Bool := FALSE;  // TRUE = machine variant without MandrelLock cylinder (manual clamping)
+        Bypass_ToolHeadLock : Bool := FALSE;  // TRUE = skip ToolHeadLock sensor wait in STATE_LOCK_EXTEND_WAIT (no cylinder/sensor); cylinder still commanded if present
         
         // ===========================================================
         // BOUNDING BOX (Output - from pre-scan)
@@ -229,6 +230,12 @@ NON_RETAIN
         // Spindle deceleration wait: time between RunCmd=FALSE and next RunCmd=TRUE.
         // Set to match VFD deceleration ramp time. HMI-editable.
         SpindleDecelTime : Time := T#2S;
+        // Pause resume spin-up wait: on Continue from PAUSED, the spindle is
+        // restarted and this time is allowed for it to ramp back up to speed
+        // BEFORE the axes return to the interruption point and machining resumes.
+        // The axes stay clear of the workpiece (held at the pause-retract position)
+        // for this whole window. Set to the measured VFD ramp-up time + margin.
+        SpindleResumeSpeedupTime : Time := T#5S;
         // In-place spindle speed change (FB_SpindleControl): how long MC_MoveVelocity
         // Execute is held LOW to regenerate the trigger edge for the new velocity.
         // RunForward (VFD run) stays TRUE throughout -- only the PTO command edge is
@@ -308,10 +315,11 @@ NON_RETAIN
     VAR
         // Slot angles -- automatically calculated by FC_ToolAngleCalc (AutoCalcAngles=TRUE)
         // or manually entered from HMI Tool page (AutoCalcAngles=FALSE).
+        // Machine has 3 physical slots: 0 / 120 / 240 deg. Slot 4 is unused (ToolCount=3).
         Tool1_Position : Real := 0.0;     // Slot 1 angle (degrees)
-        Tool2_Position : Real := 120.0;    // Slot 2 angle (degrees)
+        Tool2_Position : Real := 120.0;   // Slot 2 angle (degrees)
         Tool3_Position : Real := 240.0;   // Slot 3 angle (degrees)
-        Tool4_Position : Real := 360.0;   // Slot 4 angle (degrees)
+        Tool4_Position : Real := 0.0;     // Slot 4 unused (ToolCount=3)
 
         // Slot code mapping -- can be entered from HMI Tool page.
         // Operator enters which head code is in which slot.
@@ -320,7 +328,7 @@ NON_RETAIN
         CurrentTool : Int := 1;           // Active slot number (1-4)
 
         // HMI Tool page: automatic angle calculation
-        // TRUE = calculate evenly spaced based on ToolCount (e.g. 4 slots → 0/90/180/270)
+        // TRUE = calculate evenly spaced based on ToolCount (3 slots → 0/120/240)
         // FALSE = Tool1..4_Position open for manual entry
         AutoCalcAngles : Bool := TRUE;
 
@@ -515,7 +523,7 @@ NON_RETAIN
         // Tool step buttons
         Btn_ToolStepCW : Bool;          // Tool step clockwise
         Btn_ToolStepCCW : Bool;         // Tool step counter-clockwise
-        ToolStepAngle : Real := 90.0;   // Step angle (degrees)
+        ToolStepAngle : Real := 120.0;  // Manual turret step (deg) -- 3 slots at 120 deg spacing
         ToolStepSpeed : Real := 30.0;   // Tool step velocity (deg/s)
         ToolPosition : Real;            // Current tool position (degrees)
         

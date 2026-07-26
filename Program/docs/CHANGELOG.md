@@ -2,6 +2,68 @@
 
 ---
 
+## 2026-07-21
+
+### Recipe-carried tool table (CAM is now the source of truth for turret setup)
+
+**Files:** `01_DataTypes.scl`, `UDT_RecipeHeader.scl`, `06_MainProcess.scl`,
+`gcodes/DB_RecipeProgram1.scl`, spec/guide docs, new `CAM_TOOL_TABLE_HANDOVER.md`
+
+**Why:** operators re-download recipes frequently; the old tool mapping lived in the
+`NON_RETAIN` `DB_ToolConfig` (HMI-entered) and did not travel with the program, so it
+could be lost on a full download. The machine owner chose **"recipe always wins"** with
+**rejection** of recipes that carry no tool table.
+
+**What changed:**
+- `RecipeHeader` (VERSION 0.2) extended with a tool table: `ProvidesToolConfig` (Bool),
+  `ToolCount` (Int), `AutoCalcAngles` (Bool), `ToolCode_List : Array[1..4] of Int`,
+  `ToolAngle_List : Array[1..4] of Real`. Arrays are **1-based** (slot numbering).
+- `FB_Process` STATE_PRE_SCAN(12): reads the active recipe's header tool table and, **before**
+  the pre-scan validates tool codes, applies it into `DB_MachineConfig.ToolCount` /
+  `DB_ToolConfig` (ToolCode_List, AutoCalcAngles, and Tool1..4_Position when AutoCalc=FALSE).
+  `ToolCount` is **clamped to 1..4** on apply (defensive: a value >4 would index the
+  `[1..4]` lookup arrays out of bounds in `05_RecipeHandler` → CPU STOP — a latent bug when
+  `AutoCalcAngles=FALSE` bypasses the `FC_ToolAngleCalc` clamp).
+- If `Header.ProvidesToolConfig=FALSE` → recipe **rejected** with new error **`16#0311`**
+  (severity tier 2 "Recipe"; EN/ES text added; severity range widened to `<= 16#0311`).
+- HMI Apply path **disabled**: `DB_HMI.ToolSlotCode` is now a **read-only mirror** of
+  `DB_ToolConfig.ToolCode_List` (written every scan for display).
+- `gcodes/DB_RecipeProgram1.scl` hand-filled with a tool table (slots 101/102/103,
+  ToolCount=3) so it is bench-testable immediately. Program 1 uses T103.
+
+**Reset-path:** the applied values are re-loaded fresh on every Start and hold no
+timers/actuators/latches, so no new hard-reset / STOPPED / ERROR clears are required.
+
+**Follow-up (CAM side, not PLC):** the SpinningCam post-processor must emit the header
+tool table for every program, and all existing recipes (Programs 2–5) must be
+regenerated or they will fault with `16#0311`. Full spec: `CAM_TOOL_TABLE_HANDOVER.md`.
+
+---
+
+## 2026-07-09
+
+### Pause resume: interrupted cut no longer skipped
+
+**File:** `05_RecipeHandler.scl` — FB_RecipeHandler, STATE_WAIT (30) pause branch
+
+**Problem:** Pausing *mid-motion* and then pressing Continue silently skipped the rest of the
+interrupted line and jumped to the next line. The pause-retract states (800/802) reuse
+`#targX`/`#targZ` for the retract and return geometry, overwriting this line's endpoint. The
+motion-pause resume went to `STATE_EXEC`, which computes the remaining move as
+`ABS(#targX - #currX)`. After the return move both equal `#resumeX`, so `deltaX = 0` → both axes
+skipped → `STATE_NEXT`. Intermittent by nature: only motion pauses were affected (dwell /
+spindle-wait / cylinder pauses resume via other states), and only visible when a large portion of
+the cut remained. Reported from the field as "after Continue the spindle spins up, the axis moves
+to the next line's position and stops there."
+
+**Fix:** Motion-pause resume now targets `STATE_READ` instead of `STATE_EXEC` (one-line change,
+`#pauseReturnState := STATE_READ`). STATE_READ re-reads the line endpoint from `#Lines[#lineIndex]`
+before EXEC recomputes the remaining move from `currX/currZ` (= the interruption point restored by
+state 803). No new VARs, no reset-path impact. Warm-restart-from-error already resumes via
+STATE_READ, so this reuses the proven path.
+
+---
+
 ## 2026-07-02
 
 > **TIA import note for this batch:** import order changed — `07_ReportError.scl` must now be

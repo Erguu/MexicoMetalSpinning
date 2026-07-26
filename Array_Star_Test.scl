@@ -1,0 +1,131 @@
+// ============================================================================
+// Array_Star_Test.scl  —  THROWAWAY TEST, not part of the machine program
+// ----------------------------------------------------------------------------
+// Purpose: prove whether the S7-1214C (this firmware + TIA V17) really supports
+//          variable-length ARRAY[*] as a block IN_OUT parameter — i.e. one FB
+//          accepting recipe arrays of DIFFERENT sizes.
+//
+// A bare "Array[*] of Int" declaration compiling is NOT proof. The real proof
+// is: one FB fed two arrays of DIFFERENT bounds, then COMPILE (rebuild all)
+// and DOWNLOAD to the actual CPU.
+//
+// HOW TO USE
+//   1. Import this file as an external SCL source into your TIA project
+//      (right-click "External source files" > Add new external file, then
+//       right-click the file > "Generate blocks from source").
+//   2. Add ONE line to a cyclic OB (e.g. temporarily in OB1):
+//            "DB_TestHarness"();
+//   3. Project > Compile > "Software (rebuild all)".
+//   4. Download to the S7-1214C.
+//   5. Monitor DB_TestHarness online.
+//
+// EXPECTED IF SUPPORTED (values are static, set in the DBs below):
+//        smallSum = 55   smallLo = 0   smallHi = 9
+//        bigSum   = 7     bigLo   = 0   bigHi   = 99
+//
+// FAIL SIGNS (=> Array[*] block params NOT usable on your CPU):
+//        - rebuild-all errors on FB_ArrTest / the calls, OR
+//        - offline compile is OK but DOWNLOAD is rejected as
+//          "not supported for this CPU".
+//
+// CLEANUP: delete these blocks and remove the OB1 call line after testing.
+// ============================================================================
+
+
+// ---------------------------------------------------------------------------
+// Core FB under test: takes a variable-length array and sums it.
+// ---------------------------------------------------------------------------
+FUNCTION_BLOCK "FB_ArrTest"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_IN_OUT
+        arr : Array[*] of Int;   // <-- the feature under test
+    END_VAR
+    VAR_OUTPUT
+        sum : Int;               // sum of all elements
+        lo  : DInt;              // reported lower bound
+        hi  : DInt;              // reported upper bound
+    END_VAR
+    VAR
+        i : DInt;
+    END_VAR
+BEGIN
+    #lo  := LOWER_BOUND(ARR := #arr, DIM := 1);
+    #hi  := UPPER_BOUND(ARR := #arr, DIM := 1);
+    #sum := 0;
+    FOR #i := #lo TO #hi DO
+        #sum := #sum + #arr[#i];
+    END_FOR;
+END_FUNCTION_BLOCK
+
+
+// ---------------------------------------------------------------------------
+// Data block #1 — SMALL array (10 elements, indices 0..9). Values 1..10 => 55.
+// ---------------------------------------------------------------------------
+DATA_BLOCK "DB_Small"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        a : Array[0..9] of Int;
+    END_VAR
+BEGIN
+    a[0] := 1;  a[1] := 2;  a[2] := 3;  a[3] := 4;  a[4] := 5;
+    a[5] := 6;  a[6] := 7;  a[7] := 8;  a[8] := 9;  a[9] := 10;
+END_DATA_BLOCK
+
+
+// ---------------------------------------------------------------------------
+// Data block #2 — BIG array (100 elements, indices 0..99). Only b[0]=7 => 7.
+// DIFFERENT SIZE than DB_Small on purpose — that is the whole test.
+// ---------------------------------------------------------------------------
+DATA_BLOCK "DB_Big"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        b : Array[0..99] of Int;
+    END_VAR
+BEGIN
+    b[0] := 7;
+END_DATA_BLOCK
+
+
+// ---------------------------------------------------------------------------
+// Harness FB — calls the SAME FB type twice, with two DIFFERENT-sized arrays.
+// Two multi-instances so both results are visible online simultaneously.
+// ---------------------------------------------------------------------------
+FUNCTION_BLOCK "FB_TestHarness"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_OUTPUT
+        smallSum : Int;
+        smallLo  : DInt;
+        smallHi  : DInt;
+        bigSum   : Int;
+        bigLo    : DInt;
+        bigHi    : DInt;
+    END_VAR
+    VAR
+        iSmall : "FB_ArrTest";
+        iBig   : "FB_ArrTest";
+    END_VAR
+BEGIN
+    #iSmall(arr := "DB_Small".a,
+            sum => #smallSum, lo => #smallLo, hi => #smallHi);
+
+    #iBig(arr := "DB_Big".b,
+          sum => #bigSum, lo => #bigLo, hi => #bigHi);
+END_FUNCTION_BLOCK
+
+
+// ---------------------------------------------------------------------------
+// Instance DB for the harness. Call "DB_TestHarness"(); from a cyclic OB.
+// ---------------------------------------------------------------------------
+DATA_BLOCK "DB_TestHarness"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    "FB_TestHarness"
+BEGIN
+END_DATA_BLOCK

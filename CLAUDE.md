@@ -36,7 +36,8 @@ Do not skip this step. Leaving these files out of sync causes future agents to m
 - **Coordinate system:** X=0, Z=0 = home. Positive direction = away from home.
 - **Spindle:** MC_MoveVelocity (velocity mode). Speed encoding: Param byte = RPM ÷ 10. Max 2400 RPM.
 - **Recipes:** 5 programs × 200 lines × 12/5 bytes = 12 KB. Loaded as SCL DATA_BLOCK.
-- **Tool codes:** Recipe carries external numeric code (0–255 byte). Operator maps to physical slot via HMI → Apply → DB_ToolConfig.ToolCode_List.
+- **Tool codes:** Recipe carries external numeric code (0–255 byte) in `CMD=10 Param`.
+- **Tool table (2026-07-21):** the code→slot mapping, `ToolCount`, and slot angles are **CAM-authored, carried in the recipe `Header`** (`ProvidesToolConfig`, `ToolCount`, `AutoCalcAngles`, `ToolCode_List[1..4]`, `ToolAngle_List[1..4]` — 1-based arrays). Applied by FB_Process in STATE_PRE_SCAN(12) into DB_ToolConfig/DB_MachineConfig **before** pre-scan, `ToolCount` clamped 1..4. **"Recipe always wins"**: HMI Apply is disabled, `DB_HMI.ToolSlotCode` is a read-only mirror. A recipe with `ProvidesToolConfig=FALSE` is rejected with **0x0311**. CAM post-processor spec: `CAM_TOOL_TABLE_HANDOVER.md`.
 - **Error priority (2026-07-02):** `DB_Error.Severity` tiers: 4=safety > 3=motion/TO > 2=project > 1=warning. FB_AlarmManager latch: a new error preempts the HMI display only if its tier is strictly higher; same/lower tier → history only. A TO fault poller in FB_Process (`<axis>.StatusBits.Error` → codes 0x0021–0x0024) guarantees TO errors reach the HMI.
 - **Single-writer rule (2026-07-02):** `DB_HMI.ErrorText/_ES` is written ONLY by the AlarmManager mirror, the ITEM-08 safety fallback, and the STATE_STOPPED clear (all in FB_Process). Error sites report a code (newErrorFlag or FC_ReportError) and write rich context to `ErrorDetail` only. Never add a direct ErrorText write.
 - **Soft limits (2026-07-02):** only enforced when the axis reports `StatusBits.HomingDone` — an un-homed axis never trips a soft limit (FB_LimitMonitor Homed_X/Z gating). In MANUAL, homed axes get directional jog gating + MoveAbsolute target rejection instead of faulting.
@@ -65,13 +66,13 @@ Do not skip this step. Leaving these files out of sync causes future agents to m
 | 14 | SHEET_WAIT | Sheet insertion: Ph1 SheetHolder extends + HMI prompt, waits both-button start; Ph2 MandrelLock extends T#5S; Ph3 SheetHolder retracts T#5S → LOCK_EXTEND_WAIT |
 | 15 | HOMING | Axis homing (X → Z → Tool) |
 | 16 | POST_HOME_CLR | Clearance move away from PNP zone after homing → exits to SHEET_WAIT |
-| 17 | LOCK_EXTEND_WAIT | ToolHeadLock engaging (T#2S wait) before → RUNNING |
+| 17 | LOCK_EXTEND_WAIT | ToolHeadLock engaging (T#2S wait) before → RUNNING. `DB_HMI.Bypass_ToolHeadLock`=TRUE skips the sensor wait → RUNNING immediately (no 16#0012) |
 | 18 | STOPPING | Halt recipe; X and Z return to zero simultaneously (MC_MoveAbsolute, parallel); MandrelLock releases after spindle timer AND both axes done → LOCK_RETRACT_WAIT → STOPPED |
 | 19 | STOP_GOHOME | Home X → Z → Tool — legacy, no longer reached on normal stop path |
 | 20 | RUNNING | Recipe executing |
 | 21 | STOP_GOTOZERO | Move to zero post-stop |
 | 22 | PNP_HALT | PNP zone — halt active, reverse jog only |
-| 25 | PAUSED | Feed hold |
+| 25 | PAUSED | Feed hold: axes retract clear of tool AND spindle stops. On Continue, spindle spins back up (DB_MachineConfig.SpindleResumeSpeedupTime, default T#5S) while axes hold at retract point, then axes return → RUNNING |
 | 29 | LOCK_RETRACT_WAIT | ToolHeadLock releasing (T#3S wait) before → TOOL_CHANGE or STOPPED |
 | 30 | TOOL_CHANGE | Tool changer active |
 | 35 | TOOL_WAIT | Waiting for tool changer |

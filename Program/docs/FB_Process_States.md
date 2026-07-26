@@ -1,7 +1,8 @@
 # FB_Process State Machine Reference
 
 **Source file:** `Program/06_MainProcess.scl`
-**Last updated:** 2026-07-02 — Soft limits now gated on `StatusBits.HomingDone` (un-homed axis never trips); MANUAL enforces soft limits via directional jog gating + MoveAbsolute target rejection (never faults); FB_AlarmManager first-error latch replaced by severity-priority latch (tier 4 safety > 3 motion/TO > 2 project > 1 warning); new TO fault poller raises 0x0021–0x0024 on `<axis>.StatusBits.Error`; single-writer cleanup: `DB_HMI.ErrorText` is written ONLY by the AlarmManager mirror, the ITEM-08 safety fallback, and the STATE_STOPPED clear — all state handlers/FBs report codes (direct or FC_ReportError) and write rich context to `ErrorDetail` only
+**Last updated:** 2026-07-09 — PAUSE now stops the spindle (RunCmd gated off on `State=PAUSED AND NOT bResumeSpeedup`; `RunForward` drops, no MC_Halt, PTO-safe). On Continue the spindle spins back up for `DB_MachineConfig.SpindleResumeSpeedupTime` (default `T#5S`) while the axes hold at the retract point, then axes return and machining resumes. New FB_Process vars `bResumeSpeedup`/`tonResumeSpeedup`, cleared on hard-reset/STOPPED/ERROR.
+**Prior update:** 2026-07-02 — Soft limits now gated on `StatusBits.HomingDone` (un-homed axis never trips); MANUAL enforces soft limits via directional jog gating + MoveAbsolute target rejection (never faults); FB_AlarmManager first-error latch replaced by severity-priority latch (tier 4 safety > 3 motion/TO > 2 project > 1 warning); new TO fault poller raises 0x0021–0x0024 on `<axis>.StatusBits.Error`; single-writer cleanup: `DB_HMI.ErrorText` is written ONLY by the AlarmManager mirror, the ITEM-08 safety fallback, and the STATE_STOPPED clear — all state handlers/FBs report codes (direct or FC_ReportError) and write rich context to `ErrorDetail` only
 
 > **MAINTENANCE RULE (for AI agents):**
 > Any time you add, remove, rename, or change the behavior/transitions of a state in
@@ -154,6 +155,7 @@ Cmd_Stop vetoes RunCmd directly — spindle decelerates immediately when Stop is
 | `tonHomingTimeout` | Hardcoded in FB_Process | T#120S | STATE_HOMING, STATE_STOP_GOHOME: combined timeout for all three axes |
 | `AlwaysHomeOnAutoStart` | `DB_MachineConfig` | FALSE | STATE_STARTING: forces homing even if axes are already homed |
 | `Bypass_ToolAxis` | `DB_MachineConfig` | FALSE | Skips tool axis homing and tool changes throughout |
+| `Bypass_ToolHeadLock` | `DB_HMI` | FALSE | STATE_LOCK_EXTEND_WAIT (17): skips ToolHeadLock sensor wait — advances straight to RUNNING, never raises `0x0012` |
 
 > **Note on SpindleDecelTime vs tonSpindleStopWait:**
 > `SpindleDecelTime` (configurable, default T#2S) guards speed *changes* mid-run — it delays the next SpindleOn command after a SpindleOff so the VFD ramp finishes.
@@ -371,10 +373,13 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 
 **Cylinder timeout:** `DB_Cylinder_ToolHeadLock.Timeout_Extend = T#6S` (set in DB). If sensor not confirmed within 6 s, `FB_CylinderControl` sets `Error = TRUE`.
 
+**Bypass:** `DB_HMI.Bypass_ToolHeadLock = TRUE` (machine variant with no ToolHeadLock cylinder/sensor) advances straight to RUNNING with **no** sensor wait and no timer, so `0x0012` can never be raised. The cylinder is still commanded to extend by the outside-CASE assignment (harmless if physically absent). Reset to FALSE on every restart by `FC_LoadConfig`.
+
 **Transitions:**
 
 | Condition | Next State |
 |-----------|-----------|
+| `DB_HMI.Bypass_ToolHeadLock = TRUE` (bypass — no sensor wait) | **20** RUNNING |
 | `DB_Cylinder_ToolHeadLock.AtSetpoint = TRUE` (sensor confirmed) | **20** RUNNING |
 | `DB_Cylinder_ToolHeadLock.Error = TRUE` (cylinder timeout — no sensor confirm in 6s) | **999** ERROR (`0x0012`) |
 
@@ -415,21 +420,28 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 
 ## STATE 25 — PAUSED
 
-**Purpose:** Feed hold. Axes halt, then retract clear of the tool. ToolHeadLock stays engaged. Spindle keeps running. Cycle timer frozen.
+**Purpose:** Feed hold. Axes halt, then retract clear of the tool. ToolHeadLock stays engaged. **Spindle is stopped** while paused. On Continue the spindle spins back up (timed wait) before the axes return. Cycle timer frozen.
 
 **Runs every scan while in this state:**
 - `timerRunning = FALSE` (cycle timer paused)
-- `FB_RecipeHandler` runs its own pause sub-sequence (STATE_PAUSED/800 → 801 retract → 802 hold → 803 return): it halts both axes, captures the exact interruption point, then moves both axes by `DB_MachineConfig.PauseRetract_X/Z` (clamped to soft limits) to pull the tool clear. On Continue it returns to the interruption point *before* resuming the original toolpath (return-before-resume). Spindle is untouched, so it keeps running the whole time.
+- `FB_RecipeHandler` runs its own pause sub-sequence (STATE_PAUSED/800 → 801 retract → 802 hold → 803 return): it halts both axes, captures the exact interruption point, then moves both axes by `DB_MachineConfig.PauseRetract_X/Z` (clamped to soft limits) to pull the tool clear. On Continue it returns to the interruption point *before* resuming the original toolpath (return-before-resume).
+- **Spindle stop:** the outside-CASE `RunCmd` for `FB_SpindleControl` is gated off whenever `State = PAUSED AND NOT bResumeSpeedup`. This drops `RunForward` only — no `MC_Halt`, PTO keeps pulsing (VFD-safe, same mechanism as a normal stop).
 - ToolHeadLock `Cmd_Extend = TRUE` (still driven by outside-CASE assignment)
 - `bStartSeq = FALSE` while checking but recipe Start not driven in PAUSED
 
 > Retract offsets and velocity are HMI-editable (`DB_MachineConfig.PauseRetract_X/Z/_Vel`). Offset 0 on an axis = that axis does not move on pause (legacy behavior). See `docs/Pause_Retract_Plan.md`.
 
+**Resume (Continue) sequence — spindle spins up before axes return:**
+1. `continueEdge` sets `bResumeSpeedup = TRUE`. `bPauseActive` stays TRUE, so `FB_RecipeHandler` holds at the retract point (state 802) — axes remain clear of the workpiece.
+2. `bResumeSpeedup = TRUE` re-enables the spindle `RunCmd` gate → spindle restarts and ramps up. `tonResumeSpeedup` counts `DB_MachineConfig.SpindleResumeSpeedupTime` (default `T#5S`, HMI-editable).
+3. When `tonResumeSpeedup.Q`: clear `bResumeSpeedup`, clear `bPauseActive`, go to **20** RUNNING. `FB_RecipeHandler` (Pause released) now runs 802 → 803 return-to-point → resume machining.
+
 **Transitions:**
 
 | Condition | Next State |
 |-----------|-----------|
-| `Btn_Continue` rising edge (`continueEdge`) | `bPauseActive = FALSE` → **20** RUNNING |
+| `Btn_Continue` rising edge (`continueEdge`) | Start spindle spin-up wait (`bResumeSpeedup = TRUE`); stay in **25** |
+| `bResumeSpeedup AND tonResumeSpeedup.Q` (spin-up elapsed) | `bResumeSpeedup = FALSE`, `bPauseActive = FALSE` → **20** RUNNING |
 
 > Cmd_Stop is accepted while PAUSED and triggers STOPPING normally.
 

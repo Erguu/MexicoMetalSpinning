@@ -1,5 +1,5 @@
 TYPE "RecipeHeader"
-VERSION : 0.1
+VERSION : 0.2
     STRUCT
         sName : String[20];     // Program name (max 20 chars)
         LineCount : Int;        // Total lines in program (0-999)
@@ -9,5 +9,12 @@ VERSION : 0.1
         MaxX : Real;            // Bounding box Max X
         MinZ : Real;            // Bounding box Min Z
         MaxZ : Real;            // Bounding box Max Z
+        // Tool table (CAM-authored, applied on recipe load). Kept in sync with
+        // 01_DataTypes.scl -- do NOT import both into TIA Portal, use 01_DataTypes.scl only.
+        ProvidesToolConfig : Bool;              // TRUE = header carries a valid tool table
+        ToolCount : Int;                        // Physical slots in use (clamped 1..4 on apply)
+        AutoCalcAngles : Bool;                  // TRUE = angles auto-spaced from ToolCount; FALSE = use ToolAngle_List
+        ToolCode_List : Array[1..4] of Int;     // External tool code installed in each slot (0 = slot unused)
+        ToolAngle_List : Array[1..4] of Real;   // Turret angle per slot (deg); used only when AutoCalcAngles = FALSE
     END_STRUCT;
 END_TYPE

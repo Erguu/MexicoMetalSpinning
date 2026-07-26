@@ -355,23 +355,26 @@ BEGIN
     // =========================================================================
     // SECTION 9 -- SAFETY BYPASSES
     // ─────────────────────────────────────────────────────────────────────────
-    //  ⚠️⚠️ WARNING: These bypasses are for commissioning and testing only!
-    //  Verify that ALL are FALSE before production.
-    //
-    //  PLC resets these to FALSE on every restart (safe default).
+    //  PLC resets ALL of the flags below to FALSE on every restart (safe default).
     //  Show a warning on HMI when any bypass is active (AnyBypassActive tag recommended).
     //
-    //  Bypass_EStop       : Ignore physical E-Stop circuit
-    //  Bypass_Door        : Ignore safety door sensor
-    //  Bypass_AirPressure : Ignore air pressure sensor
-    //  Bypass_Drives      : Ignore drive ready signal
+    //  There are two kinds of bypass here -- do not confuse them:
     //
-    //  Bypass_ToolAxis    : This bypass is DIFFERENT -- set TRUE if the tool axis
-    //    (turret) is NOT physically connected to this machine.
-    //    This is a hardware presence flag, not a safety bypass.
+    //  (A) SAFETY bypasses -- commissioning/testing ONLY. Verify FALSE before
+    //      production. Each disables a safety-monitor interlock:
+    //        Bypass_EStop       : Ignore physical E-Stop circuit
+    //        Bypass_Door        : Ignore safety door sensor
+    //        Bypass_AirPressure : Ignore air pressure sensor
+    //        Bypass_Drives      : Ignore drive ready signal
     //
-    //  ⚠️ NOTE: DB_HMI.Bypass_Spindle and DB_HMI.Bypass_ToolChanger are defined
-    //    but not used in the safety monitor. Do not connect them to HMI.
+    //  (B) VARIANT / FUNCTIONAL bypasses -- legitimate per-machine or operator
+    //      selections, safe to expose on the HMI. NOT safety interlocks:
+    //        Bypass_Spindle      (DB_HMI)          : Skip recipe spindle commands (dry run)
+    //        Bypass_ToolChanger  (DB_HMI)          : Reserved -- not wired to safety monitor
+    //        Bypass_ToolHeadLock (DB_HMI)          : Skip ToolHeadLock sensor wait in state 17
+    //                                                (variant with no lock cylinder/sensor)
+    //        Bypass_ToolAxis     (DB_MachineConfig): Tool axis/turret not physically fitted
+    //        Bypass_MandrelLock  (DB_MachineConfig): No MandrelLock cylinder (manual clamping)
     // =========================================================================
     "DB_HMI".Bypass_EStop        := FALSE;
     "DB_HMI".Bypass_Door         := TRUE; // NOT USED -- reserved for future use
@@ -379,6 +382,7 @@ BEGIN
     "DB_HMI".Bypass_Drives       := FALSE;
     "DB_HMI".Bypass_Spindle      := FALSE;
     "DB_HMI".Bypass_ToolChanger  := FALSE;
+    "DB_HMI".Bypass_ToolHeadLock := FALSE;  // TRUE = skip ToolHeadLock sensor wait (state 17); no 16#0012 timeout
     "DB_MachineConfig".Bypass_ToolAxis    := FALSE;  // Set TRUE if tool axis is not connected
     "DB_MachineConfig".Bypass_MandrelLock := FALSE;  // Set TRUE on variants without MandrelLock cylinder
 
@@ -410,6 +414,7 @@ BEGIN
     "DB_MachineConfig".Timeout_SpindleStop    := T#15S;
     "DB_MachineConfig".SpindleSpeedChange_ExecLowTime := T#0S;      // one scan; raise if VFD needs settle time
     "DB_MachineConfig".SpindleSpeedChange_DropRunForward := FALSE;  // TRUE only if VFD latches freq at RunForward edge
+    "DB_MachineConfig".SpindleResumeSpeedupTime := T#5S;           // spin-up wait on Continue from PAUSED before axes return
 
     "DB_MachineConfig".Timeout_ToolChange     := T#30S;
     "DB_MachineConfig".Timeout_EStopDiscrep   := T#500MS;

@@ -43,16 +43,44 @@ This document defines the binary recipe format for the metal spinning machine's 
 
 ## Tool Change: External Code Mapping
 
-The recipe does **not** reference physical slot numbers directly. Instead, the `Param` field carries an **external tool code** (the same code used in the CAM program, e.g. T101, T406). The PLC resolves this to a physical turret slot at runtime via a mapping table configured on the HMI.
+The recipe does **not** reference physical slot numbers directly. Instead, the `Param` field carries an **external tool code** (the same code used in the CAM program, e.g. T101, T406). The PLC resolves this to a physical turret slot via a mapping table **carried in the recipe header** (see "Recipe Header — Tool Table" below).
 
-**Flow:**
-1. Operator enters external codes for each physical slot on the HMI Tool Setup screen (`DB_HMI.ToolSlotCode[1..4]`) and presses Apply.
-2. Apply copies codes into `DB_ToolConfig.ToolCode_List[1..4]`.
+**Flow (recipe-carried tool table — current):**
+1. The CAM post-processor writes the slot→code mapping, slot count, and angle mode into the recipe `Header` (`ProvidesToolConfig`, `ToolCount`, `AutoCalcAngles`, `ToolCode_List`, `ToolAngle_List`).
+2. On **Start** (pre-scan), the PLC applies the header table into `DB_ToolConfig.ToolCode_List[1..4]` / `DB_MachineConfig.ToolCount` **before** validating tool codes. If `ProvidesToolConfig=FALSE`, the recipe is rejected with **0x0311**.
 3. When the PLC encounters `CMD=10`, it searches `ToolCode_List` for the Param value.
    - **Found** → turret rotates to that slot.
-   - **Not found** → recipe halts with error 0x0308. `DB_HMI.ErrorText` and `DB_HMI.ErrorDetail` instruct the operator to open Tool Setup and apply the missing code.
+   - **Not found** → recipe halts with error 0x0308 (runtime) / caught at pre-scan.
+
+> **"Recipe always wins":** the HMI Tool Setup mapping is now **disabled** —
+> `DB_HMI.ToolSlotCode` is a read-only mirror of the active recipe's table. To change the
+> mapping, regenerate the recipe in CAM.
 
 **Encoding limit:** Param is a single Byte (0–255). External tool codes used in the CAM must fit within this range.
+
+---
+
+## Recipe Header — Tool Table (CAM must emit)
+
+Every recipe carries its tool setup in the `Header`. See **`CAM_TOOL_TABLE_HANDOVER.md`**
+for the full post-processor spec, field semantics, validation rules, and a worked example.
+
+```scl
+Header.ProvidesToolConfig := TRUE;          // MUST be TRUE, else 0x0311
+Header.ToolCount := 3;                       // slots in use (1..4)
+Header.AutoCalcAngles := TRUE;               // TRUE = angles auto-spaced from ToolCount
+Header.ToolCode_List[1] := 101;              // code in slot 1 (1-based array; 0 = unused)
+Header.ToolCode_List[2] := 102;
+Header.ToolCode_List[3] := 103;
+Header.ToolCode_List[4] := 0;
+Header.ToolAngle_List[1] := 0.0;             // used only when AutoCalcAngles = FALSE
+Header.ToolAngle_List[2] := 120.0;
+Header.ToolAngle_List[3] := 240.0;
+Header.ToolAngle_List[4] := 0.0;
+```
+
+Rules: `ProvidesToolConfig` always TRUE; every `CMD=10 Param` must appear in
+`ToolCode_List[1..ToolCount]`; tool arrays are **1-based**; codes are bytes (0–255).
 
 ---
 
@@ -148,7 +176,7 @@ VERSION : 0.1
 END_TYPE
 
 TYPE "RecipeHeader"
-VERSION : 0.1
+VERSION : 0.2
     STRUCT
         sName : String[20];
         LineCount : Int;
@@ -158,6 +186,12 @@ VERSION : 0.1
         MaxX : Real;
         MinZ : Real;
         MaxZ : Real;
+        // Tool table (CAM-authored) -- see CAM_TOOL_TABLE_HANDOVER.md
+        ProvidesToolConfig : Bool;
+        ToolCount : Int;
+        AutoCalcAngles : Bool;
+        ToolCode_List : Array[1..4] of Int;
+        ToolAngle_List : Array[1..4] of Real;
     END_STRUCT;
 END_TYPE
 ```

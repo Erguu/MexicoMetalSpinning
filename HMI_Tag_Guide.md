@@ -346,9 +346,9 @@ On **Pause**, X and Z jog by these signed offsets to pull the tool clear (spindl
 | **Tool Change X** | `DB_MachineConfig.ToolChangePos_X` | Real | 10.0 | Safe X for manual tool swap |
 | **Tool Change Z** | `DB_MachineConfig.ToolChangePos_Z` | Real | -10.0 | Safe Z for manual tool swap (clearance zone) |
 | **Tool 1 Position** | `DB_ToolConfig.Tool1_Position` | Real | 0.0 | Servo angle |
-| **Tool 2 Position** | `DB_ToolConfig.Tool2_Position` | Real | 90.0 | Servo angle |
-| **Tool 3 Position** | `DB_ToolConfig.Tool3_Position` | Real | 180.0 | Servo angle |
-| **Tool 4 Position** | `DB_ToolConfig.Tool4_Position` | Real | 270.0 | Servo angle |
+| **Tool 2 Position** | `DB_ToolConfig.Tool2_Position` | Real | 120.0 | Servo angle |
+| **Tool 3 Position** | `DB_ToolConfig.Tool3_Position` | Real | 240.0 | Servo angle |
+| **Tool 4 Position** | `DB_ToolConfig.Tool4_Position` | Real | 0.0 | Slot 4 unused (ToolCount=3) |
 
 ---
 
@@ -378,6 +378,7 @@ Display this legend on an error screen:
 | 0x0305 | PreScan: Path Exceeds Limits |
 | 0x0307 | Recipe: Motion Timeout |
 | 0x0308 | Recipe: Invalid Tool Number |
+| 0x0311 | Recipe: No Tool Table (regenerate in CAM) |
 | 0x0401 | EMERGENCY STOP |
 | 0x0402 | Safety Door Open |
 | 0x0403 | Drives Not Ready |

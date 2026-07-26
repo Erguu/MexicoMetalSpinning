@@ -363,6 +363,8 @@ BEGIN
                          #ActiveErrorText_ES := 'Husillo: tiempo de paro excedido (15s)';
                 16#0310: #ActiveErrorText := 'Recipe not loaded - check TotalLines';
                          #ActiveErrorText_ES := 'Receta no cargada - revisar TotalLines';
+                16#0311: #ActiveErrorText := 'Recipe has no tool table - regenerate in CAM';
+                         #ActiveErrorText_ES := 'Receta sin tabla de herramientas - regenerar en CAM';
                 // Safety Errors
                 16#0401: #ActiveErrorText := 'EMERGENCY STOP ACTIVE!';
                          #ActiveErrorText_ES := 'PARO DE EMERGENCIA ACTIVO!';
@@ -423,8 +425,8 @@ BEGIN
             #ActiveSeverity := 3; #ActiveSource := 'Tool';      // tool motion faults (rotation fail/timeout)
         ELSIF #ActiveErrorCode >= 16#0200 AND #ActiveErrorCode < 16#0210 THEN
             #ActiveSeverity := 2; #ActiveSource := 'Tool';      // tool configuration (invalid/out of range)
-        ELSIF #ActiveErrorCode >= 16#0300 AND #ActiveErrorCode <= 16#0310 THEN
-            #ActiveSeverity := 2; #ActiveSource := 'Recipe';    // <= includes 16#0310
+        ELSIF #ActiveErrorCode >= 16#0300 AND #ActiveErrorCode <= 16#0311 THEN
+            #ActiveSeverity := 2; #ActiveSource := 'Recipe';    // <= includes 16#0310, 16#0311
         ELSIF #ActiveErrorCode >= 16#0500 AND #ActiveErrorCode < 16#0510 THEN
             #ActiveSeverity := 3; #ActiveSource := 'Spindle';   // spindle motion faults
         ELSE
@@ -1106,6 +1108,12 @@ VERSION : 4.0
         bPreScanExec : Bool;
         bResetRecipe : Bool;    // One-shot flag to reset FB_RecipeHandler
         bStartSeq, bToolExecute, bPauseActive : Bool;
+        // Pause resume spin-up: on Continue from PAUSED, spindle restarts and we wait
+        // SpindleResumeSpeedupTime for it to reach speed before releasing the axes to
+        // return and resume. bPauseActive stays TRUE during this window so FB_RecipeHandler
+        // holds at the pause-retract point (state 802).
+        bResumeSpeedup   : Bool;   // TRUE while waiting for spindle to spin back up after Continue
+        tonResumeSpeedup : TON;    // Spin-up wait timer (PT = DB_MachineConfig.SpindleResumeSpeedupTime)
         bStopMoveX, bStopMoveZ : Bool;       // Flags for moving to position 0 after stop
         // Sequential homing (startup): home X then Z then Tool in active mode (mode 3)
         bHomeXExec : Bool;
@@ -1138,6 +1146,14 @@ VERSION : 4.0
         // Active recipe reference
         activeProgram : Int;
         activeLineCount : Int;
+
+        // Recipe-carried tool table (read from active recipe Header in STATE_PRE_SCAN,
+        // then applied to DB_ToolConfig / DB_MachineConfig before the pre-scan runs)
+        hdrProvidesToolCfg : Bool;
+        hdrToolCount       : Int;
+        hdrAutoCalc        : Bool;
+        hdrToolCodes       : Array[1..4] of Int;
+        hdrToolAngles      : Array[1..4] of Real;
 
         // ToolHeadLock timers
         tonLockWait : TON;      // Fallback timeout for states 17 and 29 (T#3S)
@@ -1259,15 +1275,15 @@ BEGIN
         IF #activeProgram > 5 THEN #activeProgram := 5; END_IF;
     END_IF;
 
-    // Apply tool-slot mapping from HMI -> DB_ToolConfig when operator requests it.
-    IF #applyToolEdge THEN
-        // Only copy up to 4 slots; respect configured ToolCount
-        FOR #applyIndex := 1 TO 4 DO
-            IF #applyIndex <= "DB_MachineConfig".ToolCount THEN
-                "DB_ToolConfig".ToolCode_List[#applyIndex] := "DB_HMI".ToolSlotCode[#applyIndex];
-            END_IF;
-        END_FOR;
-    END_IF;
+    // Tool-slot mapping is now CAM-authored: the active recipe Header supplies the
+    // tool table and it is applied on Start (STATE_PRE_SCAN). "Recipe always wins" --
+    // the HMI Apply path is intentionally disabled and DB_HMI.ToolSlotCode is a
+    // read-only mirror of the active mapping for display only. #applyToolEdge is still
+    // computed above (harmless) but no longer copies into DB_ToolConfig.
+    // (See TOOL_MAPPING_GUIDE.md and CAM_TOOL_TABLE_HANDOVER.md.)
+    FOR #applyIndex := 1 TO 4 DO
+        "DB_HMI".ToolSlotCode[#applyIndex] := "DB_ToolConfig".ToolCode_List[#applyIndex];
+    END_FOR;
     
     // Safety monitor
     #fbSafetyMonitor(EStop_OK := #EStop_OK, Door_Closed := #Door_Closed, AirPressure_OK := #AirPressure_OK,
@@ -1697,6 +1713,7 @@ BEGIN
         #State           := STATE_STOPPED;
         #Error           := FALSE;
         #bPauseActive    := FALSE;
+        #bResumeSpeedup  := FALSE;   // Cancel any pending pause spin-up wait
         #savedLineIndex  := -1;
         #savedProgram    := -1;
         "DB_HMI".ResumeLine := -1;
@@ -1752,6 +1769,7 @@ BEGIN
             #bSpindleStop        := FALSE;
             #bSpindleDecelWait   := FALSE;
             #bSpindlePendingStart := FALSE;
+            #bResumeSpeedup      := FALSE;  // Cancel any pending pause spin-up wait
             // MandrelLock: clear Cmd_Extend (spring retracts on EStop/power-loss).
             // Cmd_Retract is pulsed by bMandrelRetractPulse (set in STATE_STOPPING only — safe path) to
             // force FB out of State 3 — Mode=0 does not auto-retract on Cmd_Extend=FALSE alone.
@@ -1805,13 +1823,39 @@ BEGIN
             #bPreScanExec := TRUE;
             #bResetRecipe := FALSE;  // Clear one-shot reset flag (consumed this scan)
             
-            // Line count read from the active recipe DB Header (written by CAM post-processor)
+            // Line count + tool table read from the active recipe DB Header
+            // (both written by the CAM post-processor -- see CAM_TOOL_TABLE_HANDOVER.md)
             CASE #activeProgram OF
-                1: #activeLineCount := "DB_RecipeProgram1".Header.LineCount;
-                2: #activeLineCount := "DB_RecipeProgram2".Header.LineCount;
-                3: #activeLineCount := "DB_RecipeProgram3".Header.LineCount;
-                4: #activeLineCount := "DB_RecipeProgram4".Header.LineCount;
-                5: #activeLineCount := "DB_RecipeProgram5".Header.LineCount;
+                1: #activeLineCount    := "DB_RecipeProgram1".Header.LineCount;
+                   #hdrProvidesToolCfg := "DB_RecipeProgram1".Header.ProvidesToolConfig;
+                   #hdrToolCount       := "DB_RecipeProgram1".Header.ToolCount;
+                   #hdrAutoCalc        := "DB_RecipeProgram1".Header.AutoCalcAngles;
+                   #hdrToolCodes       := "DB_RecipeProgram1".Header.ToolCode_List;
+                   #hdrToolAngles      := "DB_RecipeProgram1".Header.ToolAngle_List;
+                2: #activeLineCount    := "DB_RecipeProgram2".Header.LineCount;
+                   #hdrProvidesToolCfg := "DB_RecipeProgram2".Header.ProvidesToolConfig;
+                   #hdrToolCount       := "DB_RecipeProgram2".Header.ToolCount;
+                   #hdrAutoCalc        := "DB_RecipeProgram2".Header.AutoCalcAngles;
+                   #hdrToolCodes       := "DB_RecipeProgram2".Header.ToolCode_List;
+                   #hdrToolAngles      := "DB_RecipeProgram2".Header.ToolAngle_List;
+                3: #activeLineCount    := "DB_RecipeProgram3".Header.LineCount;
+                   #hdrProvidesToolCfg := "DB_RecipeProgram3".Header.ProvidesToolConfig;
+                   #hdrToolCount       := "DB_RecipeProgram3".Header.ToolCount;
+                   #hdrAutoCalc        := "DB_RecipeProgram3".Header.AutoCalcAngles;
+                   #hdrToolCodes       := "DB_RecipeProgram3".Header.ToolCode_List;
+                   #hdrToolAngles      := "DB_RecipeProgram3".Header.ToolAngle_List;
+                4: #activeLineCount    := "DB_RecipeProgram4".Header.LineCount;
+                   #hdrProvidesToolCfg := "DB_RecipeProgram4".Header.ProvidesToolConfig;
+                   #hdrToolCount       := "DB_RecipeProgram4".Header.ToolCount;
+                   #hdrAutoCalc        := "DB_RecipeProgram4".Header.AutoCalcAngles;
+                   #hdrToolCodes       := "DB_RecipeProgram4".Header.ToolCode_List;
+                   #hdrToolAngles      := "DB_RecipeProgram4".Header.ToolAngle_List;
+                5: #activeLineCount    := "DB_RecipeProgram5".Header.LineCount;
+                   #hdrProvidesToolCfg := "DB_RecipeProgram5".Header.ProvidesToolConfig;
+                   #hdrToolCount       := "DB_RecipeProgram5".Header.ToolCount;
+                   #hdrAutoCalc        := "DB_RecipeProgram5".Header.AutoCalcAngles;
+                   #hdrToolCodes       := "DB_RecipeProgram5".Header.ToolCode_List;
+                   #hdrToolAngles      := "DB_RecipeProgram5".Header.ToolAngle_List;
             END_CASE;
 
             // Validate: 0 = recipe not loaded (Header not written yet); >999 = impossible
@@ -1823,6 +1867,41 @@ BEGIN
                 "DB_Diagnostic".Error_Text := 'Recipe not loaded: Header.LineCount invalid';
                 // Single-writer: HMI text comes from FB_AlarmManager (CASE 16#0310)
                 #State := STATE_ERROR;
+            END_IF;
+
+            // Apply the CAM-authored tool table BEFORE the pre-scan validates tool codes.
+            // "Recipe always wins": every recipe must carry its own tool table, else it is
+            // rejected here (16#0311). Skipped if the LineCount check already bailed
+            // (#bPreScanExec cleared) so we do not overwrite the 16#0310 error.
+            IF #bPreScanExec THEN
+                IF NOT #hdrProvidesToolCfg THEN
+                    #newErrorFlag := TRUE;
+                    #newErrorCode := 16#0311;  // Recipe has no tool table (ProvidesToolConfig=FALSE)
+                    #bPreScanExec := FALSE;
+                    "DB_Diagnostic".Error_Text := 'Recipe missing tool table (ProvidesToolConfig=FALSE)';
+                    // Single-writer: HMI text comes from FB_AlarmManager (CASE 16#0311)
+                    #State := STATE_ERROR;
+                ELSE
+                    // Defensive clamp: ToolCode_List / ToolAngle_List are Array[1..4].
+                    // A ToolCount > 4 would index out of bounds in the recipe lookup
+                    // loops (05_RecipeHandler) -> CPU STOP. Clamp to 1..4 here.
+                    IF #hdrToolCount < 1 THEN #hdrToolCount := 1; END_IF;
+                    IF #hdrToolCount > 4 THEN #hdrToolCount := 4; END_IF;
+                    "DB_MachineConfig".ToolCount   := #hdrToolCount;
+                    "DB_ToolConfig".AutoCalcAngles := #hdrAutoCalc;
+                    FOR #applyIndex := 1 TO 4 DO
+                        "DB_ToolConfig".ToolCode_List[#applyIndex] := #hdrToolCodes[#applyIndex];
+                        "DB_HMI".ToolSlotCode[#applyIndex]         := #hdrToolCodes[#applyIndex];  // HMI display mirror
+                    END_FOR;
+                    // When AutoCalcAngles=FALSE the recipe supplies explicit slot angles.
+                    // When TRUE, FC_ToolAngleCalc recomputes them every scan from ToolCount.
+                    IF NOT #hdrAutoCalc THEN
+                        "DB_ToolConfig".Tool1_Position := #hdrToolAngles[1];
+                        "DB_ToolConfig".Tool2_Position := #hdrToolAngles[2];
+                        "DB_ToolConfig".Tool3_Position := #hdrToolAngles[3];
+                        "DB_ToolConfig".Tool4_Position := #hdrToolAngles[4];
+                    END_IF;
+                END_IF;
             END_IF;
 
             // NOTE: fbPreScan is called unconditionally at the bottom of this FB
@@ -2171,7 +2250,11 @@ BEGIN
             // No timer fallback -- lock MUST be confirmed by sensor before machining starts.
 
  	     #StatusID := 17;
-	      IF "DB_Cylinder_ToolHeadLock".AtSetpoint THEN
+	      IF "DB_HMI".Bypass_ToolHeadLock THEN
+	         // Bypass: no sensor wait -- advance immediately (cylinder still commanded to
+	         // extend outside the CASE if physically present, but AtSetpoint is not required).
+	         #State := STATE_RUNNING;
+	      ELSIF "DB_Cylinder_ToolHeadLock".AtSetpoint THEN
  	         #State := STATE_RUNNING;
  	     ELSIF "DB_Cylinder_ToolHeadLock".Error THEN
   	        // Sensor did not confirm within Timeout_Extend (T#3S) — abort
@@ -2434,10 +2517,21 @@ BEGIN
             #StatusID := 88;
             // Stop elapsed time counting while paused
             #timerRunning := FALSE;
-            // Only Btn_Continue resumes (Pause button does NOT toggle)
-            IF #continueEdge THEN 
-                #bPauseActive := FALSE; 
-                #State := STATE_RUNNING; 
+            // Spindle is stopped while paused (RunCmd gated off below on State=PAUSED
+            // when NOT bResumeSpeedup). On Continue, restart the spindle and wait
+            // SpindleResumeSpeedupTime for it to reach speed BEFORE releasing the axes:
+            //   • bResumeSpeedup=TRUE  → RunCmd gate re-enables the spindle (spin-up)
+            //   • bPauseActive stays TRUE → FB_RecipeHandler holds at the retract point (802)
+            // When the timer elapses, drop bPauseActive → FB_RecipeHandler returns to the
+            // interruption point (803) and machining resumes.
+            // Only Btn_Continue resumes (Pause button does NOT toggle).
+            IF #continueEdge THEN
+                #bResumeSpeedup := TRUE;
+            END_IF;
+            IF #bResumeSpeedup AND #tonResumeSpeedup.Q THEN
+                #bResumeSpeedup := FALSE;
+                #bPauseActive   := FALSE;
+                #State          := STATE_RUNNING;
             END_IF;
         
         // -----------------------------------------------------------------
@@ -2471,6 +2565,7 @@ BEGIN
         999: // ERROR
             #StatusID := 99; #bStartSeq := FALSE; #Error := TRUE;
             #timerRunning := FALSE;  // Stop cycle timer
+            #bResumeSpeedup := FALSE;  // Cancel any pending pause spin-up wait (e.g. fault during spin-up)
             // Clear CMD=41 BackSupport overrides — valves de-energise on error
             "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;
             "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
@@ -2632,6 +2727,9 @@ BEGIN
     #tonDriveReady(IN := (#State = STATE_STARTING) AND NOT (#fbPowerX.Status AND #fbPowerZ.Status), PT := "DB_MachineConfig".Timeout_DriveReady);
     // Spindle decel wait: blocks RunCmd from going TRUE until VFD ramp-down completes
     #tonSpindleDecel(IN := #bSpindleDecelWait, PT := "DB_MachineConfig".SpindleDecelTime);
+    // Pause resume spin-up wait: counts while bResumeSpeedup (Continue pressed in PAUSED).
+    // IN drops to FALSE on reset/stop/error via bResumeSpeedup clears → ET resets, no stale fire.
+    #tonResumeSpeedup(IN := #bResumeSpeedup, PT := "DB_MachineConfig".SpindleResumeSpeedupTime);
     IF #tonSpindleDecel.Q THEN
         #bSpindleDecelWait := FALSE;
         IF #bSpindlePendingStart THEN
@@ -3018,8 +3116,13 @@ BEGIN
     //   • For a speed change: lower RunCmd → update SetSpeed → raise RunCmd again
     #fbSpindleControl(
         Enable   := #bDrivesEnable,
+        // Spindle stops while paused (State=PAUSED and NOT yet in the resume spin-up
+        // window). This drops RunForward only — no MC_Halt — so the PTO keeps pulsing
+        // (VFD-safe stop, same mechanism as a normal stop). On Continue, bResumeSpeedup
+        // re-enables it for the spin-up wait before the axes return.
         RunCmd   := ("DB_Manual".Btn_SpindleStart OR #bSpindleStart)
-                    AND NOT ("DB_Manual".Btn_SpindleStop OR #bSpindleStop OR #fbInputs.Cmd_Stop),
+                    AND NOT ("DB_Manual".Btn_SpindleStop OR #bSpindleStop OR #fbInputs.Cmd_Stop
+                             OR (#State = STATE_PAUSED AND NOT #bResumeSpeedup)),
         SetSpeed := SEL(G := (#State = STATE_MANUAL),
                         IN0 := "DB_Spindle".Cmd_SetSpeed,
                         IN1 := "DB_Manual".Manual_SpindleSpeed),

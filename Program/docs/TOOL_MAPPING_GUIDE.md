@@ -1,10 +1,20 @@
 # Tool Mapping Guide
 
+> **⚠️ UPDATED (2026-07-21): the tool mapping is now CAM-authored.**
+> The slot→code mapping, slot count, and slot angles are carried **inside each recipe's
+> `Header`** (written by the SpinningCam post-processor) and applied by the PLC on Start.
+> **"Recipe always wins":** the HMI Tool Setup mapping is disabled — `DB_HMI.ToolSlotCode`
+> is now a **read-only mirror** of the active recipe's table. To change the mapping,
+> regenerate the recipe in CAM. A recipe with no tool table is rejected with **0x0311**.
+> The HMI-Apply procedure described further below is **retained for historical reference
+> only** and no longer takes effect. See `CAM_TOOL_TABLE_HANDOVER.md`.
+
 ## Overview
 
 The machine has a rotary tool turret with up to 4 physical slots. Each slot holds one
 forming tool. The PLC identifies tools by **code number** (e.g. T101), not by slot
-position. This guide explains how to tell the PLC which code is in which slot.
+position. Which code lives in which slot is defined by the **recipe header** (from CAM);
+this guide explains the concept and the (now legacy) HMI procedure.
 
 ---
 
@@ -54,16 +64,21 @@ defaults above.
 ## How Mapping Works (Step by Step)
 
 1. The recipe reaches a Tool Change line (`CMD=10`).
-2. `FB_RecipePreScan` checks whether the requested code exists in
-   `DB_ToolConfig.ToolCode_List[1..4]` **before** execution starts.
-   - If not found: pre-scan fails with error `16#0309 — Tool code not mapped`.
+2. The PLC first applies the recipe's own header tool table into
+   `DB_ToolConfig.ToolCode_List`, then `FB_RecipePreScan` checks whether each requested
+   code exists there **before** execution starts.
+   - If not found: pre-scan fails (tool-mapping error, `16#0308`).
    - If found: pre-scan passes, execution is allowed.
 3. During execution, `FB_RecipeHandler` looks up the same table to find the slot
    number, then requests a turret rotation to that slot.
 
 ---
 
-## Changing the Mapping (HMI Procedure)
+## Changing the Mapping (LEGACY HMI Procedure — no longer active)
+
+> **This procedure is disabled as of 2026-07-21.** Editing `ToolSlotCode` + Apply no
+> longer changes `ToolCode_List` (the field is a read-only mirror). Change the mapping by
+> regenerating the recipe in CAM instead. Kept below for historical reference.
 
 Use this procedure whenever you physically move a tool to a different slot or install
 a new tool head.
@@ -103,8 +118,11 @@ Portal:
 
 | Code | Message | Cause | Fix |
 |------|---------|-------|-----|
-| `16#0308` | Tool code not mapped (runtime) | Recipe requested a code not in `ToolCode_List` | Enter the code in the correct slot field and press Apply |
-| `16#0309` | Tool code not mapped (pre-scan) | Same as above, caught before execution | Same fix |
+| `16#0308` | Tool code not mapped | Recipe requested a `CMD=10` code not present in its header `ToolCode_List` | Fix the tool table in CAM and regenerate the recipe |
+| `16#0311` | Recipe has no tool table | `Header.ProvidesToolConfig=FALSE` (recipe pre-dates the tool-table change, or CAM did not emit it) | Regenerate the recipe with the updated CAM post-processor |
+
+> **Note:** `16#0309` is **not** a tool-mapping error — it is the CMD=40 BackSupport
+> cylinder error. Earlier revisions of this guide mislabelled it.
 
 ---
 
@@ -120,6 +138,8 @@ The turret rotates to a calculated angle for each slot. With `AutoCalcAngles = T
 | 3         | 0°     | 120°   | 240°   | —      |
 | 4         | 0°     | 90°    | 180°   | 270°   |
 
-Current `ToolCount = 4` (set in `00_Configuration.scl`). To use custom angles,
-set `DB_ToolConfig.AutoCalcAngles = FALSE` from the HMI Tool page and enter
-angles manually.
+`ToolCount` and `AutoCalcAngles` are now supplied by the **recipe header** on Start
+(`Header.ToolCount`, `Header.AutoCalcAngles`). For custom (unequal) angles, the CAM sets
+`AutoCalcAngles := FALSE` and emits `Header.ToolAngle_List[1..4]`; the PLC then loads
+those angles into `Tool1..4_Position`. The `00_Configuration.scl` value is only a
+power-up default that a running recipe overrides.

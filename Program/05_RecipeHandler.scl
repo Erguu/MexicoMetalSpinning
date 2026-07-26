@@ -618,7 +618,13 @@ BEGIN
             // Pause handling
             IF #Pause THEN
                 #bHaltTrig := TRUE;
-                #pauseReturnState := STATE_EXEC;  // motion pause: recalc move from actual position
+                // Resume via STATE_READ, not STATE_EXEC: the pause-retract states (800/802)
+                // overwrite #targX/#targZ with retract/return geometry, destroying this line's
+                // endpoint. STATE_READ re-reads the endpoint from #Lines[#lineIndex] before EXEC
+                // recomputes the remaining move from currX/currZ (= interruption point after 803).
+                // Going straight to EXEC computed deltaX = ABS(resumeX - resumeX) = 0 and silently
+                // skipped the rest of the interrupted cut, jumping to the next line.
+                #pauseReturnState := STATE_READ;  // motion pause: re-read endpoint, then recalc move
                 #state := STATE_PAUSED;
             ELSE
                 // Check completion based on which axes are moving
@@ -915,8 +921,11 @@ BEGIN
         // === STATE_PAUSED (800) ===
         // -----------------------------------------------------------------
         // Pause sequence (return-before-resume): 800 halt/capture -> 801 retract ->
-        // 802 hold -> 803 return -> pauseReturnState. Spindle keeps running throughout.
-        // See docs/Pause_Retract_Plan.md. Offset/velocity from DB_MachineConfig.
+        // 802 hold -> 803 return -> pauseReturnState. This FB does not touch the spindle;
+        // FB_Process stops it while paused (State=PAUSED) and spins it back up before it
+        // releases Pause (drops bPauseActive) here, so 802 -> 803 return only starts once
+        // the spindle is back up to speed. See docs/Pause_Retract_Plan.md. Offset/velocity
+        // from DB_MachineConfig.
         // -----------------------------------------------------------------
         800: // PAUSED -- fully stop axes, capture interruption point, then retract
             #Paused := TRUE;
@@ -1022,8 +1031,9 @@ BEGIN
                 #Paused := FALSE;
                 #currX := #resumeX;    // back on the original path
                 #currZ := #resumeZ;
-                // Resume the state the pause was taken from (EXEC recalculates the
-                // remaining move from currX/currZ; dwell/spindle-wait continue in place).
+                // Resume the state the pause was taken from. Motion pauses resume via
+                // STATE_READ (re-read line endpoint, then EXEC recalculates the remaining
+                // move from currX/currZ); dwell/spindle-wait continue in place.
                 #state := #pauseReturnState;
             END_IF;
 
