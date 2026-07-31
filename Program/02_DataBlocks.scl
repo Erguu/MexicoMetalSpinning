@@ -297,7 +297,10 @@ NON_RETAIN
         History_Code    : Array[1..10] of Word;
         History_Time    : Array[1..10] of DTL;
         History_Source  : Array[1..10] of String[20];
-        History_Details : Array[1..10] of String[80];
+        // String[40] (was String[80], 2026-07-31 memory reclaim -- saves 400 B).
+        // Matches AlarmEntry.ErrorText[40] in DB_AlarmHistory, so both history views
+        // truncate identically. Written via LEFT(..., 40) in FB_AlarmManager.
+        History_Details : Array[1..10] of String[40];
         History_Index   : Int := 0;      // 1..10
         History_Count   : Int := 0;      // Number of valid entries (<=10)
         TotalErrorCount : DInt := 0;     // Lifetime error count (incremented on each new error)
@@ -567,6 +570,34 @@ NON_RETAIN
         Btn_ApplyType       : Bool;         // Rising edge: write SelCyl_SetType + Cyl_Tolerance → cylinder DB
         SelCyl_SetType      : Int  := 0;    // Desired PositioningMode (0–3) — HMI input field
         prevBtn_ApplyType   : Bool;         // Edge detection (internal, not for HMI)
+
+        // ===========================================================
+        // MANUAL CMD=40 / CMD=41 (BackSupport)
+        // Manual-page equivalents of the recipe commands. Each button
+        // writes exactly what the matching recipe line writes.
+        // Handled in FB_Process STATE_MANUAL (5) only -- STATE_STOPPED
+        // and STATE_ERROR clear all three target flags every scan.
+        // ===========================================================
+        Btn_Cmd40_Extend    : Bool;         // = CMD=40      : BackSupport extend (level -- hold to extend)
+        Btn_Cmd41_AtmoOn    : Bool;         // = CMD=41 P1   : Sol_B override + atmosphere valve ON
+        Btn_Cmd41_AtmoOff   : Bool;         // = CMD=41 P2   : atmosphere valve OFF (Sol_B stays ON)
+        Btn_Cmd41_Release   : Bool;         // = CMD=41 P3   : release both overrides
+
+        // ===========================================================
+        // MANUAL MDI -- type a CMD number + Param and execute it.
+        // Generic entry point for auxiliary recipe commands, so a new
+        // CMD only needs a CASE branch in FB_Process STATE_MANUAL --
+        // no new DB field and no HMI screen change.
+        // Motion commands (CMD=0/1) are deliberately NOT accepted here;
+        // use Btn_MoveAbsolute for manual positioning.
+        // ===========================================================
+        MDI_Cmd             : Int;          // Command number to execute (40, 41, ...)
+        MDI_Param           : Int;          // Command parameter (meaning depends on MDI_Cmd)
+        Btn_MDI_Execute     : Bool;         // Rising edge: execute MDI_Cmd once
+        MDI_Status          : Int;          // 0=idle, 1=accepted, 2=unknown CMD, 3=invalid Param
+        MDI_StatusText      : String[24];   // Result text (EN)
+        MDI_StatusText_ES   : String[24];   // Result text (ES)
+
         // Selected cylinder status (PLC → HMI)
         SelCyl_Name         : String[20];   // "Cylinder 1" etc.
         SelCyl_State        : Int;          // State code
@@ -689,15 +720,16 @@ NON_RETAIN
         LastErrorLine  : Int := -1;      // -1 if not applicable
         LastEndTime    : DTL;            // End timestamp
 
-        // History buffer (ring) - last 100 cycles
-        Hist_Index     : Int := 0;       // 1..100
-        Hist_Count     : Int := 0;       // Number of valid entries (<=100)
-        Hist_Result    : Array[1..100] of Byte;
-        Hist_Program   : Array[1..100] of Int;
-        Hist_Duration_s: Array[1..100] of DInt;
-        Hist_ErrorCode : Array[1..100] of Word;
-        Hist_ErrorLine : Array[1..100] of Int;
-        Hist_Time      : Array[1..100] of DTL;
+        // NOTE (2026-07-31, memory reclaim): the 100-entry cycle history ring
+        // (Hist_Index / Hist_Count / Hist_Result / Hist_Program / Hist_Duration_s /
+        // Hist_ErrorCode / Hist_ErrorLine / Hist_Time) was removed -- it cost ~2.3 KB
+        // of work memory but was write-only: nothing in the SCL ever read it back and
+        // no HMI tag was mapped to it (see HMI_Tag_Guide.md).
+        // The lifetime counters (Total*) and the last-cycle summary (Last*) are kept
+        // and remain the HMI production source. Error-side history is unaffected --
+        // DB_AlarmHistory (20 entries) and DB_Error.History_* still hold fault records.
+        // To restore: re-add the arrays here and the push block in FB_Process
+        // ("PRODUCTION LOGGING" section of 06_MainProcess.scl).
     END_VAR
 BEGIN
 END_DATA_BLOCK

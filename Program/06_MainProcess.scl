@@ -485,7 +485,9 @@ BEGIN
         "DB_Error".History_Code[1]    := #newHistCode;
         "DB_Error".History_Time[1]    := #currentTime;
         "DB_Error".History_Source[1]  := #newHistSource;
-        "DB_Error".History_Details[1] := #newHistText;
+        // LEFT(..., 40): History_Details is String[40] while #newHistText is String[80].
+        // Truncate explicitly rather than relying on implicit assignment truncation.
+        "DB_Error".History_Details[1] := LEFT(IN := #newHistText, L := 40);
         "DB_Error".History_Index := "DB_Error".History_Index + 1;
         IF "DB_Error".History_Index > 10 THEN "DB_Error".History_Index := 1; END_IF;
         IF "DB_Error".History_Count < 10 THEN "DB_Error".History_Count := "DB_Error".History_Count + 1; END_IF;
@@ -1138,6 +1140,8 @@ VERSION : 4.0
         bJogBlockPlus      : Bool;  // Manual soft-limit jog gate: block jog+ (recomputed every scan)
         bJogBlockMinus     : Bool;  // Manual soft-limit jog gate: block jog- (recomputed every scan)
         prevManualError : Bool;  // Edge detection: manual mode error
+        prevMDIExec : Bool;      // Edge detection: manual MDI execute button (STATE_MANUAL)
+        bMDI_Cmd40Extend : Bool; // Latch: MDI CMD=40 Param=1 holds BackSupport extended (Param=0 releases)
         bInitDone    : Bool;   // TRUE after first PLC scan; prevents re-triggering startup reset
         bDoHardReset : Bool;   // Pulse: set TRUE to trigger hard-reset block this scan (startup + Cmd_Reset)
 
@@ -1729,6 +1733,8 @@ BEGIN
         #capturedSpindleRPM          := 0.0;
         #spindleStopPT               := T#0MS;
         #bCycleCountDone             := FALSE;  // Allow CycleCount to increment on next completion
+        #prevMDIExec                 := FALSE;  // Clear stale MDI edge (button may be held at reset)
+        #bMDI_Cmd40Extend            := FALSE;  // Release MDI CMD=40 BackSupport extend latch
         #bDoHardReset                := FALSE;
     END_IF;
 
@@ -1780,6 +1786,11 @@ BEGIN
             // BackSupport CMD=41 overrides: de-energise Sol_B and atmosphere valve at rest
             "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;
             "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
+            // BackSupport extend: clear here too. Previously cleared only by
+            // FB_RecipeHandler (RESET / STOP handlers), which left no clear path for
+            // the manual CMD=40 button -- it would stay asserted after leaving manual.
+            "DB_Cylinder_BackSupport".Cmd_Extend  := FALSE;
+            #bMDI_Cmd40Extend                     := FALSE;  // Drop MDI CMD=40 latch while idle
 
             IF "DB_Manual".ManualModeActive AND #fbSafetyMonitor.SafeToJog THEN
                 #State := STATE_MANUAL;
@@ -1798,6 +1809,95 @@ BEGIN
         // -----------------------------------------------------------------
         5: // MANUAL
             #StatusID := 50;
+
+            // -----------------------------------------------------------------
+            // Manual CMD=40 / CMD=41 equivalents (HMI manual page)
+            // Each button writes exactly what the matching recipe line writes,
+            // so manual and automatic behave identically.
+            // Written only here (STATE_MANUAL); STATE_STOPPED and STATE_ERROR
+            // drive all three flags FALSE every scan, so nothing can persist
+            // after manual mode is left.
+            // -----------------------------------------------------------------
+            // CMD=40 -- BackSupport extend. Level command: held while the button
+            // is held. Releasing mid-stroke returns the FB to idle (blocked
+            // centre, cylinder holds position).
+            // bMDI_Cmd40Extend is the MDI equivalent: the MDI block below cannot
+            // write Cmd_Extend directly, because this line re-evaluates it every
+            // scan and would wipe the MDI value one scan later (the cylinder FB
+            // then saw a 1-scan pulse and the valve never moved). The MDI sets the
+            // latch instead; Param=0 clears it.
+            "DB_Cylinder_BackSupport".Cmd_Extend := "DB_Manual".Btn_Cmd40_Extend
+                                                    OR #bMDI_Cmd40Extend;
+
+            // CMD=41 -- atmosphere overrides. Latching, exactly like the recipe
+            // lines: the flags stay set after the button is released. Evaluated
+            // safest-first so a simultaneous press cannot leave Sol_B energised.
+            IF "DB_Manual".Btn_Cmd41_Release THEN            // = CMD=41 Param=3
+                "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;
+                "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
+            ELSIF "DB_Manual".Btn_Cmd41_AtmoOff THEN         // = CMD=41 Param=2
+                "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
+            ELSIF "DB_Manual".Btn_Cmd41_AtmoOn THEN          // = CMD=41 Param=1
+                "DB_Cylinder_BackSupport".SolB_Cmd41  := TRUE;
+                "DB_Cylinder_BackSupport".SolAtmo_Cmd := TRUE;
+            END_IF;
+
+            // -----------------------------------------------------------------
+            // MANUAL MDI -- execute a typed CMD number + Param, once per press.
+            //
+            // Generic entry point for auxiliary recipe commands. To support a new
+            // CMD later, add a branch to the CASE below -- no new DB field and no
+            // HMI screen change required.
+            //
+            // Only auxiliary (non-motion) commands are accepted. Motion commands
+            // (CMD=0 / CMD=1) are deliberately rejected: they need feedrate
+            // handling and the full soft-limit/motion path. Use Btn_MoveAbsolute
+            // for manual positioning instead.
+            // -----------------------------------------------------------------
+            IF "DB_Manual".Btn_MDI_Execute AND NOT #prevMDIExec THEN
+                "DB_Manual".MDI_Status        := 1;              // assume accepted
+                "DB_Manual".MDI_StatusText    := 'Executed';
+                "DB_Manual".MDI_StatusText_ES := 'Ejecutado';
+                CASE "DB_Manual".MDI_Cmd OF
+                    40: // BackSupport extend.
+                        // NOTE: unlike the recipe, MDI CMD=40 takes a Param so the
+                        // operator has a way to release the command:
+                        //   Param=1 -> extend, Param=0 -> release.
+                        // In a recipe the Param is ignored and the flag is cleared
+                        // at program end instead.
+                        IF "DB_Manual".MDI_Param = 1 THEN
+                            #bMDI_Cmd40Extend := TRUE;
+                        ELSIF "DB_Manual".MDI_Param = 0 THEN
+                            #bMDI_Cmd40Extend := FALSE;
+                        ELSE
+                            "DB_Manual".MDI_Status        := 3;
+                            "DB_Manual".MDI_StatusText    := 'CMD40: use Param 0 or 1';
+                            "DB_Manual".MDI_StatusText_ES := 'CMD40: use Param 0 o 1';
+                        END_IF;
+
+                    41: // BackSupport atmosphere -- identical to the recipe CMD=41
+                        IF "DB_Manual".MDI_Param = 1 THEN
+                            "DB_Cylinder_BackSupport".SolB_Cmd41  := TRUE;
+                            "DB_Cylinder_BackSupport".SolAtmo_Cmd := TRUE;
+                        ELSIF "DB_Manual".MDI_Param = 2 THEN
+                            "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
+                        ELSIF "DB_Manual".MDI_Param = 3 THEN
+                            "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;
+                            "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
+                        ELSE
+                            "DB_Manual".MDI_Status        := 3;
+                            "DB_Manual".MDI_StatusText    := 'CMD41: use Param 1,2,3';
+                            "DB_Manual".MDI_StatusText_ES := 'CMD41: use Param 1,2,3';
+                        END_IF;
+
+                    ELSE: // Not an MDI-supported command -- nothing written
+                        "DB_Manual".MDI_Status        := 2;
+                        "DB_Manual".MDI_StatusText    := 'Unknown/blocked CMD';
+                        "DB_Manual".MDI_StatusText_ES := 'CMD desconocido/no permitido';
+                END_CASE;
+            END_IF;
+            #prevMDIExec := "DB_Manual".Btn_MDI_Execute;
+
             IF NOT "DB_Manual".ManualModeActive THEN
                 // Clear manual contactor flags before returning to STOPPED
                 // so stale HMI button states cannot activate outputs in STATE_STOPPED.
@@ -1807,6 +1907,13 @@ BEGIN
                 "DB_HMI".Btn_Contactor_Spindle := FALSE;
                 "DB_HMI".Btn_Enable_X          := FALSE;
                 "DB_HMI".Btn_Enable_Z          := FALSE;
+                // Clear MDI result so a stale message does not greet the operator
+                // the next time the manual page is opened.
+                "DB_Manual".MDI_Status         := 0;
+                "DB_Manual".MDI_StatusText     := '';
+                "DB_Manual".MDI_StatusText_ES  := '';
+                #prevMDIExec                   := FALSE;
+                #bMDI_Cmd40Extend              := FALSE;  // Do not carry the extend latch out of manual
                 #State := 0;
             ELSIF #fbInputs.Cmd_Start AND #SafeToRun AND NOT "DB_HMI".Bypass_EStop THEN
                 // Bypass_EStop blocks transition to auto: must be cleared before running
@@ -1821,7 +1928,9 @@ BEGIN
         12: // PRE-SCAN - Validate recipe before running
             #StatusID := 12;
             #bPreScanExec := TRUE;
-            #bResetRecipe := FALSE;  // Clear one-shot reset flag (consumed this scan)
+            // Redundant since 2026-07-31 (the flag is now self-cleared after the
+            // fbRecipeHandler call each scan); kept as a belt-and-braces clear.
+            #bResetRecipe := FALSE;
             
             // Line count + tool table read from the active recipe DB Header
             // (both written by the CAM post-processor -- see CAM_TOOL_TABLE_HANDOVER.md)
@@ -2569,6 +2678,9 @@ BEGIN
             // Clear CMD=41 BackSupport overrides — valves de-energise on error
             "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;
             "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
+            // Clear BackSupport extend (recipe CMD=40 or manual button/MDI) while faulted
+            "DB_Cylinder_BackSupport".Cmd_Extend  := FALSE;
+            #bMDI_Cmd40Extend                     := FALSE;
             // SheetHolder: clear extend command while in error so it does not hold on reset
             "DB_Cylinder_SheetHolder".Cmd_Extend  := FALSE;
             
@@ -2772,23 +2884,10 @@ BEGIN
         #prodTimeStatus := RD_SYS_T(OUT => #prodTimeNow);
         "DB_Production".LastEndTime := #prodTimeNow;
         "DB_Production".CurrentActive := FALSE;
-
-        // History ring buffer update
-        "DB_Production".Hist_Index := "DB_Production".Hist_Index + 1;
-        IF "DB_Production".Hist_Index > 100 THEN
-            "DB_Production".Hist_Index := 1;
-        END_IF;
-        IF "DB_Production".Hist_Count < 100 THEN
-            "DB_Production".Hist_Count := "DB_Production".Hist_Count + 1;
-        END_IF;
-        "DB_Production".Hist_Result["DB_Production".Hist_Index] := "DB_Production".LastResult;
-        "DB_Production".Hist_Program["DB_Production".Hist_Index] := "DB_Production".LastProgram;
-        "DB_Production".Hist_Duration_s["DB_Production".Hist_Index] := "DB_Production".LastDuration_s;
-        "DB_Production".Hist_ErrorCode["DB_Production".Hist_Index] := "DB_Production".LastErrorCode;
-        "DB_Production".Hist_ErrorLine["DB_Production".Hist_Index] := "DB_Production".LastErrorLine;
-        "DB_Production".Hist_Time["DB_Production".Hist_Index] := #prodTimeNow;
+        // History ring push removed 2026-07-31 (memory reclaim) -- see DB_Production
+        // in 02_DataBlocks.scl. Last* summary above is the surviving record.
     END_IF;
-    
+
     // Edge: NOK (enter STATE_ERROR with active cycle)
     IF (#State = STATE_ERROR) AND (#prevState <> STATE_ERROR) AND "DB_Production".CurrentActive THEN
         "DB_Production".LastResult := 2;  // NOK
@@ -2800,23 +2899,10 @@ BEGIN
         #prodTimeStatus := RD_SYS_T(OUT => #prodTimeNow);
         "DB_Production".LastEndTime := #prodTimeNow;
         "DB_Production".CurrentActive := FALSE;
-
-        // History ring buffer update
-        "DB_Production".Hist_Index := "DB_Production".Hist_Index + 1;
-        IF "DB_Production".Hist_Index > 100 THEN
-            "DB_Production".Hist_Index := 1;
-        END_IF;
-        IF "DB_Production".Hist_Count < 100 THEN
-            "DB_Production".Hist_Count := "DB_Production".Hist_Count + 1;
-        END_IF;
-        "DB_Production".Hist_Result["DB_Production".Hist_Index] := "DB_Production".LastResult;
-        "DB_Production".Hist_Program["DB_Production".Hist_Index] := "DB_Production".LastProgram;
-        "DB_Production".Hist_Duration_s["DB_Production".Hist_Index] := "DB_Production".LastDuration_s;
-        "DB_Production".Hist_ErrorCode["DB_Production".Hist_Index] := "DB_Production".LastErrorCode;
-        "DB_Production".Hist_ErrorLine["DB_Production".Hist_Index] := "DB_Production".LastErrorLine;
-        "DB_Production".Hist_Time["DB_Production".Hist_Index] := #prodTimeNow;
+        // History ring push removed 2026-07-31 (memory reclaim) -- see DB_Production
+        // in 02_DataBlocks.scl. Fault detail is retained in DB_AlarmHistory / DB_Error.
     END_IF;
-    
+
     // Edge: STOPPED via STOP sequence (STOPPING → LOCK_RETRACT_WAIT → STOPPED, or legacy paths)
     IF (#State = STATE_STOPPED) AND
        ((#prevState = STATE_STOPPING) OR (#prevState = STATE_STOP_GOHOME) OR (#prevState = STATE_STOP_GOTOZERO)
@@ -2831,31 +2917,16 @@ BEGIN
         #prodTimeStatus := RD_SYS_T(OUT => #prodTimeNow);
         "DB_Production".LastEndTime := #prodTimeNow;
         "DB_Production".CurrentActive := FALSE;
-
-        // History ring buffer update
-        "DB_Production".Hist_Index := "DB_Production".Hist_Index + 1;
-        IF "DB_Production".Hist_Index > 100 THEN
-            "DB_Production".Hist_Index := 1;
-        END_IF;
-        IF "DB_Production".Hist_Count < 100 THEN
-            "DB_Production".Hist_Count := "DB_Production".Hist_Count + 1;
-        END_IF;
-        "DB_Production".Hist_Result["DB_Production".Hist_Index] := "DB_Production".LastResult;
-        "DB_Production".Hist_Program["DB_Production".Hist_Index] := "DB_Production".LastProgram;
-        "DB_Production".Hist_Duration_s["DB_Production".Hist_Index] := "DB_Production".LastDuration_s;
-        "DB_Production".Hist_ErrorCode["DB_Production".Hist_Index] := "DB_Production".LastErrorCode;
-        "DB_Production".Hist_ErrorLine["DB_Production".Hist_Index] := "DB_Production".LastErrorLine;
-        "DB_Production".Hist_Time["DB_Production".Hist_Index] := #prodTimeNow;
+        // History ring push removed 2026-07-31 (memory reclaim) -- see DB_Production
+        // in 02_DataBlocks.scl. Last* summary above is the surviving record.
     END_IF;
-    
-    // Production RESET: clear counters + history
+
+    // Production RESET: clear counters (history ring removed 2026-07-31)
     IF #prodResetEdge THEN
         "DB_Production".TotalStarted := 0;
         "DB_Production".TotalOK := 0;
         "DB_Production".TotalNOK := 0;
         "DB_Production".TotalStopped := 0;
-        "DB_Production".Hist_Index := 0;
-        "DB_Production".Hist_Count := 0;
         // Optionally also clear last cycle summary
         "DB_Production".LastResult := 0;
         "DB_Production".LastProgram := 0;
@@ -2933,7 +3004,26 @@ BEGIN
            #fbPreScan(Execute := #bPreScanExec, LineCount := #activeLineCount,
                       Lines := "DB_RecipeProgram5".Lines);
     END_CASE;
-    
+
+    // bResetRecipe is a ONE-SHOT: self-cleared here, right after the handler call that
+    // consumed it (same pattern as bHaltAllAxes below). Every setter runs earlier in the
+    // scan (hard reset, STOPPED/MANUAL Start, ERROR ack/continue/restart, COMPLETE), so
+    // the handler always sees it for exactly one scan.
+    //
+    // BUG FIX 2026-07-31: it used to be cleared ONLY in STATE_PRE_SCAN, so after power-up,
+    // after any Cmd_Reset, and after an error acknowledge it stayed TRUE for as long as the
+    // machine sat in STOPPED or MANUAL -- i.e. exactly when the operator uses the manual
+    // page. FB_RecipeHandler is called every scan and its `IF #Reset THEN` block is level-
+    // triggered, so it re-cleared BackSupport Cmd_Extend / SolB_Cmd41 / SolAtmo_Cmd every
+    // scan, wiping the manual CMD=40/CMD=41 buttons and the MDI (both write earlier in the
+    // scan, in the STATE_MANUAL branch). Nothing ever reached the OB1 output assignment.
+    //
+    // Guarded on a valid program number: outside 1..5 no handler is called, so the flag
+    // must survive to the scan where one is.
+    IF #activeProgram >= 1 AND #activeProgram <= 5 THEN
+        #bResetRecipe := FALSE;
+    END_IF;
+
     // Homing -- sequential pattern: STATE_HOMING (startup) and STATE_STOP_GOHOME (post-stop)
     // both use homeSeqState + bHomeXExec/bHomeZExec.
     // Mode SEL: mode 3 (active+zero) is forced in STATE_HOMING; other states use DB_Manual.HomingMode.

@@ -57,7 +57,7 @@ X    : Real  — Target X position (mm)
 Z    : Real  — Target Z position (mm)
 F    : Int   — Feed rate (mm/min), 0 = rapid
 CMD  : Byte  — Command type: 0=G0, 1=G1, 10=Tool, 20=SpindleOn, 21=SpindleOff, 30=Dwell, 40=CylGoto, 41=Atmo, 99=End
-Param: Byte  — CMD=10: tool code | CMD=20: RPM/10 | CMD=30: time×100ms | CMD=40: BackSupport pos (×Cmd40_Gain mm) | CMD=41: 1=Sol_B+SolAtmo ON, 2=SolAtmo OFF
+Param: Byte  — CMD=10: tool code | CMD=20: RPM/10 | CMD=30: time×100ms | CMD=40: BackSupport pos (×Cmd40_Gain mm) | CMD=41: 1=Sol_B+SolAtmo ON, 2=SolAtmo OFF, 3=release both
 ```
 
 > **Note (UDT_*.scl files):** `UDT_RecipeLine.scl`, `UDT_RecipeHeader.scl`, `UDT_AlarmEntry.scl`
@@ -112,7 +112,7 @@ The schema of all DBs in the project is defined here. All HMI tag connections ar
 | `DB_Diagnostic` | Runtime debug info (axis position, move status) | Multiple FBs | Developer/HMI |
 | `DB_Manual` | Manual mode buttons, jog, homing, spindle manual | HMI | FB_ManualMode + FB_SpindleControl |
 | `DB_HMI_Errors` | Discrete alarm bits (for HMI Discrete Alarm View) | FB_Process | HMI Alarm View |
-| `DB_Production` | Production counters (OK/NOK/STOP), last 100 cycle history | FB_Process | HMI |
+| `DB_Production` | Production counters (OK/NOK/STOP) + last-cycle summary. 100-entry cycle history removed 2026-07-31 (memory reclaim — it was write-only) | FB_Process | HMI |
 | `DB_SystemEvents` | Error report request (flag + code + text) | FC_ReportError | FB_Process |
 
 #### Instance DBs (FB Instances)
@@ -236,7 +236,9 @@ STATE_ERROR(999)       → Error, wait for reset
 41 = Atmo          → BackSupport atmosphere/vent control; fire-and-go (no wait)
                      Param=1: SolB_Cmd41=TRUE + SolAtmo_Cmd=TRUE (Sol_B held ON + atmosphere valve energised)
                      Param=2: SolAtmo_Cmd=FALSE (de-energise atmosphere valve; Sol_B stays ON)
-                     Both flags cleared on STOPPED / COMPLETE / ERROR
+                     Param=3: SolB_Cmd41=FALSE + SolAtmo_Cmd=FALSE (release both overrides)
+                     Both flags also cleared on STOPPED / COMPLETE / ERROR
+                     NOTE: Param=2 does NOT release Sol_B -- only Param=3 (or a program end) does.
 99 = End           → Program finished
 ```
 
@@ -271,7 +273,13 @@ Bypasses (DB_HMI.Bypass_*) bypass each condition individually.
 #### `FB_Process` — Main State Machine Summary
 ```
 STATE 0    STOPPED              → Initial, idle
-STATE 5    MANUAL               → FB_ManualMode active
+STATE 5    MANUAL               → FB_ManualMode active. Also handles the manual CMD=40/CMD=41
+                                   BackSupport buttons (DB_Manual.Btn_Cmd40_Extend /
+                                   Btn_Cmd41_AtmoOn / _AtmoOff / _Release) -- written only
+                                   in this state, same flags as the matching recipe lines --
+                                   and the manual MDI (MDI_Cmd + MDI_Param + Btn_MDI_Execute),
+                                   a generic CASE dispatcher for auxiliary CMDs; motion
+                                   commands (CMD=0/1) are rejected by design
 STATE 10   STARTING             → Drive enable + pre-checks
 STATE 12   PRE_SCAN             → Applies the active recipe's CAM-authored Header tool table
                                    (ToolCode_List/ToolCount/angles) into DB_ToolConfig+DB_MachineConfig,
@@ -532,6 +540,8 @@ forcing the FB into State 2 (Sol_A=FALSE → spring retracts). The pulse self-cl
 | Recipe CMD interpretation logic | `05_RecipeHandler.scl` | FB_RecipeHandler STATE_READ(10) |
 | BackSupport positioning (CMD=40) | `05_RecipeHandler.scl` | STATE_CYL_GOTO(70) / STATE_CYL_GOTO_WAIT(71) |
 | BackSupport atmosphere (CMD=41) | `05_RecipeHandler.scl` | CMD_ATMO handler in STATE_READ(10) |
+| Manual CMD=40 / CMD=41 buttons | `06_MainProcess.scl` | FB_Process STATE_MANUAL(5) — tags in `DB_Manual` (`02_DataBlocks.scl`) |
+| **Add a new CMD to the manual MDI** | `06_MainProcess.scl` | FB_Process STATE_MANUAL(5) — add a branch to `CASE "DB_Manual".MDI_Cmd`. No new DB field, no HMI change. **If the target flag is also written unconditionally every scan elsewhere in STATE_MANUAL (as `BackSupport.Cmd_Extend` is by the CMD=40 button line), the MDI must set a latch var and the every-scan line must OR it in** — otherwise the MDI write is wiped one scan later (see `bMDI_Cmd40Extend`) |
 | Sheet insertion wait (state 14) | `06_MainProcess.scl` | FB_Process STATE_SHEET_WAIT(14) |
 | MandrelLock one-shot retract | `06_MainProcess.scl` | bMandrelRetractPulse block after END_CASE |
 | Motion speed calculation / override | `05_RecipeHandler.scl` | FB_RecipeHandler STATE_EXEC(20) |

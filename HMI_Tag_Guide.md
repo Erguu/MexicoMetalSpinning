@@ -269,6 +269,64 @@ For diagnostics screen — use DB_HMI_Errors.Err_* bool flags:
 | **Spindle Direction** | `DB_Manual.Manual_SpindleDir` | Int | 1 = CW, -1 = CCW |
 | **Ack Spindle Error** | `DB_Manual.Btn_SpindleAckError` | Bool | Clear spindle fault without full reset |
 
+### Manual BackSupport CMD=40 / CMD=41 (Input) — added 2026-07-30
+
+Manual-page equivalents of the recipe commands. **Active only while the machine is in
+STATE_MANUAL (5)** — pressing them in any other state does nothing. All target flags are
+cleared automatically on returning to STOPPED or on ERROR.
+
+| HMI Object | PLC Address | Type | Recipe equivalent | Behavior |
+|------------|-------------|------|-------------------|----------|
+| **BackSupport Extend** | `DB_Manual.Btn_Cmd40_Extend` | Bool | CMD=40 | **Level** — hold to extend, release to stop |
+| **Atmo ON** | `DB_Manual.Btn_Cmd41_AtmoOn` | Bool | CMD=41 P1 | **Latching** — Sol_B override + atmosphere valve ON |
+| **Atmo OFF** | `DB_Manual.Btn_Cmd41_AtmoOff` | Bool | CMD=41 P2 | **Latching** — atmosphere valve OFF (Sol_B stays ON) |
+| **Release** | `DB_Manual.Btn_Cmd41_Release` | Bool | CMD=41 P3 | **Latching** — releases both overrides |
+
+> Buttons are evaluated safest-first (`Release` > `Atmo OFF` > `Atmo ON`), so pressing two
+> at once can never leave `Sol_B` energised.
+>
+> After a completed extend the cylinder FB latches with `Sol_A` held (`PositioningMode=0`
+> design). Use the existing **Cyl Retract Full** button (`Btn_CylRetractFull`, with
+> `SelectedCylinder = 1`) to release it.
+
+### Manual MDI — type a CMD + Param and execute (Input) — added 2026-07-30
+
+Generic entry point for auxiliary recipe commands. **Active only in STATE_MANUAL (5).**
+Type the command number and parameter, then pulse Execute. Adding a future CMD needs a
+PLC `CASE` branch only — **no HMI screen change**.
+
+| HMI Object | PLC Address | Type | Description |
+|------------|-------------|------|-------------|
+| **CMD Number** | `DB_Manual.MDI_Cmd` | Int | Command to run (40, 41, …) |
+| **CMD Param** | `DB_Manual.MDI_Param` | Int | Parameter — meaning depends on CMD |
+| **Execute** | `DB_Manual.Btn_MDI_Execute` | Bool | **Rising edge** fires once |
+
+**Supported commands:**
+
+| CMD | Param | Effect |
+|-----|-------|--------|
+| 40  | 1     | BackSupport extend |
+| 40  | 0     | Release extend command |
+| 41  | 1     | Sol_B override + atmosphere ON |
+| 41  | 2     | Atmosphere OFF (Sol_B stays ON) |
+| 41  | 3     | Release both overrides |
+
+> **CMD=40 differs from the recipe here.** In a recipe CMD=40's Param is ignored and the
+> flag is cleared at program end. Via MDI there is no program end, so Param 0/1 is used as
+> release/extend. CMD=41 is identical to the recipe in every respect.
+>
+> Motion commands (CMD=0 / CMD=1) are **rejected by design** — use Move Absolute instead.
+
+**Status (Output):**
+
+| HMI Object | PLC Address | Type | Description |
+|------------|-------------|------|-------------|
+| **MDI Status** | `DB_Manual.MDI_Status` | Int | 0=idle, 1=accepted, 2=unknown CMD, 3=invalid Param |
+| **MDI Result** | `DB_Manual.MDI_StatusText` | String[24] | Result text (EN) |
+| **MDI Result (ES)** | `DB_Manual.MDI_StatusText_ES` | String[24] | Result text (ES) |
+
+Status clears automatically when manual mode is left.
+
 ### Manual Spindle Status (Output)
 
 | HMI Object | PLC Address | Type | Description |

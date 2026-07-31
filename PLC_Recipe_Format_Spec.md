@@ -36,8 +36,41 @@ This document defines the binary recipe format for the metal spinning machine's 
 | 20  | SPINDLE_ON     | No        | No      | Speed ÷ 10 (0-255=0-2550 RPM) | M3 Snnn     |
 | 21  | SPINDLE_OFF    | No        | No      | Ignored                  | M5                |
 | 30  | DWELL          | No        | No      | Time in 100ms (0-25.5s)  | G4 P              |
-| 40  | CYLINDER_GOTO  | No        | No      | Sensor position (1-5)    | —                 |
+| 40  | CYLINDER_GOTO  | No        | No      | Ignored (see note)       | —                 |
+| 41  | ATMO           | No        | No      | 1 / 2 / 3 (see below)    | —                 |
 | 99  | PROGRAM_END    | No        | No      | Ignored                  | M30               |
+
+> **CMD=40 note:** `Param` is currently **ignored**. The BackSupport cylinder runs
+> `PositioningMode=0` (full stroke) since the linear ruler hardware was removed, so CMD=40
+> is a plain "extend to end of stroke and wait" command. Emit `Param := 0`.
+
+---
+
+## CMD=41 — BackSupport Atmosphere / Vent
+
+Fire-and-go: the PLC does not wait for anything, it sets flags and moves to the next line.
+
+| Param | SolB_Cmd41 (retract solenoid) | SolAtmo_Cmd (atmosphere valve) |
+|-------|-------------------------------|--------------------------------|
+| 1     | **ON**                        | **ON**                         |
+| 2     | unchanged (**stays ON**)      | OFF                            |
+| 3     | **OFF**                       | **OFF**                        |
+
+**`Param=2` does not release the retract solenoid — only `Param=3` does.** Before 2026-07-30
+there was no way to release it from the recipe at all; it stayed energised until the program
+reached STOPPED / COMPLETE / ERROR. If a program latches atmosphere with `Param=1`, it should
+release with `Param=3` when finished with it.
+
+Typical sequence:
+
+```
+CMD=40  Param=0     ; BackSupport extend, wait for stroke
+CMD=41  Param=1     ; retract solenoid + atmosphere ON
+CMD=41  Param=2     ; atmosphere OFF
+CMD=41  Param=3     ; release both — back to neutral
+```
+
+Params other than 1/2/3 are silently ignored (no error, no effect).
 
 ---
 

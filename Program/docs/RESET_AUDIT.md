@@ -131,6 +131,96 @@ Priority: **HIGH** — CMD handlers write directly to cylinder instance DBs.
 
 **Result: PASS** (1 gap fixed)
 
+**Findings — 2026-07-30 (CMD=41 Param=3, release Sol_B override):**
+
+- [x] No new VAR, timer, actuator, or HMI field introduced. Param=3 only *clears* two fields
+      (`SolB_Cmd41`, `SolAtmo_Cmd`) that are already on every reset path. All four reset
+      checkpoints re-verified and unchanged:
+      RecipeHandler RESET (`05:406-408`), STATE_STOPPED (`06:1781-1782`),
+      STATE_ERROR (`06:2570-2571`), STATE_COMPLETE (`06:2665-2666`).
+      `bDoHardReset` has no explicit line but lands in STOPPED, which clears both every scan.
+- [x] Param=3 is the only *recipe-level* release path. Previously `Param=2` cleared the
+      atmosphere valve but left `SolB_Cmd41` latched until the program ended.
+- [ ] **OPEN — not a reset-path issue, logged here for visibility.** BackSupport runs
+      `PositioningMode=0` + `ValveType=2`. `FB_CylinderControl` state 3 (AT SETPOINT) with
+      Mode 0 holds `Sol_A := TRUE` indefinitely (`09:833-835`) — a pressure hold, not the
+      blocked-centre hold the CMD=40 comment at `05:867` claims. A subsequent `CMD=41 Param=1`
+      then ORs `Sol_B` on at `08:258` while `Sol_A` is still energised, putting **both coils
+      of a 5/3 valve on simultaneously**. Param=3 shortens that window but does not remove it.
+      Requires an output-level interlock — see TODO ITEM-41.
+
+**Findings — 2026-07-30 (manual CMD=40 / CMD=41 buttons, STATE_MANUAL):**
+
+New `DB_Manual` fields: `Btn_Cmd40_Extend`, `Btn_Cmd41_AtmoOn`, `Btn_Cmd41_AtmoOff`,
+`Btn_Cmd41_Release`. These are HMI-owned inputs (the PLC never writes them), so they need
+no reset path themselves — but the three actuator flags they drive do.
+
+- [x] Writes are confined to the `STATE_MANUAL (5)` CASE branch. No other state writes them,
+      so the buttons are inert everywhere else even if the HMI leaves one TRUE.
+- [x] `SolB_Cmd41` / `SolAtmo_Cmd`: already cleared every scan by STATE_STOPPED
+      (`06:1781-1782`) and STATE_ERROR (`06:2570-2571`), plus COMPLETE and RecipeHandler
+      RESET. Leaving manual mode goes to STOPPED, so both drop immediately. No new work.
+- [x] **GAP FIXED** — `BackSupport.Cmd_Extend` had no clear in FB_Process at all; it was
+      written only by FB_RecipeHandler (RESET / STOP handlers). A manual extend would
+      therefore stay asserted after leaving manual mode. Added
+      `"DB_Cylinder_BackSupport".Cmd_Extend := FALSE;` to **STATE_STOPPED** and
+      **STATE_ERROR**, matching the existing SheetHolder/MandrelLock pattern.
+- [ ] **Known limitation (pre-existing, not a regression).** The main CASE runs *before*
+      `fbRecipeHandler` (called at `06:2923+`), so if the handler is still in state 70/71 it
+      re-asserts `Cmd_Extend := TRUE` in the same scan and defeats the STATE_ERROR clear.
+      This only affects a fault raised *during* a CMD=40 while the handler stays in 70/71;
+      before this change nothing cleared the flag on that path either. The manual-button
+      path (handler in IDLE/DONE) is fully covered.
+- [x] No new TON timer, no new `HasWarning`/`WarningText` write, no new physical output.
+      OB1 output assignments unchanged — the same `Sol_A` / `Sol_B OR SolB_Cmd41` /
+      `SolAtmo_Cmd` lines carry the manual commands.
+
+**Result: PASS** (1 gap fixed, 1 pre-existing limitation documented)
+
+**Findings — 2026-07-30 (manual MDI: MDI_Cmd / MDI_Param / Btn_MDI_Execute):**
+
+- [x] **New FB_Process VAR `prevMDIExec`** — the only new state. Cleared in `bDoHardReset`
+      (checkpoint 1) and again on the manual-exit branch, so a button held TRUE across a
+      reset cannot fire a stale edge on re-entry to manual.
+- [x] `MDI_Cmd` / `MDI_Param` are HMI-owned inputs, never written by the PLC — no reset
+      path needed. They are only *read* inside the execute edge.
+- [x] `MDI_Status` / `MDI_StatusText` / `_ES` are PLC-owned HMI outputs. Cleared on the
+      manual-exit branch (matching-clear-on-exit-path rule), so a stale result cannot
+      greet the operator on the next manual entry.
+- [x] The dispatcher writes **only** flags that are already on every reset path
+      (`BackSupport.Cmd_Extend`, `SolB_Cmd41`, `SolAtmo_Cmd`) — all cleared by
+      STATE_STOPPED and STATE_ERROR every scan. No new actuator introduced.
+- [x] **New FB_Process VAR `bMDI_Cmd40Extend` (2026-07-31)** — MDI CMD=40 now sets this
+      latch instead of writing `Cmd_Extend` directly (the every-scan button line
+      `Cmd_Extend := Btn_Cmd40_Extend OR bMDI_Cmd40Extend` used to wipe the MDI write one
+      scan later). Cleared in `bDoHardReset` (checkpoint 1), in STATE_STOPPED
+      (checkpoint 3), in STATE_ERROR (checkpoint 4) and on the manual-exit branch, each
+      alongside the existing `BackSupport.Cmd_Extend := FALSE`. Checkpoint 2
+      (FB_RecipeHandler reset) needs nothing — the latch is FB_Process-local and the
+      handler already clears the cylinder flag itself.
+- [x] **`bResetRecipe` made a true one-shot (2026-07-31).** Checkpoint 2 turned out to be
+      *over*-applied: `FB_RecipeHandler` is called every scan with
+      `Reset := Cmd_Reset OR bResetRecipe` and its `IF #Reset THEN` block is level-
+      triggered, so while the flag was held it re-cleared `BackSupport.Cmd_Extend` /
+      `SolB_Cmd41` / `SolAtmo_Cmd` on **every** scan. The flag was cleared only in
+      STATE_PRE_SCAN, but the `bDoHardReset` block, the safety-stop path and the
+      STATE_ERROR Ack/Continue/Restart branches all set it and then go to STOPPED or
+      MANUAL — so it latched TRUE from power-up or from any reset until the next Start.
+      The manual CMD=40/41 buttons and the MDI write those same flags earlier in the same
+      scan and were silently wiped. Fixed by self-clearing the flag after the handler call
+      (guarded on `activeProgram` 1..5, so a scan with no handler call does not consume it).
+      **Rule for future work:** a reset flag routed into a level-triggered `IF #Reset`
+      block must be consumed in the same scan — holding it turns a one-time clear into a
+      permanent output override.
+- [x] Execution is edge-gated **and** state-gated: the whole block lives inside the
+      `STATE_MANUAL (5)` CASE branch, so a held Execute button is inert in every other
+      state and cannot re-fire without a fresh press.
+- [x] No new TON timer, no new `HasWarning`/`WarningText` write, no new physical output.
+- [x] Motion commands (CMD=0/1) rejected in the `ELSE` branch — nothing is written, status
+      set to 2. No path from the MDI into the axis motion FBs.
+
+**Result: PASS** (no gaps)
+
 ---
 
 ### `08_Main_OB1.scl` — Physical Output Assignments

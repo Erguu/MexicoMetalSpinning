@@ -345,7 +345,7 @@ VERSION : 0.1
         CMD_SPINDLE_OFF : Byte := 21;
         CMD_DWELL : Byte := 30;
         CMD_CYLINDER_GOTO : Byte := 40;     // BackSupport full extend (PositioningMode=0 on this machine; Param ignored)
-        CMD_ATMO          : Byte := 41;     // BackSupport atmosphere: Param=1 → Sol_B+SolAtmo ON; Param=2 → SolAtmo OFF
+        CMD_ATMO          : Byte := 41;     // BackSupport atmosphere: Param=1 → Sol_B+SolAtmo ON; Param=2 → SolAtmo OFF; Param=3 → release both
         CMD_END : Byte := 99;
 
         // Recipe format: RecipeLine.Param encodes spindle speed as RPM ÷ 10.
@@ -532,6 +532,12 @@ BEGIN
                         ELSIF #Lines[#lineIndex].Param = 2 THEN
                             "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;  // de-energise atmosphere valve
                             // SolB_Cmd41 stays TRUE — Sol_B remains energised
+                        ELSIF #Lines[#lineIndex].Param = 3 THEN
+                            // Release BOTH overrides — identical clear to STATE_STOPPED / ERROR / COMPLETE.
+                            // Without this the Sol_B override latches until the program ends: Param=2
+                            // only closes the atmosphere valve, Sol_B stays energised with no way back.
+                            "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;  // release retract solenoid override
+                            "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;  // de-energise atmosphere valve
                         END_IF;
                         #state := STATE_NEXT;
 

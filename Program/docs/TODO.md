@@ -780,3 +780,53 @@ empty when the operator went to check details.
 - Ack (`AcknowledgeError`) clears `DB_Error.Active := FALSE`, re-enabling the latch for the next error.
 
 **To revert:** Remove the 3 new VAR fields. Restore `#HasActiveError := TRUE` and `#ActiveTime := #currentTime` at the top of the IF block. Remove the `newHist*` save lines. Replace the `IF NOT "DB_Error".Active` guard block with the original direct writes. Change History/AlarmHistory push back to `#ActiveErrorCode/#ActiveErrorText/#ActiveSource`. Remove the `DB_Diagnostic.Error_Text` write from STATE_LOCK_EXTEND_WAIT.
+
+---
+
+## ITEM-41 — SAFETY: BackSupport 5/3 valve can have both solenoids energised simultaneously
+
+**Found:** 2026-07-30 (code review while adding CMD=41 Param=3) | **Status: OPEN — awaiting decision**
+
+### Root cause
+
+BackSupport is `ValveType := 2` (5/3 blocked centre) + `PositioningMode := 0`
+(`02_DataBlocks.scl:757-758`). Two independent paths drive its solenoids and neither
+knows about the other:
+
+1. `FB_CylinderControl` state 3 (AT SETPOINT) with `PositioningMode = 0` holds
+   `Sol_A := TRUE` **indefinitely** (`09_Sensors_Actuators.scl:833-835`) — "hold until
+   retract commanded". It is a *pressure* hold, not the blocked-centre hold that the
+   CMD=40 comment at `05_RecipeHandler.scl:867` describes. State 3 is only left on
+   `Cmd_Retract` / `Cmd_RetractFull` / `Cmd_ExtendFull`, none of which the recipe issues.
+2. `CMD=41 Param=1` sets `SolB_Cmd41`, which is OR-ed straight into the physical output
+   at `08_Main_OB1.scl:258`, bypassing the FB's own mutual exclusion.
+
+### Reachable from the standard recipe sequence
+
+```
+CMD=40           -> Cmd_Extend=TRUE -> FB state 1 -> state 3 -> Sol_A ON  (held)
+CMD=41 Param=1   -> SolB_Cmd41=TRUE -> Sol_B ON               <-- BOTH COILS ON
+CMD=41 Param=2   -> atmosphere OFF, Sol_B still ON            <-- BOTH COILS ON
+CMD=41 Param=3   -> both overrides released -> Sol_B OFF      (window ends)
+```
+
+This is the normal documented order, not an edge case. Before Param=3 existed the
+overlap lasted until STOPPED / COMPLETE / ERROR.
+
+### Effect
+
+Both coils of a 5/3 valve pushing the spool from opposite ends: spool position is
+undefined (may hold, chatter, or one side wins on force tolerance), and both coils
+dissipate heat continuously while held.
+
+### Fix options (user decision pending)
+
+| # | Approach | Notes |
+|---|----------|-------|
+| i | Output interlock, extend wins: `(Sol_B OR SolB_Cmd41) AND NOT Sol_A` at `08:258` | 1 line, deterministic, CMD=40 completes normally |
+| ii | Output interlock, hold on conflict: both coils off when both commanded | Most conservative; CMD=40 then times out -> 0x0309 surfaces the bad recipe |
+| iii | Config-driven interlock table covering all cylinders | "Flexible" option — see user request 2026-07-30 |
+| iv | Do nothing; rely on CAM emitting Param=3 before CMD=40 | Guarantee lives in a document, not the PLC |
+
+Related: CMD=40's "5/3 blocked-center holds position" comment (`05:867`) is inaccurate
+for `PositioningMode=0` and should be corrected whichever option is chosen.

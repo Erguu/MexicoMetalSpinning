@@ -1,7 +1,11 @@
 # FB_Process State Machine Reference
 
 **Source file:** `Program/06_MainProcess.scl`
-**Last updated:** 2026-07-09 — PAUSE now stops the spindle (RunCmd gated off on `State=PAUSED AND NOT bResumeSpeedup`; `RunForward` drops, no MC_Halt, PTO-safe). On Continue the spindle spins back up for `DB_MachineConfig.SpindleResumeSpeedupTime` (default `T#5S`) while the axes hold at the retract point, then axes return and machining resumes. New FB_Process vars `bResumeSpeedup`/`tonResumeSpeedup`, cleared on hard-reset/STOPPED/ERROR.
+**Last updated:** 2026-07-31 — **Bug fix 2 (bigger, same symptom):** `bResetRecipe` was only cleared in STATE_PRE_SCAN, so after power-up / any `Cmd_Reset` / any error acknowledge it stayed TRUE while the machine sat in STOPPED or MANUAL. FB_RecipeHandler is called every scan and its `IF #Reset THEN` block is level-triggered, so it re-cleared `BackSupport.Cmd_Extend` / `SolB_Cmd41` / `SolAtmo_Cmd` every scan — killing the manual CMD=40 **and** CMD=41 buttons and the MDI. Now self-cleared right after the `fbRecipeHandler` call (guarded on `activeProgram` 1..5). **Bug fix 1:** MDI `CMD=40` never moved the valve. The STATE_MANUAL button line `BackSupport.Cmd_Extend := Btn_Cmd40_Extend` runs every scan and overwrote the MDI's write on the following scan, so the cylinder FB saw a 1-scan pulse (Mode 0: state 0 → 1 → 0, `Sol_A` up for one scan). MDI CMD=40 now sets a new FB var `bMDI_Cmd40Extend` and the button line reads `Btn_Cmd40_Extend OR bMDI_Cmd40Extend`; the latch is cleared in `bDoHardReset`, STATE_STOPPED, STATE_ERROR and on manual exit. CMD=41 was unaffected (those flags are written only inside the button `IF` chain).
+
+**Previously:** 2026-07-30 — Manual MDI added to STATE_MANUAL (5): `DB_Manual.MDI_Cmd` + `MDI_Param` executed on the rising edge of `Btn_MDI_Execute` (new FB var `prevMDIExec`, cleared in `bDoHardReset` and on manual exit); result in `MDI_Status`/`MDI_StatusText`/`_ES`. Accepts CMD=40 (Param 1/0 = extend/release) and CMD=41 (Param 1/2/3); motion commands rejected by design. Same session — Manual CMD=40 / CMD=41 buttons added to STATE_MANUAL (5): `DB_Manual.Btn_Cmd40_Extend` / `Btn_Cmd41_AtmoOn` / `Btn_Cmd41_AtmoOff` / `Btn_Cmd41_Release` write the same BackSupport flags as the matching recipe lines, and are written only in that state. `BackSupport.Cmd_Extend` is now also cleared in STATE_STOPPED (0) and STATE_ERROR (999). Recipe side gained CMD=41 Param=3 (release both overrides).
+
+**Prior update:** 2026-07-09 — PAUSE now stops the spindle (RunCmd gated off on `State=PAUSED AND NOT bResumeSpeedup`; `RunForward` drops, no MC_Halt, PTO-safe). On Continue the spindle spins back up for `DB_MachineConfig.SpindleResumeSpeedupTime` (default `T#5S`) while the axes hold at the retract point, then axes return and machining resumes. New FB_Process vars `bResumeSpeedup`/`tonResumeSpeedup`, cleared on hard-reset/STOPPED/ERROR.
 **Prior update:** 2026-07-02 — Soft limits now gated on `StatusBits.HomingDone` (un-homed axis never trips); MANUAL enforces soft limits via directional jog gating + MoveAbsolute target rejection (never faults); FB_AlarmManager first-error latch replaced by severity-priority latch (tier 4 safety > 3 motion/TO > 2 project > 1 warning); new TO fault poller raises 0x0021–0x0024 on `<axis>.StatusBits.Error`; single-writer cleanup: `DB_HMI.ErrorText` is written ONLY by the AlarmManager mirror, the ITEM-08 safety fallback, and the STATE_STOPPED clear — all state handlers/FBs report codes (direct or FC_ReportError) and write rich context to `ErrorDetail` only
 
 > **MAINTENANCE RULE (for AI agents):**
@@ -174,6 +178,8 @@ Cmd_Stop vetoes RunCmd directly — spindle decelerates immediately when Stop is
 - `MandrelLock.Cmd_Extend = FALSE` (spring already retracted but held clear)
 - `SheetHolder.Cmd_Extend = FALSE`
 - `BackSupport.SolB_Cmd41 = FALSE`, `SolAtmo_Cmd = FALSE`
+- `BackSupport.Cmd_Extend = FALSE` (2026-07-30 — added so the manual CMD=40 button cannot
+  stay asserted after leaving manual mode; previously cleared only by FB_RecipeHandler)
 - `bLockAfterHoming = FALSE`
 - Clears HMI ErrorText/ErrorDetail — **only when `fbSafetyMonitor.SafeToRun = TRUE`** (ITEM-34, 2026-06-12: unconditional clearing erased the ITEM-08 door-open/E-Stop hint every scan, so it never reached the HMI)
 - Halt PNP flags cleared: `bHaltX_PNP = FALSE`, `bHaltZ_PNP = FALSE`
@@ -197,7 +203,86 @@ Cmd_Stop vetoes RunCmd directly — spindle decelerates immediately when Stop is
 
 **Runs every scan while in this state:**
 - `FB_ManualMode` handles all jog/home/step/spindle actions from `DB_Manual`
-- FB_Process only monitors exit conditions
+- FB_Process monitors exit conditions
+- **Manual CMD=40 / CMD=41 (2026-07-30)** — see below
+
+**Manual CMD=40 / CMD=41 (BackSupport) — 2026-07-30:**
+
+Manual-page equivalents of the recipe commands. Written **only** in this state, so the
+buttons are inert in every other state. Each writes exactly what the matching recipe
+line writes, so manual and automatic behave identically.
+
+| `DB_Manual` button | Writes | Recipe equivalent |
+|--------------------|--------|-------------------|
+| `Btn_Cmd40_Extend` | `BackSupport.Cmd_Extend := <button>` (level) | CMD=40 |
+| `Btn_Cmd41_AtmoOn` | `SolB_Cmd41 := TRUE`, `SolAtmo_Cmd := TRUE` | CMD=41 P1 |
+| `Btn_Cmd41_AtmoOff` | `SolAtmo_Cmd := FALSE` | CMD=41 P2 |
+| `Btn_Cmd41_Release` | `SolB_Cmd41 := FALSE`, `SolAtmo_Cmd := FALSE` | CMD=41 P3 |
+
+- **Extend is a level command** — held while the button is held. Releasing mid-stroke
+  returns the cylinder FB to idle (blocked centre, holds position). Note that once the
+  stroke completes the FB latches in state 3 with `Sol_A` held (Mode 0 behavior, see
+  ITEM-41) — use the existing `Btn_CylRetractFull` to release it.
+- **Atmosphere buttons latch**, exactly like the recipe lines: flags stay set after
+  release. Evaluated safest-first (`Release` > `AtmoOff` > `AtmoOn`) so a simultaneous
+  press cannot leave `Sol_B` energised.
+- All three target flags are driven FALSE every scan by STATE_STOPPED and STATE_ERROR,
+  so nothing survives leaving manual mode.
+
+**Manual MDI — typed CMD + Param (2026-07-30):**
+
+Generic entry point alongside the buttons above: `DB_Manual.MDI_Cmd` + `MDI_Param`,
+fired on the **rising edge** of `Btn_MDI_Execute` (edge var `prevMDIExec`, cleared in
+`bDoHardReset` and on manual exit). Result reported in `MDI_Status` (0=idle, 1=accepted,
+2=unknown CMD, 3=invalid Param) + `MDI_StatusText`/`_ES`, cleared on manual exit.
+
+| CMD | Param | Effect |
+|-----|-------|--------|
+| 40 | 1 / 0 | BackSupport extend / release |
+| 41 | 1 / 2 / 3 | Same as recipe CMD=41 P1 / P2 / P3 |
+| anything else | — | Rejected, `MDI_Status = 2`, nothing written |
+
+- **To add a future CMD:** add a branch to the `CASE "DB_Manual".MDI_Cmd` block in this
+  state. No new DB field, no HMI change.
+- **Motion commands (CMD=0/1) are rejected by design** — they need feedrate handling and
+  the full soft-limit/motion path. `Btn_MoveAbsolute` covers manual positioning.
+- **CMD=40 Param is an MDI-only extension.** In a recipe the Param is ignored and the flag
+  is cleared at program end; via MDI there is no program end, so Param 0/1 gives the
+  operator a release. CMD=41 is identical to the recipe.
+- **CMD=40 goes through the `bMDI_Cmd40Extend` latch, not `Cmd_Extend` directly** (fixed
+  2026-07-31). The button line above re-evaluates
+  `BackSupport.Cmd_Extend := Btn_Cmd40_Extend OR bMDI_Cmd40Extend` **every scan**, so an
+  MDI write straight to `Cmd_Extend` survived exactly one scan and the valve never moved.
+  Param=1 sets the latch, Param=0 clears it; the latch is cleared by `bDoHardReset`,
+  STATE_STOPPED, STATE_ERROR and the manual-exit branch.
+  CMD=41 needs no latch — `SolB_Cmd41` / `SolAtmo_Cmd` are only written inside the
+  button `IF` chain, so nothing overwrites them on the following scan.
+
+**`bResetRecipe` one-shot fix (2026-07-31) — affected CMD=40 *and* CMD=41, buttons and MDI:**
+
+`FB_RecipeHandler` is called **every scan** with `Reset := Cmd_Reset OR bResetRecipe`, and its
+`IF #Reset THEN` block is **level-triggered** — while Reset is held it re-runs every scan and
+clears `BackSupport.Cmd_Extend` / `SolB_Cmd41` / `SolAtmo_Cmd` (`05_RecipeHandler.scl:406-408`).
+
+`bResetRecipe` was documented as a one-shot but was only cleared in `STATE_PRE_SCAN`. Every
+other setter — the `bDoHardReset` block (so: power-up **and** every `Cmd_Reset`), the safety-stop
+path, and the STATE_ERROR Ack / Continue / Restart branches — hands control back to STOPPED or
+MANUAL, never to PRE_SCAN. The flag therefore stayed TRUE indefinitely in exactly the states
+where the manual page is used.
+
+The call sits at the **bottom** of FB_Process, after the state machine, so within one scan
+STATE_MANUAL wrote the flag and the handler wiped it again — and OB1 assigns the cylinder
+outputs *before* calling FB_Process, so the output only ever saw the wiped value. Net effect:
+the manual CMD=40/CMD=41 buttons and the MDI did nothing at all after a reset or from power-up,
+while `DB_Manual` showed perfectly correct values.
+
+Symptom is intermittent by design of the old code: run any program once (PRE_SCAN clears the
+flag) and manual CMD=40/41 work until the next reset or error acknowledge.
+
+`bResetRecipe` is now self-cleared immediately after the `fbRecipeHandler` call (same pattern as
+`bHaltAllAxes`), guarded on `activeProgram` in 1..5 so it survives a scan where no handler is
+called. Safe because `Start := bStartSeq` is only TRUE in STATE_RUNNING(20) — with Reset no
+longer held, the handler simply rests in `STATE_IDLE`.
 
 **Soft-limit behavior (2026-07-02):**
 - **Un-homed axis:** no soft-limit restriction at all — position is meaningless before homing
@@ -212,7 +297,7 @@ Cmd_Stop vetoes RunCmd directly — spindle decelerates immediately when Stop is
 
 | Condition | Next State |
 |-----------|-----------|
-| `ManualModeActive = FALSE` | Clears all contactor/enable HMI buttons → **0** STOPPED |
+| `ManualModeActive = FALSE` | Clears all contactor/enable HMI buttons + MDI status/edge → **0** STOPPED |
 | `Cmd_Start` AND `SafeToRun` AND NOT `Bypass_EStop` | Sets `ManualModeActive = FALSE` → **12** PRE_SCAN |
 
 ---
@@ -655,6 +740,10 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 **Runs every scan while in this state:**
 - `bStartSeq = FALSE`, `timerRunning = FALSE`
 - `BackSupport.SolB_Cmd41 = FALSE`, `SolAtmo_Cmd = FALSE`
+- `BackSupport.Cmd_Extend = FALSE` (2026-07-30 — see note in STATE_STOPPED. Caveat: the
+  main CASE runs *before* `fbRecipeHandler`, so if the handler is still sitting in state
+  70/71 it re-asserts `Cmd_Extend` the same scan. This clear is effective for the manual
+  button and for a handler in IDLE/DONE, which are the paths that matter here)
 - `SheetHolder.Cmd_Extend = FALSE`
 - `savedLineIndex` captured on first entry only (`IF savedLineIndex < 0`) — warm restart position
 - `DB_HMI.ResumeLine := savedLineIndex` (shown on HMI so operator knows which line will resume)

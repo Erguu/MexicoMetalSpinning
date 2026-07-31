@@ -59,7 +59,7 @@ Do not skip this step. Leaving these files out of sync causes future agents to m
 | State ID | Name | Description |
 |----------|------|-------------|
 | 0 | STOPPED | Idle |
-| 5 | MANUAL | Manual jog/home |
+| 5 | MANUAL | Manual jog/home. Also handles the manual CMD=40/CMD=41 BackSupport buttons (`DB_Manual.Btn_Cmd40_Extend` / `Btn_Cmd41_AtmoOn` / `_AtmoOff` / `_Release`) and the manual **MDI** (`MDI_Cmd` + `MDI_Param` + `Btn_MDI_Execute`) — all written only in this state. To support a new CMD in manual, add a branch to the `CASE "DB_Manual".MDI_Cmd` block; no new DB field or HMI change needed |
 | 10 | STARTING | Drive enable + pre-checks |
 | 12 | PRE_SCAN | Recipe validation |
 | 13 | PRE_HOME_CLR | Clearance move out of PNP zone before homing |
@@ -117,6 +117,7 @@ The operator cannot restart the PLC. The **Reset button must always produce a cl
 | ITEM-38 | **RESOLVED 2026-06-12** | Pre-scan now validates CMD=40 BackSupport targets (Param × Cmd40_Gain vs ruler Phys_Min/Phys_Max) |
 | ITEM-39 | **RESOLVED 2026-06-12** | Pause branch added to FB_RecipeHandler state 71 — Cmd_Extend cleared, resumes via STATE_CYL_GOTO |
 | ITEM-40 | **RESOLVED 2026-06-14** | FB_AlarmManager first-error latch: secondary errors go to history only, root cause stays on display until Ack. STATE_LOCK_EXTEND_WAIT (17) now writes DB_Diagnostic.Error_Text on cylinder timeout. |
+| ITEM-41 | **OPEN (safety)** | BackSupport 5/3 valve: `CMD=40` leaves `Sol_A` latched ON (FB state 3, Mode 0) and a following `CMD=41 Param=1` ORs `Sol_B` on at `08:258` → **both coils energised**. Reachable from the standard `40 → 41 P1 → 41 P2 → 41 P3` order. Needs an output-level interlock — 4 options in TODO.md. |
 
 **Do-not-fix decisions (2026-06-12, user-confirmed):** Spindle stop intentionally does NOT abort MC_MoveVelocity (VFD faults if PTO pulse is lost — never add MC_Halt there). `RunForward :=` parameter style in the fbSpindleControl call stays as-is. HMI Start button is dev-only and will be removed from the HMI before shipping (bypasses two-hand sheet-load confirm until then — not a bug).
 
