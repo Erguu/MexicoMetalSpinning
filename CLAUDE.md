@@ -117,7 +117,7 @@ The operator cannot restart the PLC. The **Reset button must always produce a cl
 | ITEM-38 | **RESOLVED 2026-06-12** | Pre-scan now validates CMD=40 BackSupport targets (Param × Cmd40_Gain vs ruler Phys_Min/Phys_Max) |
 | ITEM-39 | **RESOLVED 2026-06-12** | Pause branch added to FB_RecipeHandler state 71 — Cmd_Extend cleared, resumes via STATE_CYL_GOTO |
 | ITEM-40 | **RESOLVED 2026-06-14** | FB_AlarmManager first-error latch: secondary errors go to history only, root cause stays on display until Ack. STATE_LOCK_EXTEND_WAIT (17) now writes DB_Diagnostic.Error_Text on cylinder timeout. |
-| ITEM-41 | **OPEN (safety)** | BackSupport 5/3 valve: `CMD=40` leaves `Sol_A` latched ON (FB state 3, Mode 0) and a following `CMD=41 Param=1` ORs `Sol_B` on at `08:258` → **both coils energised**. Reachable from the standard `40 → 41 P1 → 41 P2 → 41 P3` order. Needs an output-level interlock — 4 options in TODO.md. |
+| ITEM-41 | **OPEN (safety) — CONFIRMED ON MACHINE 2026-07-31** | BackSupport 5/3 valve: `CMD=40` leaves `Sol_A` latched ON (FB state 3, Mode 0) and a following `CMD=41 Param=1` ORs `Sol_B` on at `08:258` → **both coils energised**. Observed live via the manual MDI: solenoids click, spool stalls, cylinder does not move. Reachable from the standard `40 → 41 P1 → 41 P2 → 41 P3` order. Needs an output-level interlock — 4 options in TODO.md, recommendation is (i). |
 
 **Do-not-fix decisions (2026-06-12, user-confirmed):** Spindle stop intentionally does NOT abort MC_MoveVelocity (VFD faults if PTO pulse is lost — never add MC_Halt there). `RunForward :=` parameter style in the fbSpindleControl call stays as-is. HMI Start button is dev-only and will be removed from the HMI before shipping (bypasses two-hand sheet-load confirm until then — not a bug).
 

@@ -1142,6 +1142,12 @@ VERSION : 4.0
         prevManualError : Bool;  // Edge detection: manual mode error
         prevMDIExec : Bool;      // Edge detection: manual MDI execute button (STATE_MANUAL)
         bMDI_Cmd40Extend : Bool; // Latch: MDI CMD=40 Param=1 holds BackSupport extended (Param=0 releases)
+        // Edge detection: manual CMD=41 buttons (STATE_MANUAL). Seeded with the live
+        // button state whenever the machine is outside manual, so a button left
+        // latched (or an HMI that powers up with the bit set) cannot fire on entry.
+        prevBtnCmd41Release : Bool;
+        prevBtnCmd41AtmoOff : Bool;
+        prevBtnCmd41AtmoOn  : Bool;
         bInitDone    : Bool;   // TRUE after first PLC scan; prevents re-triggering startup reset
         bDoHardReset : Bool;   // Pulse: set TRUE to trigger hard-reset block this scan (startup + Cmd_Reset)
 
@@ -1735,6 +1741,11 @@ BEGIN
         #bCycleCountDone             := FALSE;  // Allow CycleCount to increment on next completion
         #prevMDIExec                 := FALSE;  // Clear stale MDI edge (button may be held at reset)
         #bMDI_Cmd40Extend            := FALSE;  // Release MDI CMD=40 BackSupport extend latch
+        // CMD=41 edge memory: SEED with the live button state, do not clear. Clearing
+        // would let a button still held/latched at reset fire a one-shot immediately.
+        #prevBtnCmd41Release         := "DB_Manual".Btn_Cmd41_Release;
+        #prevBtnCmd41AtmoOff         := "DB_Manual".Btn_Cmd41_AtmoOff;
+        #prevBtnCmd41AtmoOn          := "DB_Manual".Btn_Cmd41_AtmoOn;
         #bDoHardReset                := FALSE;
     END_IF;
 
@@ -1791,6 +1802,12 @@ BEGIN
             // the manual CMD=40 button -- it would stay asserted after leaving manual.
             "DB_Cylinder_BackSupport".Cmd_Extend  := FALSE;
             #bMDI_Cmd40Extend                     := FALSE;  // Drop MDI CMD=40 latch while idle
+            // CMD=41 edge memory: track the live button state every scan while idle.
+            // STATE_MANUAL is entered only from here (see below), so a button left
+            // latched cannot fire a one-shot on the first scan of manual mode.
+            #prevBtnCmd41Release := "DB_Manual".Btn_Cmd41_Release;
+            #prevBtnCmd41AtmoOff := "DB_Manual".Btn_Cmd41_AtmoOff;
+            #prevBtnCmd41AtmoOn  := "DB_Manual".Btn_Cmd41_AtmoOn;
 
             IF "DB_Manual".ManualModeActive AND #fbSafetyMonitor.SafeToJog THEN
                 #State := STATE_MANUAL;
@@ -1826,18 +1843,65 @@ BEGIN
             // scan and would wipe the MDI value one scan later (the cylinder FB
             // then saw a 1-scan pulse and the valve never moved). The MDI sets the
             // latch instead; Param=0 clears it.
+            //
+            // MDI CMD=40 auto-release -- mirrors FB_RecipeHandler STATE_CYL_GOTO(70) /
+            // STATE_CYL_GOTO_WAIT(71): hold Cmd_Extend every scan, then drop it the scan
+            // AtSetpoint reports done (5/3 blocked centre holds position mechanically),
+            // or on a cylinder Error. Runs before the assignment below so the release
+            // takes effect in the same scan, exactly as state 71 does.
+            //
+            // Why this matters (2026-07-31): the MDI used to hold Cmd_Extend until the
+            // operator sent Param=0, so FB_CylinderControl parked in state 3 and -- with
+            // PositioningMode=0 -- kept Sol_A energised indefinitely (09:833-835). A
+            // CMD=41 Param=1 afterwards ORs Sol_B onto the output (08:259), so both coils
+            // of the 5/3 valve were driven at once and the spool stalled: solenoids click,
+            // cylinder does not move (ITEM-41). The recipe never showed this because
+            // state 71 releases Cmd_Extend at AtSetpoint before CMD=41 ever runs.
+            IF #bMDI_Cmd40Extend THEN
+                IF "DB_Cylinder_BackSupport".AtSetpoint THEN
+                    #bMDI_Cmd40Extend             := FALSE;
+                    "DB_Manual".MDI_Status        := 1;
+                    "DB_Manual".MDI_StatusText    := 'CMD40 done';
+                    "DB_Manual".MDI_StatusText_ES := 'CMD40 completado';
+                ELSIF "DB_Cylinder_BackSupport".Error THEN
+                    #bMDI_Cmd40Extend             := FALSE;
+                    "DB_Manual".MDI_Status        := 4;
+                    "DB_Manual".MDI_StatusText    := 'CMD40 cylinder error';
+                    "DB_Manual".MDI_StatusText_ES := 'CMD40 error cilindro';
+                END_IF;
+            END_IF;
+
             "DB_Cylinder_BackSupport".Cmd_Extend := "DB_Manual".Btn_Cmd40_Extend
                                                     OR #bMDI_Cmd40Extend;
 
-            // CMD=41 -- atmosphere overrides. Latching, exactly like the recipe
-            // lines: the flags stay set after the button is released. Evaluated
-            // safest-first so a simultaneous press cannot leave Sol_B energised.
-            IF "DB_Manual".Btn_Cmd41_Release THEN            // = CMD=41 Param=3
+            // CMD=41 -- atmosphere overrides. ONE-SHOT (rising edge), exactly like
+            // the recipe: FB_RecipeHandler STATE_READ writes these flags on the
+            // single scan the line is read and never re-asserts them.
+            //
+            // Why edge and not level (2026-08-01): these were previously evaluated
+            // every scan from latching HMI buttons. A latched button therefore
+            // re-wrote its own value continuously and overwrote any later MDI
+            // CMD=41 one scan after it was issued -- the operator saw a ~20 ms
+            // click on the valve, no state change, and MDI_Status = 'Executed'.
+            // With edge detection the button and the MDI write identically: once,
+            // per press. AtmoOn -> AtmoOff -> AtmoOn now reproduces P1 -> P2 -> P1,
+            // which a latched state cannot express.
+            //
+            // HMI REQUIREMENT: these three buttons must be MOMENTARY (SetBit on
+            // press / ResetBit on release). A latching button fires once per latch
+            // cycle and must be un-latched before it can be used again.
+            //
+            // The safest-first ELSIF order is kept: on a simultaneous press only
+            // the safest branch runs, and the other button's edge is consumed by
+            // the prev* update below rather than firing on the following scan.
+            // Note this no longer forces Sol_B off for as long as Release is held
+            // -- with one-shot writes each press acts exactly once.
+            IF "DB_Manual".Btn_Cmd41_Release AND NOT #prevBtnCmd41Release THEN      // = CMD=41 Param=3
                 "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;
                 "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
-            ELSIF "DB_Manual".Btn_Cmd41_AtmoOff THEN         // = CMD=41 Param=2
+            ELSIF "DB_Manual".Btn_Cmd41_AtmoOff AND NOT #prevBtnCmd41AtmoOff THEN   // = CMD=41 Param=2
                 "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
-            ELSIF "DB_Manual".Btn_Cmd41_AtmoOn THEN          // = CMD=41 Param=1
+            ELSIF "DB_Manual".Btn_Cmd41_AtmoOn AND NOT #prevBtnCmd41AtmoOn THEN     // = CMD=41 Param=1
                 "DB_Cylinder_BackSupport".SolB_Cmd41  := TRUE;
                 "DB_Cylinder_BackSupport".SolAtmo_Cmd := TRUE;
             END_IF;
@@ -1859,12 +1923,12 @@ BEGIN
                 "DB_Manual".MDI_StatusText    := 'Executed';
                 "DB_Manual".MDI_StatusText_ES := 'Ejecutado';
                 CASE "DB_Manual".MDI_Cmd OF
-                    40: // BackSupport extend.
-                        // NOTE: unlike the recipe, MDI CMD=40 takes a Param so the
-                        // operator has a way to release the command:
-                        //   Param=1 -> extend, Param=0 -> release.
-                        // In a recipe the Param is ignored and the flag is cleared
-                        // at program end instead.
+                    40: // BackSupport extend -- same sequence as the recipe: assert
+                        // Cmd_Extend, hold it, auto-release at AtSetpoint (handled by
+                        // the sequencer above).
+                        //   Param=1 -> start the extend
+                        //   Param=0 -> abort/release early (MDI-only; the recipe ignores
+                        //              Param and relies on AtSetpoint alone)
                         IF "DB_Manual".MDI_Param = 1 THEN
                             #bMDI_Cmd40Extend := TRUE;
                         ELSIF "DB_Manual".MDI_Param = 0 THEN
@@ -1897,6 +1961,12 @@ BEGIN
                 END_CASE;
             END_IF;
             #prevMDIExec := "DB_Manual".Btn_MDI_Execute;
+            // CMD=41 button edge memory -- updated after BOTH the button block and
+            // the MDI block, so one press is consumed exactly once and the MDI
+            // write made this scan survives into the next one.
+            #prevBtnCmd41Release := "DB_Manual".Btn_Cmd41_Release;
+            #prevBtnCmd41AtmoOff := "DB_Manual".Btn_Cmd41_AtmoOff;
+            #prevBtnCmd41AtmoOn  := "DB_Manual".Btn_Cmd41_AtmoOn;
 
             IF NOT "DB_Manual".ManualModeActive THEN
                 // Clear manual contactor flags before returning to STOPPED
@@ -1914,6 +1984,11 @@ BEGIN
                 "DB_Manual".MDI_StatusText_ES  := '';
                 #prevMDIExec                   := FALSE;
                 #bMDI_Cmd40Extend              := FALSE;  // Do not carry the extend latch out of manual
+                // CMD=41 edge memory: seed (not clear) so a button still latched on
+                // the way out cannot fire when manual mode is next entered.
+                #prevBtnCmd41Release           := "DB_Manual".Btn_Cmd41_Release;
+                #prevBtnCmd41AtmoOff           := "DB_Manual".Btn_Cmd41_AtmoOff;
+                #prevBtnCmd41AtmoOn            := "DB_Manual".Btn_Cmd41_AtmoOn;
                 #State := 0;
             ELSIF #fbInputs.Cmd_Start AND #SafeToRun AND NOT "DB_HMI".Bypass_EStop THEN
                 // Bypass_EStop blocks transition to auto: must be cleared before running
@@ -2681,6 +2756,11 @@ BEGIN
             // Clear BackSupport extend (recipe CMD=40 or manual button/MDI) while faulted
             "DB_Cylinder_BackSupport".Cmd_Extend  := FALSE;
             #bMDI_Cmd40Extend                     := FALSE;
+            // CMD=41 edge memory: seed with the live button state while faulted, so a
+            // button held through the fault cannot fire a one-shot after acknowledge.
+            #prevBtnCmd41Release := "DB_Manual".Btn_Cmd41_Release;
+            #prevBtnCmd41AtmoOff := "DB_Manual".Btn_Cmd41_AtmoOff;
+            #prevBtnCmd41AtmoOn  := "DB_Manual".Btn_Cmd41_AtmoOn;
             // SheetHolder: clear extend command while in error so it does not hold on reset
             "DB_Cylinder_SheetHolder".Cmd_Extend  := FALSE;
             

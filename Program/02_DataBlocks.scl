@@ -594,7 +594,7 @@ NON_RETAIN
         MDI_Cmd             : Int;          // Command number to execute (40, 41, ...)
         MDI_Param           : Int;          // Command parameter (meaning depends on MDI_Cmd)
         Btn_MDI_Execute     : Bool;         // Rising edge: execute MDI_Cmd once
-        MDI_Status          : Int;          // 0=idle, 1=accepted, 2=unknown CMD, 3=invalid Param
+        MDI_Status          : Int;          // 0=idle, 1=accepted/done, 2=unknown CMD, 3=invalid Param, 4=cylinder error
         MDI_StatusText      : String[24];   // Result text (EN)
         MDI_StatusText_ES   : String[24];   // Result text (ES)
 

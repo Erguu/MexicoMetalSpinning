@@ -275,19 +275,39 @@ Manual-page equivalents of the recipe commands. **Active only while the machine 
 STATE_MANUAL (5)** — pressing them in any other state does nothing. All target flags are
 cleared automatically on returning to STOPPED or on ERROR.
 
-| HMI Object | PLC Address | Type | Recipe equivalent | Behavior |
-|------------|-------------|------|-------------------|----------|
-| **BackSupport Extend** | `DB_Manual.Btn_Cmd40_Extend` | Bool | CMD=40 | **Level** — hold to extend, release to stop |
-| **Atmo ON** | `DB_Manual.Btn_Cmd41_AtmoOn` | Bool | CMD=41 P1 | **Latching** — Sol_B override + atmosphere valve ON |
-| **Atmo OFF** | `DB_Manual.Btn_Cmd41_AtmoOff` | Bool | CMD=41 P2 | **Latching** — atmosphere valve OFF (Sol_B stays ON) |
-| **Release** | `DB_Manual.Btn_Cmd41_Release` | Bool | CMD=41 P3 | **Latching** — releases both overrides |
+**All four buttons must be configured MOMENTARY on the panel** — `SetBitWhileKeyPressed`,
+or Press → `SetBit` / Release → `ResetBit`. Never toggle/latching. A latching bit is a
+continuous writer: it re-asserts its value every PLC scan and overwrites anything else
+touching the same flag (this is what broke the MDI before 2026-08-01, see below).
 
-> Buttons are evaluated safest-first (`Release` > `Atmo OFF` > `Atmo ON`), so pressing two
-> at once can never leave `Sol_B` energised.
+| HMI Object | PLC Address | Type | Recipe equivalent | PLC reads it as | Effect |
+|------------|-------------|------|-------------------|-----------------|--------|
+| **BackSupport Extend** | `DB_Manual.Btn_Cmd40_Extend` | Bool | CMD=40 | **Level** — acts while TRUE | extend (%Q12.0 ON); release mid-stroke returns FB to idle |
+| **Atmo ON** — *relax* | `DB_Manual.Btn_Cmd41_AtmoOn` | Bool | CMD=41 P1 | **Rising edge** — once per press | %Q12.1 + %Q12.7 ON |
+| **Atmo OFF** — *retract* | `DB_Manual.Btn_Cmd41_AtmoOff` | Bool | CMD=41 P2 | **Rising edge** | %Q12.7 OFF (%Q12.1 stays ON) |
+| **Release** — *clear atmo* | `DB_Manual.Btn_Cmd41_Release` | Bool | CMD=41 P3 | **Rising edge** | %Q12.1 + %Q12.7 OFF |
+
+> **Edge, not level (changed 2026-08-01 — M1).** The three CMD=41 buttons now write on the
+> rising edge only, which is exactly what the recipe does (`FB_RecipeHandler` STATE_READ
+> writes once and never re-asserts). Before this change they were level-evaluated every
+> scan, so a latched button overwrote any later MDI CMD=41 one scan after it was issued —
+> the operator saw a ~20 ms click on the valve, no state change, and `MDI_Status = Executed`.
+> Pressing **Atmo ON → Atmo OFF → Atmo ON** now reproduces `P1 → P2 → P1`; with latched
+> buttons that sequence was impossible to express.
 >
-> After a completed extend the cylinder FB latches with `Sol_A` held (`PositioningMode=0`
-> design). Use the existing **Cyl Retract Full** button (`Btn_CylRetractFull`, with
-> `SelectedCylinder = 1`) to release it.
+> **Priority chain weakened.** The safest-first ELSIF order (`Release` > `Atmo OFF` >
+> `Atmo ON`) still decides which branch runs on a simultaneous press, but holding `Release`
+> no longer forces `Sol_B` off continuously — each press acts exactly once.
+>
+> **`Release` does not release the cylinder.** It clears the two CMD=41 overrides
+> (%Q12.1, %Q12.7). **%Q12.0 is not affected** — after a completed extend the cylinder FB
+> stays in state 3 and holds `Sol_A` energised (`PositioningMode=0` design, ITEM-41). The
+> only way to drop it today is the **Cyl Retract Full** button (`Btn_CylRetractFull`, with
+> `SelectedCylinder = 1`), released before `Timeout_Retract` = 10 s.
+>
+> ⚠️ `Btn_CylRetractFull` is a **level** bit and `FC_CylinderDispatch` runs in *every*
+> machine state (`08_Main_OB1.scl:325`) — left latched it will command a BackSupport
+> retract during an automatic program. Momentary only.
 
 ### Manual MDI — type a CMD + Param and execute (Input) — added 2026-07-30
 
@@ -303,17 +323,31 @@ PLC `CASE` branch only — **no HMI screen change**.
 
 **Supported commands:**
 
-| CMD | Param | Effect |
-|-----|-------|--------|
-| 40  | 1     | BackSupport extend |
-| 40  | 0     | Release extend command |
-| 41  | 1     | Sol_B override + atmosphere ON |
-| 41  | 2     | Atmosphere OFF (Sol_B stays ON) |
-| 41  | 3     | Release both overrides |
+Use these exact words on the manual screen — they are what the operator sees:
 
-> **CMD=40 differs from the recipe here.** In a recipe CMD=40's Param is ignored and the
-> flag is cleared at program end. Via MDI there is no program end, so Param 0/1 is used as
-> release/extend. CMD=41 is identical to the recipe in every respect.
+| CMD | Param | Screen label | Effect | Coils |
+|-----|-------|--------------|--------|-------|
+| 40  | 1     | **extend** | BackSupport extend — auto-releases at `AtSetpoint`, same as the recipe | %Q12.0 ON |
+| 40  | 0     | **abort extend** | Aborts an extend **in progress** (MDI-only) | %Q12.0 OFF, *only while extending* |
+| 41  | 1     | **relax** | Sol_B override + atmosphere ON | %Q12.1 + %Q12.7 ON |
+| 41  | 2     | **retract** | Atmosphere OFF (Sol_B stays ON) | %Q12.7 OFF, %Q12.1 stays ON |
+| 41  | 3     | **clear atmo** | Release both CMD=41 overrides | %Q12.1 + %Q12.7 OFF — **%Q12.0 unaffected** |
+
+> **Do not label `40 P0` "release" or `41 P3` "reset".** Both are narrower than they sound:
+> - `40 P0` only drops `Cmd_Extend`. Once the 1.5 s stroke has finished the FB is in state 3
+>   and P0 does **nothing at all** — %Q12.0 stays energised.
+> - `41 P3` clears the two CMD=41 overrides only. %Q12.0 is owned by the cylinder FB state
+>   machine, not by an override flag, and is untouched.
+>
+> **CMD=40 runs the same sequence as the recipe** (2026-07-31): `Cmd_Extend` is held every
+> scan and released automatically when the cylinder reports `AtSetpoint` — the exact
+> behaviour of `FB_RecipeHandler` states 70/71, *including* the recipe's own behaviour of
+> doing nothing when the FB is already in state 3 (`AtSetpoint` already TRUE → the latch is
+> consumed on the next scan and `Cmd_Extend` never asserts). That is not a defect in the MDI;
+> it is ITEM-41, and it affects the recipe identically. `Param=0` is an MDI-only early abort.
+>
+> **CMD=41 is identical to the recipe** as of 2026-08-01 (M1) — the manual buttons became
+> one-shot, so they no longer overwrite an MDI write on the following scan.
 >
 > Motion commands (CMD=0 / CMD=1) are **rejected by design** — use Move Absolute instead.
 
@@ -321,7 +355,7 @@ PLC `CASE` branch only — **no HMI screen change**.
 
 | HMI Object | PLC Address | Type | Description |
 |------------|-------------|------|-------------|
-| **MDI Status** | `DB_Manual.MDI_Status` | Int | 0=idle, 1=accepted, 2=unknown CMD, 3=invalid Param |
+| **MDI Status** | `DB_Manual.MDI_Status` | Int | 0=idle, 1=accepted/done, 2=unknown CMD, 3=invalid Param, 4=cylinder error |
 | **MDI Result** | `DB_Manual.MDI_StatusText` | String[24] | Result text (EN) |
 | **MDI Result (ES)** | `DB_Manual.MDI_StatusText_ES` | String[24] | Result text (ES) |
 

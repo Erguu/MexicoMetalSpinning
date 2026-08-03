@@ -786,11 +786,13 @@ empty when the operator went to check details.
 ## ITEM-41 — SAFETY: BackSupport 5/3 valve can have both solenoids energised simultaneously
 
 **Found:** 2026-07-30 (code review while adding CMD=41 Param=3) | **Status: OPEN — awaiting decision**
+**Revised 2026-08-01 — read "§ Revision 2026-08-01" at the bottom FIRST. The causal claim in
+"Effect" and "Confirmed on the machine 2026-07-31" below is retracted; the source-level facts stand.**
 
 ### Root cause
 
 BackSupport is `ValveType := 2` (5/3 blocked centre) + `PositioningMode := 0`
-(`02_DataBlocks.scl:757-758`). Two independent paths drive its solenoids and neither
+(`02_DataBlocks.scl:789-790`). Two independent paths drive its solenoids and neither
 knows about the other:
 
 1. `FB_CylinderControl` state 3 (AT SETPOINT) with `PositioningMode = 0` holds
@@ -830,3 +832,133 @@ dissipate heat continuously while held.
 
 Related: CMD=40's "5/3 blocked-center holds position" comment (`05:867`) is inaccurate
 for `PositioningMode=0` and should be corrected whichever option is chosen.
+
+### Confirmed on the machine 2026-07-31
+
+Reproduced live via the manual MDI: with `SolB_Cmd41` already latched, firing CMD=40 drives
+`Sol_A` and `Sol_B` together — **solenoids click audibly and the cylinder does not move**.
+The recipe path does not show it because state 71 releases `Cmd_Extend` at `AtSetpoint`
+before CMD=41 runs, so the stroke is already complete when `Sol_B` comes on.
+
+The MDI has since been changed to mirror states 70/71 (auto-release at `AtSetpoint`), which
+removes the manual route into the overlap. **The underlying hazard is unchanged**: the
+recipe order `CMD=40 → CMD=41 P1` still parks the FB in state 3 with `Sol_A` held while
+`Sol_B` is ORed on. This is no longer theoretical — it is observed behaviour on the machine.
+
+### Revised option analysis 2026-07-31 — do NOT apply option (i) as-is
+
+Verified from `09_Sensors_Actuators.scl:820-866`: the FB is internally mutually exclusive —
+states 1/2/3/4/5/7 and the `ELSE` each drive at most one solenoid. So any `AND NOT Sol_A`
+mask can only ever gate `SolB_Cmd41`; it can **never** suppress an FB-commanded retract.
+No risk to homing, stop sequences or `Cmd_Retract`.
+
+The risk is elsewhere. Mode 0 holds `Sol_A` in state 3 **indefinitely**, so option (i) would
+not briefly delay CMD=41 P1's `Sol_B` — it would suppress it for the whole rest of the
+program (nothing in the recipe leaves state 3). The vent solenoid %Q12.7 is a separate
+output and would still fire, so the loss would be silent. **This changes a sequence the
+customer reports as working.**
+
+Per `Wiring_Diagram.md:346,358` the valve is 5/3 blocked centre and "keeps the cylinder in
+place when both solenoids are off" — so both-coils-fighting and both-coils-off land in
+about the same spool position. That makes option **(ii)** the behaviour-preserving choice
+and option (i) the behaviour-changing one, the opposite of the original ranking. Needs a
+bench check: some valves do not centre with both pilots energised.
+
+**Better option, not in the table above:** state 3 tests `PositioningMode` before
+`ValveType`, so for this cylinder the `ValveType=2` branch (`Sol_A := FALSE`, "5/3 blocked:
+mechanical lock", `09:840`) is dead code. Holding `Sol_A` on a blocked-centre valve is
+redundant by design. Reversing that precedence for `ValveType=2` removes the overlap at
+source, makes CMD=41 P1 work as intended, and stops both coils dissipating heat — no output
+mask required.
+
+**Blocking question before any option is chosen:** what is `CMD=41 P1`'s `Sol_B` for
+physically? The DB comment ("hold Sol_B ON independently of the state machine") reads as
+deliberately commanding retract-side pressure while venting; if the real intent was only
+"block the valve and vent", `Sol_B` was never needed and the conflict is incidental. The
+answer determines which fix preserves current machine behaviour.
+
+---
+
+### § Revision 2026-08-01 — what is proven, what is retracted, what was fixed
+
+Re-verified line by line against the source. Correcting the record.
+
+#### RETRACTED: "both coils energised → spool stalls → cylinder cannot move"
+
+This was the causal claim in **Effect** and in **Confirmed on the machine 2026-07-31**, and it
+does not survive the machine's history. The user reports the machine ran correctly **for
+months** with `CMD=40` in the recipe. During all of that time `Sol_A` was latched (see below)
+and `CMD=41 P1` was ORing `Sol_B` on — so both coils were already energised, and `P2`
+retracted anyway. Both-coils-on is therefore **not** what stops the cylinder.
+
+The 2026-07-31 observation (solenoids click, cylinder does not move) is not disputed as an
+observation. Its explanation is. Do not treat it as evidence for any option below.
+
+#### STANDS: the source-level facts
+
+| # | Fact | Verified at |
+|---|------|-------------|
+| 1 | State 3 tests `PositioningMode` first, so for this cylinder `Sol_A := TRUE` unconditionally; the `ValveType=2` branch is unreachable | `09:832-842` |
+| 2 | State 3 exits only on `Cmd_Retract` / `Cmd_RetractFull` / `Cmd_ExtendFull` | `09:622-634` |
+| 3 | The **only** writer of those three for BackSupport is `FC_CylinderDispatch`, gated on `DB_Manual.SelectedCylinder = 1`. Neither FB_Process nor FB_RecipeHandler ever writes one | `09:944-946` + project-wide grep |
+| 4 | ⇒ %Q12.0 latches ON from the first completed `CMD=40` until E-Stop, power cycle, or the manual cylinder page. `Bypass_EStop` defeats the E-Stop route | `08:251` |
+| 5 | ⇒ **every `CMD=40` after the first does nothing, in auto as well as manual** — state 70 sets `Cmd_Extend`, state 71 sees `AtSetpoint` already TRUE and completes with no coil change | `05:851-874`, `09:898` |
+| 6 | `SolB_Cmd41` is ORed onto %Q12.1 downstream of the FB, which never sees it | `08:256-261` |
+
+Fact 5 is the practically important one and was not recorded before: the recipe's own `CMD=40`
+is a no-op after the first use. Any "make manual match the recipe" work reproduces this.
+
+#### CORRECTION to "Confirmed on the machine 2026-07-31"
+
+That section states the 2026-07-31 MDI auto-release change "removes the manual route into the
+overlap". It does not, and it changed nothing observable. `Sol_A` is held by **state 3 itself**,
+not by `Cmd_Extend` — so before and after that change, MDI `CMD=40` from state 3 produced zero
+motion and left %Q12.0 energised either way. The only thing that changed was the timing of the
+HMI status text. The MDI mirrors recipe states 70/71 faithfully, including this no-op.
+
+#### APPLIED 2026-08-01 — M1, manual CMD=41 buttons made one-shot
+
+Unrelated to the coil overlap; fixes a separate, real manual-mode bug found while auditing this
+item. The three CMD=41 buttons were level-evaluated every scan in STATE_MANUAL
+(`06:1863-1871`, old numbering), running **before** the MDI block. A latched button therefore
+overwrote any MDI CMD=41 one scan after it was issued — ~20 ms pulse on the valve, no state
+change, `MDI_Status = 'Executed'`. Now rising-edge, matching the recipe's single write in
+STATE_READ. Edge memory is **seeded** with the live button state in all four reset paths
+(hard reset, STATE_STOPPED, manual exit, STATE_ERROR) so a button held or latched at reset
+cannot fire a one-shot on entry. Requires momentary HMI buttons; see `HMI_Tag_Guide.md`.
+
+**M1 does not touch the latched %Q12.0** and will not, on its own, make the cylinder move.
+
+#### Status of the fix options
+
+Option (i) stays **not recommended**, for the reason already given at 2026-07-31 (it would
+suppress `CMD=41 P1`'s `Sol_B` for the whole program, silently). Option (ii)'s claim to be
+"behaviour-preserving" rested on the now-retracted stall theory and should be re-argued from
+scratch.
+
+The **"better option"** above — reversing the `PositioningMode` / `ValveType` precedence at
+`09:832-842` so a 5/3 blocked-centre valve drops both coils at rest — remains the only fix
+that addresses facts 1–5 at source, in auto and manual at once. It is one branch of one `IF`.
+It is also the only one that changes automatic behaviour, and per the retraction above the
+machine may be depending on the latched pressure without anyone realising.
+
+#### Blocking questions (both must be answered before choosing)
+
+1. **Does the back support take real axial force while the part is spun?** Today it is held by
+   live pressure; after the precedence fix it would be held by trapped air in a blocked centre —
+   rigid, but not actively pushed. If it is only a backing stop, there is no issue.
+2. The original `Sol_B` purpose question above, still unanswered.
+
+#### Stale references to correct whichever option is chosen
+
+- `02_DataBlocks.scl:757-758` in **Root cause** → actual location is `:789-790` (fixed above).
+- The "5/3 blocked-center holds position" comments are at `05_RecipeHandler.scl:859` and
+  `:873`, not `:867`. Both are inaccurate for `PositioningMode=0` — the hold is pressure, not
+  mechanical.
+
+#### Superseded working documents
+
+`Handover_BackSupport.md` and `Human_TODO.md` (root level) were **deleted 2026-08-01** — both
+predated this revision and carried the retracted stall theory. Everything in them that survived
+verification is recorded above. `Human_TODO_Backsupport.md` is the current operator-facing
+action list.

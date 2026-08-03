@@ -1,7 +1,7 @@
 # FB_Process State Machine Reference
 
 **Source file:** `Program/06_MainProcess.scl`
-**Last updated:** 2026-07-31 — **Bug fix 2 (bigger, same symptom):** `bResetRecipe` was only cleared in STATE_PRE_SCAN, so after power-up / any `Cmd_Reset` / any error acknowledge it stayed TRUE while the machine sat in STOPPED or MANUAL. FB_RecipeHandler is called every scan and its `IF #Reset THEN` block is level-triggered, so it re-cleared `BackSupport.Cmd_Extend` / `SolB_Cmd41` / `SolAtmo_Cmd` every scan — killing the manual CMD=40 **and** CMD=41 buttons and the MDI. Now self-cleared right after the `fbRecipeHandler` call (guarded on `activeProgram` 1..5). **Bug fix 1:** MDI `CMD=40` never moved the valve. The STATE_MANUAL button line `BackSupport.Cmd_Extend := Btn_Cmd40_Extend` runs every scan and overwrote the MDI's write on the following scan, so the cylinder FB saw a 1-scan pulse (Mode 0: state 0 → 1 → 0, `Sol_A` up for one scan). MDI CMD=40 now sets a new FB var `bMDI_Cmd40Extend` and the button line reads `Btn_Cmd40_Extend OR bMDI_Cmd40Extend`; the latch is cleared in `bDoHardReset`, STATE_STOPPED, STATE_ERROR and on manual exit. CMD=41 was unaffected (those flags are written only inside the button `IF` chain).
+**Last updated:** 2026-07-31 — **Bug fix 3:** MDI `CMD=40` now mirrors the recipe sequence (`FB_RecipeHandler` states 70/71) — `Cmd_Extend` held every scan, auto-released at `AtSetpoint` or on cylinder `Error` (`MDI_Status = 4`). It previously held `Cmd_Extend` until `Param=0`, leaving `Sol_A` latched; a following CMD=41 Param=1 then added `Sol_B` and both coils of the 5/3 valve were driven at once (ITEM-41) — valves click, cylinder stalls. **Bug fix 2 (same symptom, wider):** `bResetRecipe` was only cleared in STATE_PRE_SCAN, so after power-up / any `Cmd_Reset` / any error acknowledge it stayed TRUE while the machine sat in STOPPED or MANUAL. FB_RecipeHandler is called every scan and its `IF #Reset THEN` block is level-triggered, so it re-cleared `BackSupport.Cmd_Extend` / `SolB_Cmd41` / `SolAtmo_Cmd` every scan — killing the manual CMD=40 **and** CMD=41 buttons and the MDI. Now self-cleared right after the `fbRecipeHandler` call (guarded on `activeProgram` 1..5). **Bug fix 1:** MDI `CMD=40` never moved the valve. The STATE_MANUAL button line `BackSupport.Cmd_Extend := Btn_Cmd40_Extend` runs every scan and overwrote the MDI's write on the following scan, so the cylinder FB saw a 1-scan pulse (Mode 0: state 0 → 1 → 0, `Sol_A` up for one scan). MDI CMD=40 now sets a new FB var `bMDI_Cmd40Extend` and the button line reads `Btn_Cmd40_Extend OR bMDI_Cmd40Extend`; the latch is cleared in `bDoHardReset`, STATE_STOPPED, STATE_ERROR and on manual exit. CMD=41 was unaffected (those flags are written only inside the button `IF` chain).
 
 **Previously:** 2026-07-30 — Manual MDI added to STATE_MANUAL (5): `DB_Manual.MDI_Cmd` + `MDI_Param` executed on the rising edge of `Btn_MDI_Execute` (new FB var `prevMDIExec`, cleared in `bDoHardReset` and on manual exit); result in `MDI_Status`/`MDI_StatusText`/`_ES`. Accepts CMD=40 (Param 1/0 = extend/release) and CMD=41 (Param 1/2/3); motion commands rejected by design. Same session — Manual CMD=40 / CMD=41 buttons added to STATE_MANUAL (5): `DB_Manual.Btn_Cmd40_Extend` / `Btn_Cmd41_AtmoOn` / `Btn_Cmd41_AtmoOff` / `Btn_Cmd41_Release` write the same BackSupport flags as the matching recipe lines, and are written only in that state. `BackSupport.Cmd_Extend` is now also cleared in STATE_STOPPED (0) and STATE_ERROR (999). Recipe side gained CMD=41 Param=3 (release both overrides).
 
@@ -238,17 +238,31 @@ fired on the **rising edge** of `Btn_MDI_Execute` (edge var `prevMDIExec`, clear
 
 | CMD | Param | Effect |
 |-----|-------|--------|
-| 40 | 1 / 0 | BackSupport extend / release |
+| 40 | 1 | BackSupport extend — held, then auto-released at `AtSetpoint` (recipe states 70/71) |
+| 40 | 0 | Abort/release the extend early (MDI-only) |
 | 41 | 1 / 2 / 3 | Same as recipe CMD=41 P1 / P2 / P3 |
 | anything else | — | Rejected, `MDI_Status = 2`, nothing written |
+
+`MDI_Status`: 0=idle, 1=accepted/done, 2=unknown CMD, 3=invalid Param, 4=cylinder error.
 
 - **To add a future CMD:** add a branch to the `CASE "DB_Manual".MDI_Cmd` block in this
   state. No new DB field, no HMI change.
 - **Motion commands (CMD=0/1) are rejected by design** — they need feedrate handling and
   the full soft-limit/motion path. `Btn_MoveAbsolute` covers manual positioning.
-- **CMD=40 Param is an MDI-only extension.** In a recipe the Param is ignored and the flag
-  is cleared at program end; via MDI there is no program end, so Param 0/1 gives the
-  operator a release. CMD=41 is identical to the recipe.
+- **CMD=40 runs the recipe's sequence (2026-07-31).** `bMDI_Cmd40Extend` holds `Cmd_Extend`
+  every scan and drops it the scan `BackSupport.AtSetpoint` goes TRUE, or on cylinder
+  `Error` (`MDI_Status = 4`) — the same release points as `FB_RecipeHandler` states 70/71.
+  The sequencer runs *before* the `Cmd_Extend` assignment so the release lands in the same
+  scan, exactly as state 71 does. `Param=0` stays as an MDI-only early abort.
+  **Why it was changed:** holding `Cmd_Extend` until `Param=0` parked FB_CylinderControl in
+  state 3, which with `PositioningMode=0` keeps `Sol_A` energised indefinitely
+  (`09_Sensors_Actuators.scl:833-835`). A later CMD=41 Param=1 ORs `Sol_B` onto the output
+  (`08_Main_OB1.scl:259`), so both coils of the 5/3 valve were driven at once — solenoids
+  audibly click, spool stalls, cylinder does not move (**ITEM-41**). The recipe never
+  exposed this because state 71 releases `Cmd_Extend` at `AtSetpoint` before CMD=41 runs.
+  Note `PositioningMode=0` has no position feedback: `AtSetpoint` is the `Timeout_Extend`
+  expiry, not a sensor, so it reports done whether or not the rod actually moved.
+- CMD=41 is identical to the recipe.
 - **CMD=40 goes through the `bMDI_Cmd40Extend` latch, not `Cmd_Extend` directly** (fixed
   2026-07-31). The button line above re-evaluates
   `BackSupport.Cmd_Extend := Btn_Cmd40_Extend OR bMDI_Cmd40Extend` **every scan**, so an
