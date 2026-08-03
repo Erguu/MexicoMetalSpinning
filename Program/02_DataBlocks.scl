@@ -178,9 +178,9 @@ NON_RETAIN
         // These values are NOT overwritten by FC_LoadConfig.
         // Can be changed from HMI Setup screen; preserved on PLC restart.
         // =====================================================================
-        SoftLimit_MinX : Real := -10.0;     // X minimum (home=0)
+        SoftLimit_MinX : Real := -30.0;     // X minimum (home=0)
         SoftLimit_MaxX : Real := 500.0;   // X maximum travel (mm)
-        SoftLimit_MinZ : Real := -10.0;  // Z minimum (negative = mandrel front / clearance)
+        SoftLimit_MinZ : Real := -50.0;  // Z minimum (negative = mandrel front / clearance)
         SoftLimit_MaxZ : Real := 500.0;   // Z maximum (forming depth)
 
         // HMI-EDITABLE: Safe Positions (mm)
@@ -200,8 +200,8 @@ NON_RETAIN
         // Targets are clamped to SoftLimit_Min/Max before any move is issued.
         //
         // Deliberately NOT written by FC_LoadConfig, so OB100 does not fight the HMI.
-        SheetLoadPos_X : Real := 0.0;    // Sheet-load park X target (mm)
-        SheetLoadPos_Z : Real := 0.0;    // Sheet-load park Z target (mm)
+        SheetLoadPos_X : Real := 200.0;    // Sheet-load park X target (mm)
+        SheetLoadPos_Z : Real := 170.0;    // Sheet-load park Z target (mm)
         SheetLoadTol   : Real := 2.0;    // +/- window counted as "at the park position" (mm)
 
         // HMI-EDITABLE: Pause Retract (mm / mm/s)

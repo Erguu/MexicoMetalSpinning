@@ -209,7 +209,7 @@ BEGIN
     //  MinVelocity   : Must match "Minimum velocity" in TO
     // =========================================================================
     "DB_MachineConfig".MaxVelocity        := 40.0;   // mm/s -- match TO max velocity
-    "DB_MachineConfig".RapidVelocity      := 30.0;   // mm/s -- G0 (rapid move) speed
+    "DB_MachineConfig".RapidVelocity      := 40.0;   // mm/s -- G0 (rapid move) speed
     "DB_MachineConfig".MinVelocity        := 0.001;    // mm/s -- match TO min velocity
     "DB_MachineConfig".FeedrateConvFactor := 60.0;    // divisor: recipe F (mm/min) / this = axis velocity (mm/s)
                                                       // Standard mm/min→mm/s = divide by 60; adjust if TO uses different units

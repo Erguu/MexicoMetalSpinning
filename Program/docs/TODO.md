@@ -962,3 +962,85 @@ machine may be depending on the latched pressure without anyone realising.
 predated this revision and carried the retracted stall theory. Everything in them that survived
 verification is recorded above. `Human_TODO_Backsupport.md` is the current operator-facing
 action list.
+
+---
+
+## ITEM-42 — BUG (latent): STATE_PRE_HOME_CLR (13) cannot clear the PNP zone
+
+**Found:** 2026-08-03, while implementing the sheet-load park feature | **Status: OPEN — unverified on machine**
+
+**Pre-existing.** Not introduced by the sheet-load park change, which only moved the same target
+expression out of the `fbMoveX/Z_HomeClr` call into `#clrTargetX/Z`.
+
+### What state 13 is for
+
+Entered from STATE_STARTING only when an axis sits on its **min** proximity sensor **and** is
+un-homed — in practice, powering up (or faulting) with the axis parked at the home end. It is
+supposed to back the axis off the sensor at `HomeVelocity` (5 mm/s) so the homing seek can start.
+
+```pascal
+// 06_MainProcess.scl ~:2220
+bHomeClrX := HW_PNP_X_Min AND NOT Axis_X.StatusBits.HomingDone;
+bHomeClrZ := HW_PNP_Z_Min AND NOT Axis_Z.StatusBits.HomingDone;
+IF bHomeClrX OR bHomeClrZ THEN
+    clrTargetX  := HomeOffset_X + PostHome_Clearance;   // 0.0 + 0.0 = 0.0
+    clrTargetZ  := HomeOffset_Z + PostHome_Clearance;   // 0.0 + 0.0 = 0.0
+    clrVelocity := HomeVelocity;                        // 5 mm/s
+    State := STATE_PRE_HOME_CLR;
+```
+
+### Problem 1 — the target points the wrong way
+
+`HW_PNP_X_Min` is the sensor at the **home/minimum** end. Home is 0 and positive moves away from
+home, so escaping the sensor requires a **positive** move. The commanded target is
+`HomeOffset (0.0) + PostHome_Clearance (0.0)` = **0.0** — the home end itself. The move cannot
+clear the sensor.
+
+`DB_MachineConfig`'s own start value for `PostHome_Clearance` is `10.0`, which would work.
+`00_Configuration.scl:235` overwrites it with `0.0` on every OB100, which defeats the state.
+
+### Problem 2 — MC_MoveAbsolute on a deliberately un-homed axis
+
+The entry condition requires `NOT HomingDone`, then issues `MC_MoveAbsolute` via
+`FB_Axis_AbsPos`. S7-1200 Motion Control requires a referenced axis for absolute motion, so this
+is expected to return a TO error instead of moving → `ELSIF ... .Error` branch → `0x0001`
+"Pre-home clearance move failed - axis could not clear PNP zone".
+
+Confidence: high from the documentation, **not verified on hardware.**
+
+### Net effect
+
+State 13 most likely either does nothing or faults with `0x0001`. Because it is only reachable by
+powering up with an axis on a min PNP sensor, it may simply never have been exercised.
+
+Note the sheet-load park change made it *less* reachable, not more: the machine now parks at
+`SheetLoadPos` (currently 200/170), far from the min sensors, instead of at 0,0.
+
+### Reproduce (cheapest first step — do this before any code change)
+
+1. Jog X onto the min PNP sensor in MANUAL
+2. Power-cycle the PLC (so `HomingDone` clears)
+3. Press Start
+
+Error `0x0001` confirms Problem 2. No motion and no error suggests Problem 1 alone.
+
+### Suggested fix (not implemented)
+
+Relative motion needs no reference and a signed distance guarantees direction regardless of what
+the position readout says. `FB_Axis_RelPos` (`03_AxisControl.scl`) is documented for exactly this
+case — *"If relative motion is needed (no homing)"*.
+
+1. Set `PostHome_Clearance` to a positive value in `00_Configuration.scl:235` (e.g. `10.0`)
+2. Swap state 13's two moves from `FB_Axis_AbsPos` to `FB_Axis_RelPos` with `+PostHome_Clearance`
+
+Cost: two new FB instances (watch the S7-1214C work-memory budget — see
+`.claude/memory/project_plc_memory_budget.md`). State 16 is unaffected; it keeps
+`FB_Axis_AbsPos` and its `RapidVelocity` park move.
+
+### Related
+
+- `PostHome_Clearance` is otherwise bypassed since 2026-08-03 — state 16 targets `SheetLoadPos`
+  instead. State 13 is now its only remaining consumer.
+- `HomeVelocity` likewise: state 13 (via `clrVelocity`) plus FB_ManualMode's own `fbClearX/Z`
+  are its only users. It has never had any effect on the `MC_Home` seek speed, which comes from
+  the Technology Object and cannot be set from the PLC.
