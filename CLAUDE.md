@@ -38,6 +38,7 @@ Do not skip this step. Leaving these files out of sync causes future agents to m
 - **Recipes:** 5 programs × 200 lines × 12/5 bytes = 12 KB. Loaded as SCL DATA_BLOCK.
 - **Tool codes:** Recipe carries external numeric code (0–255 byte) in `CMD=10 Param`.
 - **Tool table (2026-07-21):** the code→slot mapping, `ToolCount`, and slot angles are **CAM-authored, carried in the recipe `Header`** (`ProvidesToolConfig`, `ToolCount`, `AutoCalcAngles`, `ToolCode_List[1..4]`, `ToolAngle_List[1..4]` — 1-based arrays). Applied by FB_Process in STATE_PRE_SCAN(12) into DB_ToolConfig/DB_MachineConfig **before** pre-scan, `ToolCount` clamped 1..4. **"Recipe always wins"**: HMI Apply is disabled, `DB_HMI.ToolSlotCode` is a read-only mirror. A recipe with `ProvidesToolConfig=FALSE` is rejected with **0x0311**. CAM post-processor spec: `CAM_TOOL_TABLE_HANDOVER.md`.
+- **Sheet-load park / fast cycle mode (2026-08-03):** homing no longer runs on every auto start. `DB_MachineConfig.SheetLoadPos_X/Z` (HMI-editable, clamped to soft limits, exposed in code as `parkTargetX/Z`) is **the one position the machine parks at for sheet loading** — target of STATE_POST_HOME_CLR(16) and STATE_STOPPING(18), and the reference for the STATE_STARTING(10) skip check (`SheetLoadTol`, default ±2 mm). `AlwaysHomeOnAutoStart` now defaults **FALSE** and is the HMI on/off switch for the feature. A new FB_Process latch **`bRequireHoming`** forces a full homing cycle after E-Stop, STATE_ERROR, hard reset and power-up; it is cleared *only* where a homing sequence completes and **can never be overridden by `AlwaysHomeOnAutoStart`**. Mirrored to `DB_Diagnostic.Require_Homing`. `PostHome_Clearance` is now bypassed (still used by the pre-homing PNP escape in state 13). CAM post-processors can drop the trailing `G0 X0 Z0` — the PLC parks the axes itself.
 - **Error priority (2026-07-02):** `DB_Error.Severity` tiers: 4=safety > 3=motion/TO > 2=project > 1=warning. FB_AlarmManager latch: a new error preempts the HMI display only if its tier is strictly higher; same/lower tier → history only. A TO fault poller in FB_Process (`<axis>.StatusBits.Error` → codes 0x0021–0x0024) guarantees TO errors reach the HMI.
 - **Single-writer rule (2026-07-02):** `DB_HMI.ErrorText/_ES` is written ONLY by the AlarmManager mirror, the ITEM-08 safety fallback, and the STATE_STOPPED clear (all in FB_Process). Error sites report a code (newErrorFlag or FC_ReportError) and write rich context to `ErrorDetail` only. Never add a direct ErrorText write.
 - **Soft limits (2026-07-02):** only enforced when the axis reports `StatusBits.HomingDone` — an un-homed axis never trips a soft limit (FB_LimitMonitor Homed_X/Z gating). In MANUAL, homed axes get directional jog gating + MoveAbsolute target rejection instead of faulting.
@@ -60,14 +61,14 @@ Do not skip this step. Leaving these files out of sync causes future agents to m
 |----------|------|-------------|
 | 0 | STOPPED | Idle |
 | 5 | MANUAL | Manual jog/home. Also handles the manual CMD=40/CMD=41 BackSupport buttons (`DB_Manual.Btn_Cmd40_Extend` / `Btn_Cmd41_AtmoOn` / `_AtmoOff` / `_Release`) and the manual **MDI** (`MDI_Cmd` + `MDI_Param` + `Btn_MDI_Execute`) — all written only in this state. To support a new CMD in manual, add a branch to the `CASE "DB_Manual".MDI_Cmd` block; no new DB field or HMI change needed |
-| 10 | STARTING | Drive enable + pre-checks |
+| 10 | STARTING | Drive enable + pre-checks, then a **three-way decision**: reference not trusted → HOMING (13/15); trusted but axes off the park position → POST_HOME_CLR (16) park move; trusted and already parked → straight to SHEET_WAIT (14). Never goes to LOCK_EXTEND_WAIT any more |
 | 12 | PRE_SCAN | Recipe validation |
 | 13 | PRE_HOME_CLR | Clearance move out of PNP zone before homing |
 | 14 | SHEET_WAIT | Sheet insertion: Ph1 SheetHolder extends + HMI prompt, waits both-button start; Ph2 MandrelLock extends T#5S; Ph3 SheetHolder retracts T#5S → LOCK_EXTEND_WAIT |
 | 15 | HOMING | Axis homing (X → Z → Tool) |
-| 16 | POST_HOME_CLR | Clearance move away from PNP zone after homing → exits to SHEET_WAIT |
+| 16 | POST_HOME_CLR | Park move to `SheetLoadPos_X/Z` at RapidVelocity → exits to SHEET_WAIT. Two entries: after HOMING, or from STARTING when the reference is trusted but the axes are parked elsewhere |
 | 17 | LOCK_EXTEND_WAIT | ToolHeadLock engaging (T#2S wait) before → RUNNING. `DB_HMI.Bypass_ToolHeadLock`=TRUE skips the sensor wait → RUNNING immediately (no 16#0012) |
-| 18 | STOPPING | Halt recipe; X and Z return to zero simultaneously (MC_MoveAbsolute, parallel); MandrelLock releases after spindle timer AND both axes done → LOCK_RETRACT_WAIT → STOPPED |
+| 18 | STOPPING | Halt recipe; X and Z park at `SheetLoadPos_X/Z` simultaneously (MC_MoveAbsolute, parallel — was hardcoded 0,0 before 2026-08-03); MandrelLock releases after spindle timer AND both axes done → LOCK_RETRACT_WAIT → STOPPED |
 | 19 | STOP_GOHOME | Home X → Z → Tool — legacy, no longer reached on normal stop path |
 | 20 | RUNNING | Recipe executing |
 | 21 | STOP_GOTOZERO | Move to zero post-stop |

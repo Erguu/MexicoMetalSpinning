@@ -228,10 +228,26 @@ BEGIN
     //  Writing here will always reset to the same value on restart.
     // =========================================================================
     "DB_Manual".HomingMode := 3;   // 0=Passive | 2=Active | 3=Active+Zero (recommended)
+    // PostHome_Clearance is BYPASSED as of the sheet-load park change: the post-homing
+    // move now targets SheetLoadPos_X/Z instead of HomeOffset + PostHome_Clearance.
+    // The parameter is kept (and still used by the PRE-homing PNP escape move in
+    // STATE_PRE_HOME_CLR) so the infrastructure survives if the behaviour is reverted.
     "DB_MachineConfig".PostHome_Clearance := 0.0;  // mm -- clearance distance from PNP zone after homing
     "DB_MachineConfig".HomeVelocity := 5.0;         // mm/s -- speed for pre/post-homing clearance move
                                                      // NOTE: MC_Home search speed comes from TO, PLC cannot change it
-    "DB_MachineConfig".AlwaysHomeOnAutoStart := TRUE; // Home all axes on every auto start (set FALSE for fast test cycles)
+
+    // Fast cycle mode. FALSE = skip the reference seek when the axis reference is
+    // trusted AND the axes are parked at SheetLoadPos (FB_Process STATE_STARTING).
+    // Written FALSE here so OB100 does not fight an operator toggling it on the HMI --
+    // the value the operator sets survives until the next power cycle. (DB_MachineConfig
+    // is not retentive: mark it Retain in TIA if the setting must survive a restart.)
+    // NEVER overrides FB_Process bRequireHoming: E-Stop / fault / power-up always re-home.
+    "DB_MachineConfig".AlwaysHomeOnAutoStart := FALSE;
+
+    // SheetLoadPos_X / SheetLoadPos_Z / SheetLoadTol are deliberately NOT written here.
+    // They are commissioning values owned by the HMI (Machine Limits screen); writing
+    // them on every OB100 would silently overwrite what the operator set.
+    // Start values live in DB_MachineConfig (02_DataBlocks.scl).
 
     // =========================================================================
     // SECTION 3 -- TOOL CHANGER

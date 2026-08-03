@@ -405,6 +405,38 @@ Status clears automatically when manual mode is left.
 | **Safe X** | `DB_MachineConfig.SafePos_X` | Real | 10.0 | Target X for "Go Safe" button |
 | **Safe Z** | `DB_MachineConfig.SafePos_Z` | Real | 10.0 | Target Z for "Go Safe" button |
 
+### Sheet-Load Park / Fast Cycle Mode (2026-08-03)
+
+`SheetLoadPos` is **the one position the machine parks at whenever it waits for the operator to
+load a sheet**: the axes are sent there at the end of every homing cycle, after a **Stop**, and
+whenever a run starts with the axes somewhere else. `AlwaysHomeOnAutoStart` turns the whole
+feature on and off.
+
+With fast cycle mode ON (`AlwaysHomeOnAutoStart = FALSE`), the homing seek runs only on the first
+cycle after power-up and after any fault — every later cycle goes straight to the sheet prompt.
+CAM post-processors can drop the trailing `G0 X0 Z0`; the PLC parks the axes itself.
+
+> ⚠️ **`SheetLoadPos` is safety-relevant.** This is where an operator reaches in to insert a sheet
+> and where the MandrelLock clamps. Set it only to a position where the tool head does not
+> obstruct loading. Commission conservatively (near 0,0) and walk it in while watching cycles.
+> Values are clamped to the soft limits before any move is issued.
+
+| HMI Object | PLC Address | Type | Factory Default | Description |
+|------------|-------------|------|-----------------|-------------|
+| **Sheet Load X** | `DB_MachineConfig.SheetLoadPos_X` | Real | 0.0 | Park X target for sheet loading (mm) |
+| **Sheet Load Z** | `DB_MachineConfig.SheetLoadPos_Z` | Real | 0.0 | Park Z target for sheet loading (mm) |
+| **Sheet Load Tol** | `DB_MachineConfig.SheetLoadTol` | Real | 2.0 | ± window counted as "already parked" (mm). Outside it, the PLC issues a park move — it never silently skips |
+| **Fast Cycle Mode** | `DB_MachineConfig.AlwaysHomeOnAutoStart` | Bool | FALSE | **Inverted meaning:** TRUE = home every cycle (legacy). FALSE = skip homing when safe. Show as a "Home every cycle" checkbox, or invert it in the HMI |
+| **Homing Required** (lamp) | `DB_Diagnostic.Require_Homing` | Bool | — | Read-only. TRUE = next start WILL home regardless of the switch (after E-Stop / fault / power-up). Use it to explain to the operator why a cycle homed |
+
+> **Precedence:** `AlwaysHomeOnAutoStart` can only ever cause *more* homing. It can never suppress
+> a required re-home — an E-Stop, a fault, a hard reset or a power-up always forces one.
+
+> **Persistence:** `DB_MachineConfig` is not retentive, so values typed on the HMI revert to their
+> start values on a power cycle (true of every HMI-editable field in this DB). Mark the DB as
+> Retain in TIA if these must survive a restart. Benign in practice for the mode switch: after a
+> power cycle the axes are un-homed anyway, so the first run always homes.
+
 ### Pause Retract (mm / mm/s)
 
 On **Pause**, X and Z jog by these signed offsets to pull the tool clear (spindle keeps running); on **Continue** they return to the exact interruption point before the recipe resumes. Targets are clamped to the soft limits, so a pause near home cannot fault. Offset `0` on an axis = that axis does not move on pause.

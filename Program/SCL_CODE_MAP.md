@@ -77,7 +77,9 @@ Param: Byte  — CMD=10: tool code | CMD=20: RPM/10 | CMD=30: time×100ms | CMD=
 | What you want to change | FC_LoadConfig section |
 |------------------------|-----------------------|
 | Axis max/min/rapid speed | Section 1: MaxVelocity, RapidVelocity, MinVelocity |
-| Homing mode or distance | Section 2: HomingMode, PostHome_Clearance |
+| Homing mode or distance | Section 2: HomingMode, PostHome_Clearance (bypassed — see SheetLoadPos) |
+| Fast cycle mode on/off | Section 2: AlwaysHomeOnAutoStart (default FALSE) |
+| Sheet-load park position | `02_DataBlocks.scl` DB_MachineConfig: SheetLoadPos_X/Z, SheetLoadTol (HMI-editable, not written by FC_LoadConfig) |
 | Tool slot count, auto angle | Section 3: ToolCount, AutoCalcAngles |
 | Spindle min/max/default RPM | Section 4: MinSpeed, MaxSpeed, DefaultSpeed |
 | Jog speed, step size | Section 5: JogSpeed, JogIncrement |
@@ -280,7 +282,12 @@ STATE 5    MANUAL               → FB_ManualMode active. Also handles the manua
                                    and the manual MDI (MDI_Cmd + MDI_Param + Btn_MDI_Execute),
                                    a generic CASE dispatcher for auxiliary CMDs; motion
                                    commands (CMD=0/1) are rejected by design
-STATE 10   STARTING             → Drive enable + pre-checks
+STATE 10   STARTING             → Drive enable + pre-checks, then a THREE-WAY decision:
+                                     bRefTrusted = all axes HomingDone AND NOT bRequireHoming
+                                     • NOT bRefTrusted OR AlwaysHomeOnAutoStart → 13/15 (home)
+                                     • bRefTrusted, axes > SheetLoadTol from parkTarget → 16 (park move)
+                                     • bRefTrusted, already parked                      → 14 (SHEET_WAIT, no motion)
+                                     Never exits to 17 any more (that skipped SHEET_WAIT entirely)
 STATE 12   PRE_SCAN             → Applies the active recipe's CAM-authored Header tool table
                                    (ToolCode_List/ToolCount/angles) into DB_ToolConfig+DB_MachineConfig,
                                    rejects with 0x0311 if Header.ProvidesToolConfig=FALSE, then FB_RecipePreScan runs
@@ -288,10 +295,12 @@ STATE 13   PRE_HOME_CLR         → Clearance move out of PNP zone before homing
 STATE 14   SHEET_WAIT           → Sheet insertion: Phase 1 shows HMI warning, waits Cmd_Start (both buttons);
                                    Phase 2 extends MandrelLock T#5S open-loop, then → LOCK_EXTEND_WAIT
 STATE 15   HOMING               → Reference seek (X → Z → Tool)
-STATE 16   POST_HOME_CLR        → Clearance move away from PNP zone after homing → exits to SHEET_WAIT
+STATE 16   POST_HOME_CLR        → Park move to SheetLoadPos_X/Z at RapidVelocity → exits to SHEET_WAIT.
+                                     Entered from HOMING (after reference seek) and from STARTING
+                                     (reference trusted, axes parked elsewhere)
 STATE 17   LOCK_EXTEND_WAIT     → ToolHeadLock engaging (AtSetpoint required) before → RUNNING
                                    DB_HMI.Bypass_ToolHeadLock=TRUE skips the sensor wait → RUNNING immediately (no 0x0012)
-STATE 18   STOPPING             → Halt recipe; X and Z return to zero simultaneously (MC_MoveAbsolute, parallel with spindle decel); MandrelLock releases when both done → LOCK_RETRACT_WAIT → STOPPED
+STATE 18   STOPPING             → Halt recipe; X and Z park at SheetLoadPos_X/Z simultaneously (MC_MoveAbsolute, parallel with spindle decel; hardcoded 0,0 before 2026-08-03); MandrelLock releases when both done → LOCK_RETRACT_WAIT → STOPPED
 STATE 19   STOP_GOHOME          → Home X → Z → Tool — legacy, no longer reached on normal stop path
 STATE 20   RUNNING              → FB_RecipeHandler running
 STATE 21   STOP_GOTOZERO        → Move axes to zero post-stop
@@ -303,6 +312,8 @@ STATE 35   TOOL_WAIT            → Waiting for FB_ToolChanger
 STATE 100  COMPLETE             → Program completed; triggers MandrelLock retract + clears CMD=41 flags
 STATE 999  ERROR                → Error, wait for AckError or Reset; clears CMD=41 flags
 ```
+
+**Fast cycle mode (2026-08-03):** `AlwaysHomeOnAutoStart` (DB_MachineConfig, default FALSE, HMI-editable) lets STATE_STARTING skip the homing seek when the reference is trusted. `SheetLoadPos_X/Z` is the single sheet-load park position — target of states 16 and 18, and the reference for the skip check (`SheetLoadTol`, ±2 mm). The `bRequireHoming` latch (set by E-Stop, STATE_ERROR, hard reset, power-up; cleared only where homing completes; mirrored to `DB_Diagnostic.Require_Homing`) always wins over the switch, so an E-Stop is always followed by a re-home even if the TO leaves `StatusBits.HomingDone` TRUE. Targets are clamped to the soft limits before reaching MC_MoveAbsolute.
 
 **Tool change skip:** In STATE_RUNNING, if `ToolReqNumber = CurrentTool`, the request is cleared immediately — no lock retract, no turret rotation, no lock re-extend. `CurrentTool` is set to 1 when homing completes (tool axis homes to slot 1), so a recipe starting with `CMD=10 Tool=1` is always a no-op after homing.
 
@@ -531,6 +542,9 @@ forcing the FB into State 2 (Sol_A=FALSE → spring retracts). The pulse self-cl
 | Axis max speed | `00_Configuration.scl` | FC_LoadConfig Section 1 |
 | Spindle min/max RPM | `00_Configuration.scl` | FC_LoadConfig Section 4 |
 | Homing mode (Passive/Active) | `00_Configuration.scl` | FC_LoadConfig Section 2 |
+| Fast cycle mode (skip homing) | `00_Configuration.scl` | FC_LoadConfig Section 2: AlwaysHomeOnAutoStart |
+| Sheet-load park position | `02_DataBlocks.scl` | DB_MachineConfig SheetLoadPos_X/Z + SheetLoadTol |
+| When homing is forced regardless | `06_MainProcess.scl` | FB_Process `bRequireHoming` latch (after the state CASE) |
 | Tool slot count | `00_Configuration.scl` | FC_LoadConfig Section 3 |
 | Jog speed / step size | `00_Configuration.scl` | FC_LoadConfig Section 5 |
 | Linear ruler calibration | `00_Configuration.scl` | FC_LoadConfig Section 6 |
