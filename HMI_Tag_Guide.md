@@ -214,6 +214,7 @@ For diagnostics screen — use DB_HMI_Errors.Err_* bool flags:
 | **Z Position** | `DB_Diagnostic.Axis_Z_Pos` | Real | Current Z in mm |
 | **X Homed** | `DB_Diagnostic.Axis_X_Homed` | Bool | X axis homing done |
 | **Z Homed** | `DB_Diagnostic.Axis_Z_Homed` | Bool | Z axis homing done |
+| **Homing Required** | `DB_Diagnostic.Require_Homing` | Bool | TRUE = next auto start **will** home regardless of `AlwaysHomeOnAutoStart` (set by E-Stop / fault / hard reset / power-up). Read-only. See MACHINE LIMITS SCREEN → Sheet-Load Park |
 | **X Enabled** | `DB_Diagnostic.Axis_X_Enabled` | Bool | X drive enabled |
 | **Z Enabled** | `DB_Diagnostic.Axis_Z_Enabled` | Bool | Z drive enabled |
 | **Move X Busy** | `DB_Diagnostic.MoveX_Busy` | Bool | X axis moving |
@@ -427,10 +428,11 @@ CAM post-processors can drop the trailing `G0 X0 Z0`; the PLC parks the axes its
 | **Sheet Load Z** | `DB_MachineConfig.SheetLoadPos_Z` | Real | 0.0 | Park Z target for sheet loading (mm) |
 | **Sheet Load Tol** | `DB_MachineConfig.SheetLoadTol` | Real | 2.0 | ± window counted as "already parked" (mm). Outside it, the PLC issues a park move — it never silently skips |
 | **Fast Cycle Mode** | `DB_MachineConfig.AlwaysHomeOnAutoStart` | Bool | FALSE | **Inverted meaning:** TRUE = home every cycle (legacy). FALSE = skip homing when safe. Show as a "Home every cycle" checkbox, or invert it in the HMI |
-| **Homing Required** (lamp) | `DB_Diagnostic.Require_Homing` | Bool | — | Read-only. TRUE = next start WILL home regardless of the switch (after E-Stop / fault / power-up). Use it to explain to the operator why a cycle homed |
 
 > **Precedence:** `AlwaysHomeOnAutoStart` can only ever cause *more* homing. It can never suppress
 > a required re-home — an E-Stop, a fault, a hard reset or a power-up always forces one.
+> The read-only lamp for that condition is `DB_Diagnostic.Require_Homing`, listed under
+> **AXIS STATUS** with the other `DB_Diagnostic` tags.
 
 > **Persistence:** `DB_MachineConfig` is not retentive, so values typed on the HMI revert to their
 > start values on a power cycle (true of every HMI-editable field in this DB). Mark the DB as
