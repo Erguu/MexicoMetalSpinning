@@ -962,3 +962,103 @@ machine may be depending on the latched pressure without anyone realising.
 predated this revision and carried the retracted stall theory. Everything in them that survived
 verification is recorded above. `Human_TODO_Backsupport.md` is the current operator-facing
 action list.
+
+
+---
+
+## ITEM-42 — Recipe LineCount out-of-range read ✓ CLOSED 2026-08-04
+
+**Was:** `STATE_PRE_SCAN(12)` accepted `Header.LineCount` up to 999 while `Lines` was
+`Array[0..349]`. A recipe header claiming 400+ lines read past the end of the array.
+
+**Closed by construction** by the load-memory recipe change: the array is now `Array[0..999]`
+(1000 lines) in both `DB_RecipeProgram*` and `DB_SelectedRecipe`, and the guard reads
+`LineCount <= 0 OR LineCount > 1000`. The guard and the array bound are stated together in the code
+comment — **keep them in step if the array size ever changes again.**
+
+See `Program/docs/LOADMEM_COPY_ON_SELECT.md`.
+
+---
+
+## ITEM-43 — CAM post-processor emits the wrong block access attribute  **OPEN (SpinningCam side)**
+
+**Found 2026-08-06, field commissioning.**
+
+`gcodes/DB_RecipeProgram1.scl` (generated 2026-08-06 20:26) contains:
+
+```
+{ S7_Optimized_Access := 'TRUE' }     // WRONG -- must be 'FALSE'
+UNLINKED                              // correct
+Lines : Array[0..999] of "RecipeLine" // correct
+```
+
+SpinningCam was updated for `UNLINKED` and the 1000-line array but **not** for the access
+attribute. `READ_DBL` requires source and destination to share a block access type, so an
+optimized recipe DB is refused at runtime. The generated file *replaces* the declaration in
+`02b_RecipePrograms.scl` when blocks are generated from it, so the correct declaration there does
+not protect you.
+
+- Fixed by hand in `gcodes/DB_RecipeProgram1.scl` 2026-08-06.
+- **Template fixed same day:** the SpinningCam re-export of 2026-08-06 21:49 carries
+  `S7_Optimized_Access := 'FALSE'` — the generator no longer emits the broken attribute. Verify the
+  checklist (`CAM_INTERFACE_SPEC.md`) once more on the next fresh part before calling this fully
+  closed.
+- Requirement and checklist already documented: `Program/docs/CAM_INTERFACE_SPEC.md` §checklist.
+
+### Stale exports — programs 2..5
+
+`gcodes/DB_RecipeProgram2..5.scl` are pre-branch exports (Jun–Jul 2026) and are **all three ways
+wrong**: `'TRUE'`, **no `UNLINKED`**, and still `Array[0..349]` against a 1000-line
+`DB_SelectedRecipe`. They must be re-exported from CAM before those program slots are used. The
+missing `UNLINKED` is the silent failure — those recipes would sit in work memory and quietly
+consume the ~17 KB this whole feature exists to reclaim.
+
+---
+
+## ITEM-44 — Whole-DB READ_DBL copy failed on the machine  ✓ FIXED 2026-08-06
+
+**Symptom:** cycle start completed with no error, `DB_SelectedRecipe.Header` fully correct
+(name, `LineCount`, tool table) and `DB_SelectedRecipe.Lines` **entirely zero**. `RET_VAL = 0`.
+
+**Cause:** `FB_RecipeLoader` copied the whole DB in one `READ_DBL` call
+(`SRCBLK := "DB_RecipeProgramN"`). At 1000 lines / ~12 KB that transfers the first member and
+abandons the second, without reporting an error.
+
+**Why the gate test missed it:** whole-DB mode was only ever run at 350 lines / 4.3 KB
+(`loadmem_gatetest/result.md`, mode 2). The 12 KB case was run in mode 1, the `.Lines`
+sub-reference. Production used the one combination no test covered.
+
+**Fix:** two sequential sub-reference transfers, `.Header` then `.Lines`, each in the form the gate
+test passed, plus a new `ErrorPhase` output (1 = Header, 2 = Lines) surfaced in
+`DB_Diagnostic.Error_Text`. See `Program/docs/LOADMEM_COPY_ON_SELECT.md` §7.2/§7.3.
+
+**VERIFIED ON HARDWARE 2026-08-06 — partially.** Extent of the actual test (operator note,
+2026-08-07): **only program 1 was tested, and only its start** — the loader completed both phases
+(`state=60`, `Done`, `LoadedProgram=1`, `ErrorCode=0`) and the machine began moving, at which point
+the run was cut short by the plant-air loss. "Fixed" is an inference from seeing movement, not a
+completed cycle. Not yet tested: a full run of any program, programs 2..10, and repeated
+re-selection. If a future session finds recipe trouble, do NOT assume the loader is proven —
+re-verify from the loader watch table first.
+
+**Which fix was decisive (operator testimony, same day):** the operator (a) changed
+`S7_Optimized_Access` to `'FALSE'` during commissioning **before** the two-phase loader was
+installed, and loads still failed — the attribute fix alone was NOT sufficient — and (b) confirmed
+the header data seen in the field was from that test's own copy attempt, **not** residue from an
+earlier test. Together these confirm the Cause paragraph above as written: the whole-DB `READ_DBL`
+at 1000 lines / ~12 KB genuinely does a **silent partial transfer** (first member copied, second
+abandoned, `RET_VAL = 0`), and the two-phase sub-reference rewrite was the decisive fix. Never
+revert to the whole-DB form. The stale-buffer masquerade remains a real *class* of hazard
+(`DB_SelectedRecipe` survives failed loads and delta downloads) even though it was not what happened
+here — the two guards stay: loader poisons the buffer header at latch (`ST_LATCH`), pre-scan
+enforces the CMD=99 END marker → `16#0313`. Neither failure class can be silent again.
+
+**Related session additions (2026-08-06):**
+- `16#0313` "Recipe data empty/corrupt - no END marker" (pre-scan guard, severity 2, EN+ES text in
+  FB_AlarmManager).
+- `02b_RecipePrograms.scl` header now carries a **DO NOT REGENERATE AFTER CAM IMPORT** warning — its
+  empty BEGIN blocks silently wipe all recipe data if generated over the CAM-imported blocks, and the
+  wipe is invisible online (UNLINKED).
+
+**Left for the next session:** acceptance part (test 3), G4 timing numbers, G6 work-memory
+measurement (the point of the branch), re-export programs 2..5. The 2026-08-06 test ended early on a
+plant-air loss (ToolHeadLock could not engage — pneumatic supply, not a code issue).

@@ -365,6 +365,10 @@ BEGIN
                          #ActiveErrorText_ES := 'Receta no cargada - revisar TotalLines';
                 16#0311: #ActiveErrorText := 'Recipe has no tool table - regenerate in CAM';
                          #ActiveErrorText_ES := 'Receta sin tabla de herramientas - regenerar en CAM';
+                16#0312: #ActiveErrorText := 'Recipe load from load memory failed';
+                         #ActiveErrorText_ES := 'Fallo al cargar la receta desde memoria de carga';
+                16#0313: #ActiveErrorText := 'Recipe data empty/corrupt - no END marker';
+                         #ActiveErrorText_ES := 'Datos de receta vacios/corruptos - falta marca de fin';
                 // Safety Errors
                 16#0401: #ActiveErrorText := 'EMERGENCY STOP ACTIVE!';
                          #ActiveErrorText_ES := 'PARO DE EMERGENCIA ACTIVO!';
@@ -425,8 +429,8 @@ BEGIN
             #ActiveSeverity := 3; #ActiveSource := 'Tool';      // tool motion faults (rotation fail/timeout)
         ELSIF #ActiveErrorCode >= 16#0200 AND #ActiveErrorCode < 16#0210 THEN
             #ActiveSeverity := 2; #ActiveSource := 'Tool';      // tool configuration (invalid/out of range)
-        ELSIF #ActiveErrorCode >= 16#0300 AND #ActiveErrorCode <= 16#0311 THEN
-            #ActiveSeverity := 2; #ActiveSource := 'Recipe';    // <= includes 16#0310, 16#0311
+        ELSIF #ActiveErrorCode >= 16#0300 AND #ActiveErrorCode <= 16#0313 THEN
+            #ActiveSeverity := 2; #ActiveSource := 'Recipe';    // <= includes 16#0310..16#0313
         ELSIF #ActiveErrorCode >= 16#0500 AND #ActiveErrorCode < 16#0510 THEN
             #ActiveSeverity := 3; #ActiveSource := 'Spindle';   // spindle motion faults
         ELSE
@@ -1079,9 +1083,13 @@ VERSION : 4.0
                Axis_Tool : TO_PositioningAxis; Axis_Spindle : TO_PositioningAxis; END_VAR
     VAR State : Int;
         
-        // Recipe handlers (one per program for flexibility)
+        // Recipe handlers -- all bound to "DB_SelectedRecipe", never to a
+        // DB_RecipeProgram* (those live in load memory; see fbRecipeLoader)
         fbRecipeHandler : "FB_RecipeHandler";
         fbPreScan : "FB_RecipePreScan";
+        // Load-memory recipe copy (2026-08-04): copies the selected
+        // DB_RecipeProgram* into DB_SelectedRecipe in STATE_RECIPE_LOAD(11)
+        fbRecipeLoader : "FB_RecipeLoader";
         
         // Support FBs
         fbToolChanger : "FB_ToolChanger";
@@ -1108,6 +1116,9 @@ VERSION : 4.0
         
         // Control flags
         bPreScanExec : Bool;
+        bRecipeLoadExec : Bool; // Level: TRUE only inside STATE_RECIPE_LOAD(11).
+                                // Drives fbRecipeLoader.Execute; the FB takes the
+                                // rising edge, so this must go FALSE between loads.
         bResetRecipe : Bool;    // One-shot flag to reset FB_RecipeHandler
         bStartSeq, bToolExecute, bPauseActive : Bool;
         // Pause resume spin-up: on Continue from PAUSED, spindle restarts and we wait
@@ -1227,6 +1238,10 @@ VERSION : 4.0
         STATE_STOPPED : Int := 0;
         STATE_MANUAL : Int := 5;
         STATE_STARTING : Int := 10;
+        // Copies the selected recipe out of load memory into DB_SelectedRecipe.
+        // Runs BEFORE the pre-scan -- the pre-scan is what reads the lines and
+        // applies the header tool table, so the buffer must be filled first.
+        STATE_RECIPE_LOAD : Int := 11;
         STATE_PRE_SCAN : Int := 12;
         STATE_PRE_HOME_CLR : Int := 13;      // Pre-homing clearance move out of PNP zone
         STATE_SHEET_WAIT   : Int := 14;      // Sheet insertion: Ph1=SheetHolder extends+prompt, Ph2=MandrelLock T#5S, Ph3=SheetHolder retract T#5S → LOCK_EXTEND_WAIT
@@ -1282,7 +1297,7 @@ BEGIN
     IF #State < STATE_STARTING OR #State >= STATE_ERROR THEN
         #activeProgram := "DB_HMI".ProductSelect;
         IF #activeProgram < 1 THEN #activeProgram := 1; END_IF;
-        IF #activeProgram > 5 THEN #activeProgram := 5; END_IF;
+        IF #activeProgram > 10 THEN #activeProgram := 10; END_IF;  // 10 recipes since 2026-08-04
     END_IF;
 
     // Tool-slot mapping is now CAM-authored: the active recipe Header supplies the
@@ -1290,7 +1305,7 @@ BEGIN
     // the HMI Apply path is intentionally disabled and DB_HMI.ToolSlotCode is a
     // read-only mirror of the active mapping for display only. #applyToolEdge is still
     // computed above (harmless) but no longer copies into DB_ToolConfig.
-    // (See TOOL_MAPPING_GUIDE.md and CAM_TOOL_TABLE_HANDOVER.md.)
+    // (See CAM_TOOL_TABLE_HANDOVER.md.)
     FOR #applyIndex := 1 TO 4 DO
         "DB_HMI".ToolSlotCode[#applyIndex] := "DB_ToolConfig".ToolCode_List[#applyIndex];
     END_FOR;
@@ -1311,7 +1326,8 @@ BEGIN
 
     // Drive power failure detection -- capture TO ErrorID and write to diagnostic
     // Checked every scan; alarm is raised only when a new error occurs (rising edge).
-    // STATE_PRE_SCAN(12) is treated like STATE_STOPPED(0): contactors are still open during
+    // STATE_RECIPE_LOAD(11) and STATE_PRE_SCAN(12) are treated like STATE_STOPPED(0):
+    // contactors are still open during the recipe copy and
     // pre-scan (closed only in STATE_STARTING), so a drive fault here is typically a latched
     // fault from a previous run or a transient after TO reset -- not a new startup failure.
     // The drive ready check (tonDriveReady) and MC_Home.Error in STATE_STARTING handle genuine
@@ -1324,7 +1340,8 @@ BEGIN
             #newErrorCode := 16#0009;
             "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
             "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
-            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN THEN
+            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN
+               AND #State <> STATE_RECIPE_LOAD THEN
                 #State := STATE_ERROR;
             END_IF;
         END_IF;
@@ -1341,7 +1358,8 @@ BEGIN
             #newErrorCode := 16#000A;
             "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
             "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
-            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN THEN
+            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN
+               AND #State <> STATE_RECIPE_LOAD THEN
                 #State := STATE_ERROR;
             END_IF;
         END_IF;
@@ -1358,7 +1376,8 @@ BEGIN
             #newErrorCode := 16#000D;
             "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
             "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
-            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN THEN
+            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN
+               AND #State <> STATE_RECIPE_LOAD THEN
                 #State := STATE_ERROR;
             END_IF;
         END_IF;
@@ -1385,7 +1404,8 @@ BEGIN
             "DB_Diagnostic".Error_Text := 'TO fault: X axis (StatusBits.Error) - check TO diagnostics';
             "DB_HMI".ErrorDetail    := 'X axis technology object fault - press Ack/Reset to clear';
             "DB_HMI".ErrorDetail_ES := 'Fallo de objeto tecnologico eje X - presionar Ack/Reset para borrar';
-            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN THEN
+            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN
+               AND #State <> STATE_RECIPE_LOAD THEN
                 #State := STATE_ERROR;
             END_IF;
         END_IF;
@@ -1400,7 +1420,8 @@ BEGIN
             "DB_Diagnostic".Error_Text := 'TO fault: Z axis (StatusBits.Error) - check TO diagnostics';
             "DB_HMI".ErrorDetail    := 'Z axis technology object fault - press Ack/Reset to clear';
             "DB_HMI".ErrorDetail_ES := 'Fallo de objeto tecnologico eje Z - presionar Ack/Reset para borrar';
-            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN THEN
+            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN
+               AND #State <> STATE_RECIPE_LOAD THEN
                 #State := STATE_ERROR;
             END_IF;
         END_IF;
@@ -1416,7 +1437,8 @@ BEGIN
             "DB_Diagnostic".Error_Text := 'TO fault: Tool axis (StatusBits.Error) - check TO diagnostics';
             "DB_HMI".ErrorDetail    := 'Tool axis technology object fault - press Ack/Reset to clear';
             "DB_HMI".ErrorDetail_ES := 'Fallo de objeto tecnologico eje herramienta - presionar Ack/Reset para borrar';
-            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN THEN
+            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN
+               AND #State <> STATE_RECIPE_LOAD THEN
                 #State := STATE_ERROR;
             END_IF;
         END_IF;
@@ -1434,7 +1456,8 @@ BEGIN
             "DB_Diagnostic".Error_Text := 'TO fault: Spindle (StatusBits.Error) - check TO diagnostics';
             "DB_HMI".ErrorDetail    := 'Spindle technology object fault - press Ack/Reset to clear';
             "DB_HMI".ErrorDetail_ES := 'Fallo de objeto tecnologico husillo - presionar Ack/Reset para borrar';
-            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN THEN
+            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN
+               AND #State <> STATE_RECIPE_LOAD THEN
                 #State := STATE_ERROR;
             END_IF;
         END_IF;
@@ -1461,13 +1484,15 @@ BEGIN
     // via directional jog gating + MoveAbsolute target rejection (never faults, so the
     // operator can always jog back into range).
     // STATE_PRE_SCAN(12) and STATE_STARTING(10) are bypassed because:
+    //   RECIPE_LOAD: pure data copy out of load memory, no motion at all.
     //   PRE_SCAN: pure software validation, no motion -- TO position may be stale from last run.
     //   STARTING: contactors just closing, drives not yet ready -- homing will establish real position.
     // HW limit switch faults are caught by TO → MC_Home.Error → handled in state machine.
     IF #State = STATE_HOMING OR #State = STATE_STOP_GOHOME
        OR #State = STATE_PRE_HOME_CLR OR #State = STATE_POST_HOME_CLR
        OR #State = STATE_MANUAL OR #State = STATE_PNP_HALT
-       OR #State = STATE_PRE_SCAN OR #State = STATE_STARTING THEN
+       OR #State = STATE_PRE_SCAN OR #State = STATE_STARTING
+       OR #State = STATE_RECIPE_LOAD THEN
         #SafeToRun := #fbSafetyMonitor.SafeToRun;   // Soft limit bypass
     ELSE
         #SafeToRun := #fbSafetyMonitor.SafeToRun AND NOT #fbLimitMonitor.LimitError;
@@ -1495,13 +1520,14 @@ BEGIN
     // travel outside the configured limits while seeking the reference switch.
     // STATE_MANUAL and STATE_PNP_HALT also bypassed: manual mode enforces soft limits via
     // directional jog gating + MoveAbsolute target rejection instead of faulting.
-    // STATE_PRE_SCAN(12) and STATE_STARTING(10) bypassed: TO position may be stale
+    // STATE_RECIPE_LOAD(11), STATE_PRE_SCAN(12) and STATE_STARTING(10) bypassed: TO position may be stale
     // from the previous run; firing here would abort startup for a position that was valid last run.
     IF #fbLimitMonitor.LimitError AND #fbLimitMonitor.ErrorCode <> 0
        AND #State <> STATE_HOMING AND #State <> STATE_STOP_GOHOME
        AND #State <> STATE_PRE_HOME_CLR AND #State <> STATE_POST_HOME_CLR
        AND #State <> STATE_MANUAL AND #State <> STATE_PNP_HALT
        AND #State <> STATE_PRE_SCAN AND #State <> STATE_STARTING
+       AND #State <> STATE_RECIPE_LOAD
        AND #State <> STATE_STOPPED AND #State <> STATE_ERROR THEN
         #newErrorFlag := TRUE;
         #newErrorCode := #fbLimitMonitor.ErrorCode;
@@ -1624,6 +1650,7 @@ BEGIN
         0:   "DB_HMI".StatusMsg := 'Stopped';                            "DB_HMI".StatusMsg_ES := 'Detenido';
         5:   "DB_HMI".StatusMsg := 'Manual Mode';                        "DB_HMI".StatusMsg_ES := 'Modo Manual';
         10:  "DB_HMI".StatusMsg := 'Starting...';                        "DB_HMI".StatusMsg_ES := 'Iniciando...';
+        11:  "DB_HMI".StatusMsg := 'Loading recipe...';                   "DB_HMI".StatusMsg_ES := 'Cargando receta...';
         12:  "DB_HMI".StatusMsg := 'Pre-scanning...';                    "DB_HMI".StatusMsg_ES := 'Verificando receta...';
         13:  "DB_HMI".StatusMsg := 'Clearing PNP zone...';               "DB_HMI".StatusMsg_ES := 'Liberando zona PNP...';
         14:  "DB_HMI".StatusMsg := 'Waiting for sheet...';               "DB_HMI".StatusMsg_ES := 'Esperando lamina...';
@@ -1729,6 +1756,10 @@ BEGIN
         "DB_HMI".ResumeLine := -1;
         #prevSafetyError := FALSE;
         #bResetRecipe                := TRUE;
+        #bRecipeLoadExec             := FALSE;  // drop READ_DBL REQ; fbRecipeLoader.Reset is
+                                                // driven from bDoHardReset at its call site,
+                                                // which also clears LoadedProgram -> forces a
+                                                // fresh copy before the next cycle
         #bSheetWaitPhase2            := FALSE;
         #bSheetWaitPhase3            := FALSE;
         IF NOT "DB_MachineConfig".Bypass_MandrelLock THEN
@@ -1759,6 +1790,7 @@ BEGIN
         // -----------------------------------------------------------------
         0: // STOPPED
             #StatusID := 0; #bStartSeq := FALSE; #bPreScanExec := FALSE;
+            #bRecipeLoadExec := FALSE;   // no recipe copy may stay in flight while idle
             // ITEM-34 FIX: clear only when no safety condition is blocking a start.
             // The ITEM-08 fallback (runs BEFORE this CASE) writes the door-open /
             // E-Stop / air-pressure hint into ErrorText when SafeToRun is FALSE;
@@ -1818,7 +1850,7 @@ BEGIN
                 // of RUNNING sees Done=TRUE and immediately reports "recipe complete".
                 // (STATE_COMPLETE already does this correctly before its own PRE_SCAN.)
                 #bResetRecipe := TRUE;
-                #State := STATE_PRE_SCAN;
+                #State := STATE_RECIPE_LOAD;   // load recipe out of load memory, then PRE_SCAN
             END_IF;
         
         // -----------------------------------------------------------------
@@ -1994,9 +2026,55 @@ BEGIN
                 // Bypass_EStop blocks transition to auto: must be cleared before running
                 "DB_Manual".ManualModeActive := FALSE;
                 #bResetRecipe := TRUE;  // Same as STATE_STOPPED Cmd_Start handler (see comment there)
-                #State := STATE_PRE_SCAN;
+                #State := STATE_RECIPE_LOAD;   // load recipe out of load memory, then PRE_SCAN
             END_IF;
         
+        // -----------------------------------------------------------------
+        // === STATE_RECIPE_LOAD (11) ===
+        // -----------------------------------------------------------------
+        // Copy the selected recipe out of LOAD memory into DB_SelectedRecipe
+        // before anything reads it. Entered from every path that used to go
+        // straight to PRE_SCAN: STOPPED Start, MANUAL Start, COMPLETE
+        // restart/Start, COMPLETE Reset.
+        //
+        // Why this must run EVERY cycle start and not be skipped when the same
+        // program is selected again: a recipe re-downloaded from CAM changes the
+        // load-memory contents while DB_SelectedRecipe still holds the old data.
+        // Skipping the copy would machine the previous geometry with no warning.
+        // The copy costs a fraction of a second, once, with the machine standing
+        // still -- do not "optimise" it away.
+        //
+        // The machine is stationary here (same as PRE_SCAN: contactors open,
+        // drives not yet enabled), so a few extra scans cost nothing.
+        // -----------------------------------------------------------------
+        11: // RECIPE LOAD - copy selected recipe from load memory
+            #StatusID := 11;
+            #bRecipeLoadExec := TRUE;   // level; FB takes the rising edge
+
+            IF #fbRecipeLoader.Error THEN
+                // READ_DBL refused the transfer, or it never completed.
+                #bRecipeLoadExec := FALSE;
+                #newErrorFlag := TRUE;
+                #newErrorCode := 16#0312;   // Recipe load from load memory failed
+                // Same pattern as the 16#0310 / 16#0311 sites next door: context goes
+                // to DB_Diagnostic.Error_Text, never to DB_HMI.ErrorText (single-writer
+                // rule). 16#FFFF here means the watchdog fired, not a READ_DBL code.
+                // ErrorPhase (1 = Header, 2 = Lines) says WHICH of the two
+                // transfers failed -- the 2026-08-06 field fault was a silent
+                // Lines failure, so this must stay visible.
+                "DB_Diagnostic".Error_Text := CONCAT(
+                    IN1 := CONCAT(IN1 := 'Recipe load failed, phase ',
+                                  IN2 := INT_TO_STRING(#fbRecipeLoader.ErrorPhase)),
+                    IN2 := CONCAT(IN1 := ' (1=Header 2=Lines), RET_VAL=',
+                                  IN2 := INT_TO_STRING(WORD_TO_INT(#fbRecipeLoader.ErrorCode))));
+                #State := STATE_ERROR;
+
+            ELSIF #fbRecipeLoader.Done THEN
+                #bRecipeLoadExec := FALSE;
+                "DB_Diagnostic".Recipe_LoadedProgram := #fbRecipeLoader.LoadedProgram;
+                #State := STATE_PRE_SCAN;
+            END_IF;
+
         // -----------------------------------------------------------------
         // === STATE_PRE_SCAN (12) ===
         // -----------------------------------------------------------------
@@ -2007,49 +2085,48 @@ BEGIN
             // fbRecipeHandler call each scan); kept as a belt-and-braces clear.
             #bResetRecipe := FALSE;
             
-            // Line count + tool table read from the active recipe DB Header
-            // (both written by the CAM post-processor -- see CAM_TOOL_TABLE_HANDOVER.md)
-            CASE #activeProgram OF
-                1: #activeLineCount    := "DB_RecipeProgram1".Header.LineCount;
-                   #hdrProvidesToolCfg := "DB_RecipeProgram1".Header.ProvidesToolConfig;
-                   #hdrToolCount       := "DB_RecipeProgram1".Header.ToolCount;
-                   #hdrAutoCalc        := "DB_RecipeProgram1".Header.AutoCalcAngles;
-                   #hdrToolCodes       := "DB_RecipeProgram1".Header.ToolCode_List;
-                   #hdrToolAngles      := "DB_RecipeProgram1".Header.ToolAngle_List;
-                2: #activeLineCount    := "DB_RecipeProgram2".Header.LineCount;
-                   #hdrProvidesToolCfg := "DB_RecipeProgram2".Header.ProvidesToolConfig;
-                   #hdrToolCount       := "DB_RecipeProgram2".Header.ToolCount;
-                   #hdrAutoCalc        := "DB_RecipeProgram2".Header.AutoCalcAngles;
-                   #hdrToolCodes       := "DB_RecipeProgram2".Header.ToolCode_List;
-                   #hdrToolAngles      := "DB_RecipeProgram2".Header.ToolAngle_List;
-                3: #activeLineCount    := "DB_RecipeProgram3".Header.LineCount;
-                   #hdrProvidesToolCfg := "DB_RecipeProgram3".Header.ProvidesToolConfig;
-                   #hdrToolCount       := "DB_RecipeProgram3".Header.ToolCount;
-                   #hdrAutoCalc        := "DB_RecipeProgram3".Header.AutoCalcAngles;
-                   #hdrToolCodes       := "DB_RecipeProgram3".Header.ToolCode_List;
-                   #hdrToolAngles      := "DB_RecipeProgram3".Header.ToolAngle_List;
-                4: #activeLineCount    := "DB_RecipeProgram4".Header.LineCount;
-                   #hdrProvidesToolCfg := "DB_RecipeProgram4".Header.ProvidesToolConfig;
-                   #hdrToolCount       := "DB_RecipeProgram4".Header.ToolCount;
-                   #hdrAutoCalc        := "DB_RecipeProgram4".Header.AutoCalcAngles;
-                   #hdrToolCodes       := "DB_RecipeProgram4".Header.ToolCode_List;
-                   #hdrToolAngles      := "DB_RecipeProgram4".Header.ToolAngle_List;
-                5: #activeLineCount    := "DB_RecipeProgram5".Header.LineCount;
-                   #hdrProvidesToolCfg := "DB_RecipeProgram5".Header.ProvidesToolConfig;
-                   #hdrToolCount       := "DB_RecipeProgram5".Header.ToolCount;
-                   #hdrAutoCalc        := "DB_RecipeProgram5".Header.AutoCalcAngles;
-                   #hdrToolCodes       := "DB_RecipeProgram5".Header.ToolCode_List;
-                   #hdrToolAngles      := "DB_RecipeProgram5".Header.ToolAngle_List;
-            END_CASE;
+            // Line count + tool table read from the recipe buffer's Header
+            // (both written by the CAM post-processor -- see CAM_TOOL_TABLE_HANDOVER.md).
+            // 2026-08-04: was a five-way CASE over DB_RecipeProgram1..5. Those now
+            // live in load memory and cannot be read directly; STATE_RECIPE_LOAD(11)
+            // has already copied the selected one into DB_SelectedRecipe.
+            #activeLineCount    := "DB_SelectedRecipe".Header.LineCount;
+            #hdrProvidesToolCfg := "DB_SelectedRecipe".Header.ProvidesToolConfig;
+            #hdrToolCount       := "DB_SelectedRecipe".Header.ToolCount;
+            #hdrAutoCalc        := "DB_SelectedRecipe".Header.AutoCalcAngles;
+            #hdrToolCodes       := "DB_SelectedRecipe".Header.ToolCode_List;
+            #hdrToolAngles      := "DB_SelectedRecipe".Header.ToolAngle_List;
 
-            // Validate: 0 = recipe not loaded (Header not written yet); >999 = impossible
-            IF #activeLineCount <= 0 OR #activeLineCount > 999 THEN
+            // Validate: 0 = recipe not loaded (Header not written yet).
+            // Upper bound is now the ACTUAL array size -- this used to accept up to
+            // 999 against an Array[0..349], so a header claiming 400+ lines read past
+            // the end of the array. Closed by construction: the guard and the array
+            // are both 1000 now. Keep them in step if the array size ever changes.
+            IF #activeLineCount <= 0 OR #activeLineCount > 1000 THEN
                 #newErrorFlag := TRUE;     // BUG FIX: was missing -- alarm manager never latched 16#0310,
                                            // so HMI showed ERROR state with empty text and no history entry
                 #newErrorCode := 16#0310;  // Recipe: invalid line count (not loaded?)
                 #bPreScanExec := FALSE;    // Do not start a scan on garbage LineCount
                 "DB_Diagnostic".Error_Text := 'Recipe not loaded: Header.LineCount invalid';
                 // Single-writer: HMI text comes from FB_AlarmManager (CASE 16#0310)
+                #State := STATE_ERROR;
+
+            // END-MARKER GUARD (2026-08-06, added after the field fault where the
+            // Lines array arrived all zero while the Header was plausible). The
+            // recipe format REQUIRES the last line to be CMD=99 (PROGRAM_END --
+            // PLC_Recipe_Format_Spec.md, CMD table + template line N-1), and the
+            // CAM post-processor always emits it. A buffer whose header claims N
+            // lines but whose line N-1 is not 99 is empty or corrupt -- catching
+            // it here stops the machine from "running" a program of zero-moves.
+            ELSIF "DB_SelectedRecipe".Lines[#activeLineCount - 1].CMD <> 99 THEN
+                #newErrorFlag := TRUE;
+                #newErrorCode := 16#0313;  // Recipe buffer corrupt: no END marker
+                #bPreScanExec := FALSE;
+                "DB_Diagnostic".Error_Text := CONCAT(
+                    IN1 := 'Recipe buffer corrupt: Lines empty or truncated, last CMD=',
+                    IN2 := INT_TO_STRING(BYTE_TO_INT(
+                        "DB_SelectedRecipe".Lines[#activeLineCount - 1].CMD)));
+                // Single-writer: HMI text comes from FB_AlarmManager (CASE 16#0313)
                 #State := STATE_ERROR;
             END_IF;
 
@@ -2748,6 +2825,7 @@ BEGIN
         // -----------------------------------------------------------------
         999: // ERROR
             #StatusID := 99; #bStartSeq := FALSE; #Error := TRUE;
+            #bRecipeLoadExec := FALSE;   // a recipe copy must not stay in flight across an error ack
             #timerRunning := FALSE;  // Stop cycle timer
             #bResumeSpeedup := FALSE;  // Cancel any pending pause spin-up wait (e.g. fault during spin-up)
             // Clear CMD=41 BackSupport overrides — valves de-energise on error
@@ -2868,10 +2946,10 @@ BEGIN
         END_IF;
         IF #fbInputs.Cmd_Start OR #restartEdge THEN
             #bResetRecipe := TRUE;      // Reset FB_RecipeHandler (state 99→0) before re-run
-            #State := STATE_PRE_SCAN;   // Restart/Start = immediate re-run, keeps drives on
+            #State := STATE_RECIPE_LOAD; // Restart/Start = immediate re-run, keeps drives on
         ELSIF #fbInputs.Cmd_Reset THEN
             #bResetRecipe := TRUE;      // Also reset recipe handler on manual reset
-            #State := STATE_PRE_SCAN;   // Reset from COMPLETE goes to PRE_SCAN (drives stay on)
+            #State := STATE_RECIPE_LOAD; // Reset from COMPLETE re-loads then pre-scans (drives stay on)
         END_IF;
     END_IF;
     
@@ -3037,53 +3115,28 @@ BEGIN
     // DONE(99) -> IDLE(0) and rearms its rising-edge start for the next run.
     // (BUG FIX: previously called only inside STATE_PRE_SCAN with Execute held
     // TRUE, so validation only ever ran on the first cycle after power-up.)
-    CASE #activeProgram OF
-        1: #fbRecipeHandler(Start := #bStartSeq, Stop := #fbInputs.Cmd_Stop,
-                            Pause := #bPauseActive, Reset := #fbInputs.Cmd_Reset OR #bResetRecipe,
-                            bStartEdge := #fbInputs.Cmd_Start,
-                            StartLine := MAX(IN1:= INT#0, IN2:= #savedLineIndex),
-                            LineCount := #activeLineCount,
-                            Lines := "DB_RecipeProgram1".Lines,
-                            Axis_X := #Axis_X, Axis_Z := #Axis_Z);
-           #fbPreScan(Execute := #bPreScanExec, LineCount := #activeLineCount,
-                      Lines := "DB_RecipeProgram1".Lines);
-        2: #fbRecipeHandler(Start := #bStartSeq, Stop := #fbInputs.Cmd_Stop,
-                            Pause := #bPauseActive, Reset := #fbInputs.Cmd_Reset OR #bResetRecipe,
-                            bStartEdge := #fbInputs.Cmd_Start,
-                            StartLine := MAX(IN1:= INT#0,IN2:= #savedLineIndex),
-                            LineCount := #activeLineCount,
-                            Lines := "DB_RecipeProgram2".Lines,
-                            Axis_X := #Axis_X, Axis_Z := #Axis_Z);
-           #fbPreScan(Execute := #bPreScanExec, LineCount := #activeLineCount,
-                      Lines := "DB_RecipeProgram2".Lines);
-        3: #fbRecipeHandler(Start := #bStartSeq, Stop := #fbInputs.Cmd_Stop,
-                            Pause := #bPauseActive, Reset := #fbInputs.Cmd_Reset OR #bResetRecipe,
-                            bStartEdge := #fbInputs.Cmd_Start,
-                            StartLine := MAX(IN1:= INT#0,IN2:= #savedLineIndex),
-                            LineCount := #activeLineCount,
-                            Lines := "DB_RecipeProgram3".Lines,
-                            Axis_X := #Axis_X, Axis_Z := #Axis_Z);
-           #fbPreScan(Execute := #bPreScanExec, LineCount := #activeLineCount,
-                      Lines := "DB_RecipeProgram3".Lines);
-        4: #fbRecipeHandler(Start := #bStartSeq, Stop := #fbInputs.Cmd_Stop,
-                            Pause := #bPauseActive, Reset := #fbInputs.Cmd_Reset OR #bResetRecipe,
-                            bStartEdge := #fbInputs.Cmd_Start,
-                            StartLine := MAX(IN1:= INT#0,IN2:= #savedLineIndex),
-                            LineCount := #activeLineCount,
-                            Lines := "DB_RecipeProgram4".Lines,
-                            Axis_X := #Axis_X, Axis_Z := #Axis_Z);
-           #fbPreScan(Execute := #bPreScanExec, LineCount := #activeLineCount,
-                      Lines := "DB_RecipeProgram4".Lines);
-        5: #fbRecipeHandler(Start := #bStartSeq, Stop := #fbInputs.Cmd_Stop,
-                            Pause := #bPauseActive, Reset := #fbInputs.Cmd_Reset OR #bResetRecipe,
-                            bStartEdge := #fbInputs.Cmd_Start,
-                            StartLine := MAX(IN1:= INT#0,IN2:= #savedLineIndex),
-                            LineCount := #activeLineCount,
-                            Lines := "DB_RecipeProgram5".Lines,
-                            Axis_X := #Axis_X, Axis_Z := #Axis_Z);
-           #fbPreScan(Execute := #bPreScanExec, LineCount := #activeLineCount,
-                      Lines := "DB_RecipeProgram5".Lines);
-    END_CASE;
+    // 2026-08-04: was a five-way CASE binding DB_RecipeProgram1..5. Those DBs
+    // now live in load memory and cannot be passed as an InOut reference at all.
+    // Both FBs bind unconditionally to DB_SelectedRecipe, which STATE_RECIPE_LOAD(11)
+    // fills before the pre-scan runs. One call site, no per-program duplication.
+    // Reset wiring mirrors fbRecipeHandler below. NOTE: bDoHardReset must NOT be
+    // used here -- the hard-reset block clears it earlier in this same scan, so it
+    // is always FALSE by the time we get here. bResetRecipe is the one-shot with
+    // the right lifecycle: set by the hard reset AND by every start path, consumed
+    // here, cleared a few lines further down.
+    #fbRecipeLoader(Execute   := #bRecipeLoadExec,
+                    ProgramNo := #activeProgram,
+                    Reset     := #fbInputs.Cmd_Reset OR #bResetRecipe);
+
+    #fbRecipeHandler(Start := #bStartSeq, Stop := #fbInputs.Cmd_Stop,
+                     Pause := #bPauseActive, Reset := #fbInputs.Cmd_Reset OR #bResetRecipe,
+                     bStartEdge := #fbInputs.Cmd_Start,
+                     StartLine := MAX(IN1 := INT#0, IN2 := #savedLineIndex),
+                     LineCount := #activeLineCount,
+                     Lines := "DB_SelectedRecipe".Lines,
+                     Axis_X := #Axis_X, Axis_Z := #Axis_Z);
+    #fbPreScan(Execute := #bPreScanExec, LineCount := #activeLineCount,
+               Lines := "DB_SelectedRecipe".Lines);
 
     // bResetRecipe is a ONE-SHOT: self-cleared here, right after the handler call that
     // consumed it (same pattern as bHaltAllAxes below). Every setter runs earlier in the
@@ -3098,11 +3151,11 @@ BEGIN
     // scan, wiping the manual CMD=40/CMD=41 buttons and the MDI (both write earlier in the
     // scan, in the STATE_MANUAL branch). Nothing ever reached the OB1 output assignment.
     //
-    // Guarded on a valid program number: outside 1..5 no handler is called, so the flag
-    // must survive to the scan where one is.
-    IF #activeProgram >= 1 AND #activeProgram <= 5 THEN
-        #bResetRecipe := FALSE;
-    END_IF;
+    // 2026-08-04: the program-number guard is gone. It existed because the old
+    // five-way CASE called no handler at all outside 1..5, so the flag had to
+    // survive to a scan where one ran. fbRecipeHandler is now called every scan
+    // unconditionally, so it always consumes the flag immediately.
+    #bResetRecipe := FALSE;
 
     // Homing -- sequential pattern: STATE_HOMING (startup) and STATE_STOP_GOHOME (post-stop)
     // both use homeSeqState + bHomeXExec/bHomeZExec.

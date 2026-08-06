@@ -22,7 +22,11 @@ This document defines the binary recipe format for the metal spinning machine's 
 ```
 
 **Total: 12 bytes per line × 1000 lines = 12 KB per program**
-**5 programs = 60 KB + code (~27 KB) = 87 KB (fits in 100KB with 13KB margin)**
+
+**Memory (changed 2026-08-04 — load-memory recipes):** the 10 program DBs live in **load memory**
+(`UNLINKED`) and cost **zero work memory** — ~120 KB of the 1214C's 4 MB. Work memory pays for one
+buffer only, `DB_SelectedRecipe` at ~12 KB, replacing the ~21 KB the five old work-memory recipe DBs
+consumed. See `Program/docs/LOADMEM_COPY_ON_SELECT.md`.
 
 ---
 
@@ -148,8 +152,9 @@ The CAM program should generate a complete DATA_BLOCK in SCL format:
 // ============================================
 
 DATA_BLOCK "DB_RecipeProgram1"
-{ S7_Optimized_Access := 'TRUE' }
-VERSION : 0.1
+{ S7_Optimized_Access := 'FALSE' }   // MANDATORY: READ_DBL refuses an optimized source
+VERSION : 0.2
+UNLINKED                             // MANDATORY, and MUST precede NON_RETAIN
 NON_RETAIN
     VAR 
         Header : "RecipeHeader";
@@ -245,6 +250,6 @@ END_TYPE
 
 ## File Naming
 
-For program N (1-5), generate: `DB_RecipeProgram[N].scl`
+For program N (**1-10**, extended from 1-5 on 2026-08-04), generate: `DB_RecipeProgram[N].scl`
 
 Example: `DB_RecipeProgram1.scl`, `DB_RecipeProgram2.scl`, etc.

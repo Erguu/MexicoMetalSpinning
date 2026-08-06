@@ -1,0 +1,205 @@
+// =============================================================================
+// Test_02_DataBlocks.scl -- Load-memory gate test, data blocks
+//
+// Part of the throwaway gate-test project for LOADMEM_COPY_ON_SELECT.md.
+// DO NOT IMPORT INTO THE MACHINE PROJECT.
+//
+// Naming mirrors the real design:
+//   DB_TestRecipe1/2/3        <-> DB_RecipeProgram1..N   (load memory)
+//   DB_SelectedTestRecipe     <-> DB_SelectedRecipe      (work memory)
+//   DB_SelectedTestRecipeBig  <-> a 1000-line variant, for the size-cap probe
+//
+// Source and destination DBs are BOTH standard access
+// ({ S7_Optimized_Access := 'FALSE' }). READ_DBL requires source and
+// destination to have the same block access type, and the UDT/STRUCT
+// restriction on optimized DBs forces standard access on both.
+//
+// STAGE 1 (passed 2026-08-04): the recipe DBs were NORMAL work-memory DBs.
+//   READ_DBL still works -- it reads the LOAD-MEMORY image of the source, which
+//   for a normal DB is its START VALUES. That is exactly the pattern below, so
+//   G1/G4/G5 were answered before the load-memory attribute was touched.
+// STAGE 2 (passed 2026-08-04, attribute ticked BY HAND in TIA): same five rows,
+//   byte-identical checksums.
+//
+// NOW TESTING G3 -- the `UNLINKED` keyword below.
+//   `UNLINKED` is the classic S7-SCL modifier for "store this DB only in load
+//   memory". It sits at column 0 on its own line, like NON_RETAIN. Leading
+//   whitespace is not significant in SCL, but keeping it flush and comment-free
+//   removes any doubt about what the parser is seeing.
+//
+//   *** THE FUNCTIONAL TEST CANNOT TELL YOU WHETHER THIS WORKED. ***
+//   Stage 1 (no attribute) and stage 2 (attribute) both PASS with identical
+//   checksums, because READ_DBL reads the load-memory image either way. If TIA
+//   parses UNLINKED but ignores it, every test still passes and you silently
+//   get no memory saving at all. The ONLY proof is the Properties checkbox and
+//   the DB no longer being monitorable online. Check both. See README G3.
+//
+//   ANSWERED 2026-08-04: `UNLINKED` MUST COME BEFORE `NON_RETAIN`.
+//     NON_RETAIN then UNLINKED -> blocks will not generate from source.
+//     UNLINKED then NON_RETAIN -> generates, attribute ticked, DB no longer
+//                                 monitorable online. This is the form below.
+//   Proven clean: DB_TestRecipe3's block was DELETED and regenerated from this
+//   source with no prior manual tick to inherit, and came back ticked.
+//   => the CAM -> SCL -> import pipeline stays fully automatic.
+//
+// Test patterns (used by the FB to verify the copy landed):
+//   1 : Lines[0].X=111.0  Lines[174].X=174.5  Lines[349].X=349.5  sum=635.0
+//   2 : Lines[0].X=222.0  Lines[500].X=500.5  Lines[999].X=999.5  sum=1722.0
+//   3 : Lines[0].X=333.0                      Lines[349].X=333.5  sum=666.5
+// All values are exactly representable in Real, so equality compares are safe.
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// DB_TestRecipe1 -- 350 lines (parity with today's DB_RecipeProgram1..5)
+// STAGE 2: add the "Only store in load memory" attribute here.
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_TestRecipe1"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "TestRecipeHeader";
+        Lines  : Array[0..349] of "TestRecipeLine";
+    END_VAR
+BEGIN
+    Header.sName := 'TEST_RECIPE_1';
+    Header.LineCount := 350;
+    Header.Valid := TRUE;
+    Header.ToolCount := 4;
+    Lines[0].X := 1.110000e+002;
+    Lines[0].Param := B#16#A1;
+    Lines[174].X := 1.745000e+002;
+    Lines[349].X := 3.495000e+002;
+    Lines[349].Param := B#16#5A;
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_TestRecipe2 -- 1000 lines / 12 KB. This is the size-cap probe (G5):
+// does one READ_DBL call move 12 000 bytes, or is there a per-call limit?
+// STAGE 2: add the "Only store in load memory" attribute here.
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_TestRecipe2"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "TestRecipeHeader";
+        Lines  : Array[0..999] of "TestRecipeLine";
+    END_VAR
+BEGIN
+    Header.sName := 'TEST_RECIPE_2';
+    Header.LineCount := 1000;
+    Header.Valid := TRUE;
+    Header.ToolCount := 4;
+    Lines[0].X := 2.220000e+002;
+    Lines[0].Param := B#16#B1;
+    Lines[500].X := 5.005000e+002;
+    Lines[999].X := 9.995000e+002;
+    Lines[999].Param := B#16#5B;
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_TestRecipe3 -- same shape as recipe 1, different pattern.
+// Exists only so the selection / latch test (test 6) can prove which recipe
+// actually landed in the buffer.
+// STAGE 2: add the "Only store in load memory" attribute here.
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_TestRecipe3"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "TestRecipeHeader";
+        Lines  : Array[0..349] of "TestRecipeLine";
+    END_VAR
+BEGIN
+    Header.sName := 'TEST_RECIPE_3';
+    Header.LineCount := 350;
+    Header.Valid := TRUE;
+    Header.ToolCount := 2;
+    Lines[0].X := 3.330000e+002;
+    Lines[0].Param := B#16#C1;
+    Lines[349].X := 3.335000e+002;
+    Lines[349].Param := B#16#5C;
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_SelectedTestRecipe -- work-memory buffer for recipes 1 and 3 (350 lines)
+// This is the analogue of the real design's DB_SelectedRecipe.
+// Standard access, and NEVER the load-memory-only attribute.
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_SelectedTestRecipe"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Header : "TestRecipeHeader";
+        Lines  : Array[0..349] of "TestRecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_SelectedTestRecipeBig -- work-memory buffer for recipe 2 (1000 lines)
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_SelectedTestRecipeBig"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Header : "TestRecipeHeader";
+        Lines  : Array[0..999] of "TestRecipeLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_TestControl -- watch-table interface. Everything the tester touches or reads.
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_TestControl"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        // --- commands (set from the watch table) ---
+        Cmd_Load     : Bool;        // set TRUE to start a transfer (self-clearing)
+        Cmd_Reset    : Bool;        // set TRUE to clear an error / abort
+        SelectRecipe : Int := 1;    // 1 and 3 -> DB_SelectedTestRecipe
+                                    // 2       -> DB_SelectedTestRecipeBig
+        TestMode     : Int := 1;    // 1=Lines array  2=whole DB  3=Header only
+
+        // --- status ---
+        State        : Int;         // loader state machine
+        Busy         : Bool;        // transfer in flight
+        Done         : Bool;        // last transfer completed
+        ErrorFlag    : Bool;        // RET_VAL <> 0
+        RetVal       : Int;         // READ_DBL return value (0 = OK), latched
+        LoadedRecipe : Int;         // which recipe actually landed (0 = none)
+
+        // --- G4: how long does a transfer take ---
+        Elapsed      : Time;        // measured across BUSY
+        ScanCount    : Int;         // scans BUSY was TRUE (async = expect > 1)
+
+        // --- verdict: READ THIS ONE FIRST ---
+        Result       : String[70];  // plain English: what passed, or what broke
+        TestPassed   : Bool;        // all applicable checks below passed
+
+        // --- the detail behind the verdict ---
+        Chk_FirstLine : Bool;       // Lines[0] matches -- proves SOMETHING copied
+        Chk_LastLine  : Bool;       // final line (349 / 999) matches
+                                    //   -> FALSE here = transfer TRUNCATED
+        Chk_AllLines  : Bool;       // checksum over EVERY line matches
+                                    //   -> FALSE here = partial or wrong recipe
+        Chk_Header    : Bool;       // header copied correctly.
+                                    //   Forced TRUE in mode 1, where the header
+                                    //   is deliberately not part of the transfer
+                                    //   -- Result says so in words.
+
+        Checksum          : Real;   // measured sum of every Lines[].X
+        Checksum_Expected : Real;   // what it should have been
+    END_VAR
+BEGIN
+END_DATA_BLOCK

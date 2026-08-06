@@ -34,7 +34,7 @@ VERSION : 0.2
         MinZ : Real;
         MaxZ : Real;
         // ---------------------------------------------------------------------
-        // Tool table (CAM-authored, applied on recipe load -- see TOOL_MAPPING_GUIDE.md)
+        // Tool table (CAM-authored, applied on recipe load -- see CAM_TOOL_TABLE_HANDOVER.md)
         // The CAM post-processor is the single source of truth for the turret setup.
         // On Start (STATE_PRE_SCAN) FB_Process copies these into DB_ToolConfig /
         // DB_MachineConfig BEFORE the pre-scan validates tool codes.

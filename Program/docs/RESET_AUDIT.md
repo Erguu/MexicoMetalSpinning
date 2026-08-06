@@ -19,7 +19,7 @@ Do not try to audit all files in one session — token budget will not allow it.
 | File | Status | Last checked | Notes |
 |------|--------|-------------|-------|
 | `06_MainProcess.scl` | **PASS** | 2026-05-17 | 3 gaps found and fixed (see findings below) |
-| `05_RecipeHandler.scl` | **PASS** | 2026-05-17 | 1 gap found and fixed (see findings below) |
+| `05_RecipeHandler.scl` | **PASS** | 2026-08-04 | 1 gap found and fixed (see findings below). Re-checked for `FB_RecipeLoader` (added 2026-08-04) |
 | `08_Main_OB1.scl` | **PASS** | 2026-05-18 | No gaps found (see findings below) |
 | `09_Sensors_Actuators.scl` | **PASS** | 2026-05-18 | No gaps. Minor note on State 10 (see findings below) |
 | `07_SpindleControl.scl` | **PASS** | 2026-05-18 | No gaps (see findings below) |
@@ -378,3 +378,38 @@ Each session prompt:
 ---
 
 *Created 2026-05-17. Update status column after each audit session.*
+
+
+---
+
+## FB_RecipeLoader / DB_SelectedRecipe — added 2026-08-04
+
+Load-memory recipes. `FB_RecipeLoader` (`05_RecipeHandler.scl`) drives an asynchronous `READ_DBL`
+across several scans, so a stuck `REQ` or a stale buffer is exactly the failure class this audit
+exists to catch. All four checkpoints verified:
+
+| # | Checkpoint | Where | Status |
+|---|---|---|---|
+| 1 | Hard reset clears it | `bDoHardReset` block, `06_MainProcess.scl` | **PASS** — `bRecipeLoadExec := FALSE`. The FB's own `Reset` is driven by `bResetRecipe` at the call site (**not** `bDoHardReset` — that flag is cleared earlier in the same scan and would never be seen), which the hard reset sets TRUE. Reset clears `Done`, `Error`, `ErrorCode` and `LoadedProgram := 0`, forcing a fresh copy before the next cycle |
+| 2 | Recipe reset clears it | `IF #Reset THEN`, `05_RecipeHandler.scl` | **PASS** — `FB_RecipeHandler` unchanged; the buffer is a plain array. `FB_RecipeLoader.Reset` is wired to the same `Cmd_Reset OR bResetRecipe` term as the handler |
+| 3 | STATE_STOPPED clears it | STOPPED CASE block | **PASS** — `bRecipeLoadExec := FALSE` every scan while idle, so `REQ` cannot stay high |
+| 4 | STATE_ERROR clears it | ERROR CASE block | **PASS** — `bRecipeLoadExec := FALSE` every scan, so a transfer cannot stay in flight across an error acknowledge |
+
+Additional:
+- **`REQ` is never latched independently.** It is recomputed every scan as
+  `(state = ST_REQ) OR (state = ST_WAIT)`. There is no code path that can hold it TRUE without the
+  state machine being in one of those two states.
+- **New TON:** `tonWatch` in `FB_RecipeLoader`, `IN := reqActive`. It stops automatically whenever the
+  state machine leaves any REQ/WAIT state — including state 35 between the two transfers, which also
+  gives phase 2 a full fresh timeout — so no stale `ET` can carry into the next run.
+- **Two-phase transfer (2026-08-06):** `phaseLines` selects the live `READ_DBL` branch. It is cleared
+  by `Reset` and by `ST_LATCH`, and only ever set in `ST_HDR_SETTLE` where `reqActive` is FALSE. A
+  reset therefore always leaves the FB idling on the Header branch with `REQ` low. `ErrorPhase` is
+  cleared on `Reset` and at `ST_LATCH` alongside `ErrorCode`.
+  `PT = DB_MachineConfig.RecipeLoadTimeout` (T#10S). Expiry latches `ErrorCode = 16#FFFF` → `16#0312`.
+- **`ErrorCode` is latched at the moment `BUSY` drops**, not mirrored every scan: once `REQ` falls the
+  next `READ_DBL` call returns its idle value and would wipe the real result before anything read it.
+- **No new physical outputs.** `DB_SelectedRecipe` is data only; nothing in OB1 changes.
+- **State 11 safety treatment** matches PRE_SCAN(12) — included in the drive-fault bypass (7 sites),
+  the soft-limit `SafeToRun` bypass, and excluded from the `FB_LimitMonitor` fault guard. No motion
+  occurs in this state.

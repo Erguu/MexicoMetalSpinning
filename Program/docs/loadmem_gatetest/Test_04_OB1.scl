@@ -1,0 +1,53 @@
+// =============================================================================
+// Test_04_OB1.scl -- Load-memory gate test, cyclic entry point
+//
+// Part of the throwaway gate-test project for LOADMEM_COPY_ON_SELECT.md.
+// DO NOT IMPORT INTO THE MACHINE PROJECT.
+//
+// Everything the tester touches lives in DB_TestControl. Put that DB in a
+// watch table and drive the test from there -- see README.md.
+// =============================================================================
+ORGANIZATION_BLOCK "Main"
+TITLE = "Load-memory gate test -- main sweep"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_TEMP
+        dummy : Bool;
+    END_VAR
+BEGIN
+    // -------------------------------------------------------------------------
+    // The loader. Note that SelectRecipe / TestMode are passed LIVE every scan:
+    // that is deliberate, so test 6 (change the selection mid-transfer) can
+    // prove the internal latch is what protects the transfer -- not the fact
+    // that the caller happened to hold the value still.
+    // -------------------------------------------------------------------------
+    "DB_TestLoaderInst"(Execute      := "DB_TestControl".Cmd_Load,
+                        Reset        := "DB_TestControl".Cmd_Reset,
+                        SelectRecipe := "DB_TestControl".SelectRecipe,
+                        TestMode     := "DB_TestControl".TestMode);
+
+    // Commands are one-shots from the watch table's point of view: the FB has
+    // already seen this scan's value, so clear them here.
+    "DB_TestControl".Cmd_Load := FALSE;
+    "DB_TestControl".Cmd_Reset := FALSE;
+
+    // -------------------------------------------------------------------------
+    // Status mirror -- everything the watch table reads
+    // -------------------------------------------------------------------------
+    "DB_TestControl".State        := "DB_TestLoaderInst".State;
+    "DB_TestControl".Busy         := "DB_TestLoaderInst".Busy;
+    "DB_TestControl".Done         := "DB_TestLoaderInst".Done;
+    "DB_TestControl".ErrorFlag    := "DB_TestLoaderInst".ErrorFlag;
+    "DB_TestControl".RetVal       := "DB_TestLoaderInst".RetVal;
+    "DB_TestControl".LoadedRecipe := "DB_TestLoaderInst".LoadedRecipe;
+    "DB_TestControl".Elapsed      := "DB_TestLoaderInst".Elapsed;
+    "DB_TestControl".ScanCount    := "DB_TestLoaderInst".ScanCount;
+    "DB_TestControl".Result       := "DB_TestLoaderInst".Result;
+    "DB_TestControl".TestPassed   := "DB_TestLoaderInst".TestPassed;
+    "DB_TestControl".Chk_FirstLine := "DB_TestLoaderInst".Chk_FirstLine;
+    "DB_TestControl".Chk_LastLine  := "DB_TestLoaderInst".Chk_LastLine;
+    "DB_TestControl".Chk_AllLines  := "DB_TestLoaderInst".Chk_AllLines;
+    "DB_TestControl".Chk_Header    := "DB_TestLoaderInst".Chk_Header;
+    "DB_TestControl".Checksum          := "DB_TestLoaderInst".Checksum;
+    "DB_TestControl".Checksum_Expected := "DB_TestLoaderInst".Checksum_Expected;
+END_ORGANIZATION_BLOCK

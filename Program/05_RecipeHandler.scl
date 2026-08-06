@@ -5,6 +5,314 @@
 // =============================================================================
 
 // -----------------------------------------------------------------------------
+// FB_RecipeLoader - Copy the selected recipe from LOAD memory into work memory
+// DOC:
+//  purpose: DB_RecipeProgram1..10 live in load memory (UNLINKED) and cannot be
+//           read by the program directly. This FB copies the selected one, whole
+//           (Header + Lines in ONE READ_DBL call), into "DB_SelectedRecipe".
+//           Runs once per cycle start, in STATE_RECIPE_LOAD(11), before the
+//           pre-scan -- the machine is stationary and nothing else is pending.
+//  inputs:  Execute (rising edge), ProgramNo (1..10), Reset (level)
+//  outputs: Done, Busy, Error + ErrorCode, LoadedProgram
+//  design:  Program/docs/LOADMEM_COPY_ON_SELECT.md  (gate-tested 2026-08-04)
+//
+//  READ_DBL call form -- both of these cost a build if you get them wrong:
+//    * READ_DBL is an INSTANCE-LESS system function (SFC 83 heritage). Declaring
+//      it as a multi-instance gives "Data type READ_DBL is unknown".
+//    * RET_VAL is the FUNCTION RETURN VALUE, not an output parameter. Passing
+//      it as RET_VAL => x gives "The formal parameter 'RET_VAL' is invalid".
+//
+//  TWO TRANSFERS, NOT ONE (changed 2026-08-06 after a field failure).
+//  The first version copied the WHOLE DB in one call (SRCBLK := "DB_RecipeProgramN").
+//  On the machine that delivered the Header correctly and left Lines completely
+//  zero, with no error anywhere -- a structured copy that matched the first
+//  member and gave up on the second. Re-reading the gate-test results
+//  (loadmem_gatetest/result.md) shows why it was never caught: whole-DB mode was
+//  only ever proven at 350 lines / 4.3 KB, while the 12 KB / 1000-line case was
+//  proven with the SUB-REFERENCE form (SRCBLK := "...".Lines). Production ran the
+//  one combination -- whole DB at 12 KB -- that no test covered.
+//  So: Header and Lines are now copied in two sequential calls, each in the exact
+//  form the gate test passed. A sub-reference copy cannot half-succeed the way a
+//  whole-DB copy did: a length or type mismatch on Lines now surfaces as a
+//  non-zero RET_VAL instead of a silently empty buffer.
+//  ErrorPhase says which of the two failed (1 = Header, 2 = Lines).
+//
+//  THE SELECTION LATCH -- the one genuinely dangerous thing in this block.
+//  READ_DBL is asynchronous and spans several scans with REQ held. SRCBLK is a
+//  VARIANT and the S7-1200 cannot index a DB dynamically, so the source is
+//  chosen by a CASE. If that CASE branch changed mid-transfer, the buffer would
+//  receive the front of one recipe and the tail of another -- with RET_VAL = 0
+//  and no error anywhere. The operator would machine a part that exists in no
+//  recipe. Hence #selLatched: the branch is frozen at ST_LATCH and the live
+//  ProgramNo input is ignored until the transfer completes.
+//
+//  Reset path: REQ is derived from the state EVERY scan and is never latched
+//  independently, so there is no way for a transfer to stay in flight across a
+//  reset, an E-Stop or an error acknowledge.
+// -----------------------------------------------------------------------------
+FUNCTION_BLOCK "FB_RecipeLoader"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_INPUT
+        Execute   : Bool;           // Rising edge starts the copy
+        ProgramNo : Int;            // 1..10 -- which recipe to load
+        Reset     : Bool;           // Level: abort, clear error, invalidate buffer
+    END_VAR
+    VAR_OUTPUT
+        Done          : Bool;       // Copy complete, DB_SelectedRecipe is valid
+        Busy          : Bool;       // Transfer in flight
+        Error         : Bool;       // Copy failed -- FB_Process raises 16#0312
+        ErrorCode     : Word;       // READ_DBL RET_VAL, latched (16#FFFF = timeout)
+        ErrorPhase    : Int;        // Which transfer failed: 1 = Header, 2 = Lines
+        LoadedProgram : Int;        // Which recipe is in the buffer (0 = none/invalid)
+    END_VAR
+    VAR
+        // READ_DBL is NOT declared here -- see the note above.
+        tonWatch    : TON;          // Hang watchdog (RecipeLoadTimeout), per phase
+        state       : Int;          // see the ST_* constants below
+        selLatched  : Int := 1;     // Frozen program number for the whole transfer.
+                                    // Never cleared: keeps the instruction being
+                                    // called with REQ=FALSE so it resets cleanly.
+        phaseLines  : Bool;         // FALSE = Header call is the live one, TRUE = Lines.
+                                    // Latched like selLatched: only ever changed with
+                                    // REQ low (ST_HDR_SETTLE), never mid-transfer.
+        reqActive   : Bool;         // REQ level, derived from state every scan
+        busyRaw     : Bool;         // READ_DBL BUSY
+        retValRaw   : Int;          // READ_DBL return value (raw, every scan)
+        prevExecute : Bool;
+        rtExecute   : Bool;
+    END_VAR
+    CONST
+        ST_IDLE       : Int := 0;
+        ST_LATCH      : Int := 10;
+        ST_REQ_HDR    : Int := 20;  // Phase 1: Header
+        ST_WAIT_HDR   : Int := 30;
+        ST_HDR_SETTLE : Int := 35;  // One scan with REQ low so the Header call sees
+                                    // its job closed before the branch switches
+        ST_REQ_LINES  : Int := 40;  // Phase 2: Lines (the 12 KB one)
+        ST_WAIT_LINES : Int := 50;
+        ST_DONE       : Int := 60;
+        ST_ERROR      : Int := 90;
+        PROGRAM_COUNT : Int := 10;  // Must match the DB_RecipeProgram* count below
+    END_CONST
+BEGIN
+    // -------------------------------------------------------------------------
+    // Rising edge on Execute
+    // -------------------------------------------------------------------------
+    #rtExecute := #Execute AND NOT #prevExecute;
+    #prevExecute := #Execute;
+
+    // -------------------------------------------------------------------------
+    // Reset -- always honoured. Drives REQ low via the state on the next line.
+    // -------------------------------------------------------------------------
+    IF #Reset THEN
+        #state := ST_IDLE;
+        #Done := FALSE;
+        #Error := FALSE;
+        #ErrorCode := 16#0000;
+        #ErrorPhase := 0;
+        #phaseLines := FALSE;       // idle on the Header branch, REQ low
+        #LoadedProgram := 0;        // Buffer is no longer trusted -> forces a re-load
+    END_IF;
+
+    // -------------------------------------------------------------------------
+    // REQ is derived from state EVERY SCAN -- never latched on its own.
+    // -------------------------------------------------------------------------
+    #reqActive := (#state = ST_REQ_HDR) OR (#state = ST_WAIT_HDR)
+                  OR (#state = ST_REQ_LINES) OR (#state = ST_WAIT_LINES);
+
+    // -------------------------------------------------------------------------
+    // THE READ_DBL CALL BLOCK
+    // Two sub-reference transfers, one at a time: .Header then .Lines. Exactly
+    // ONE call executes per scan -- the branch follows #selLatched (NOT
+    // #ProgramNo) and the phase follows #phaseLines (NOT the live state).
+    // Both are the call forms the gate test passed; see the header note for why
+    // the original single whole-DB call was wrong.
+    // -------------------------------------------------------------------------
+    CASE #selLatched OF
+        1:  IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        2:  IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        3:  IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        4:  IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        5:  IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        6:  IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        7:  IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        8:  IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        9:  IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        10: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+    END_CASE;
+
+    // -------------------------------------------------------------------------
+    // Hang watchdog -- only runs while a transfer is in flight
+    // -------------------------------------------------------------------------
+    #tonWatch(IN := #reqActive, PT := "DB_MachineConfig".RecipeLoadTimeout);
+
+    // -------------------------------------------------------------------------
+    // State machine
+    // -------------------------------------------------------------------------
+    CASE #state OF
+
+        // === ST_IDLE (0) ===
+        ST_IDLE:
+            IF #rtExecute AND #ProgramNo >= 1 AND #ProgramNo <= PROGRAM_COUNT THEN
+                #state := ST_LATCH;
+            END_IF;
+
+        // === ST_LATCH (10) -- freeze the selection, poison the buffer ===
+        ST_LATCH:
+            #selLatched := #ProgramNo;      // the latch. Everything downstream uses this.
+            #phaseLines := FALSE;           // always start with the Header transfer
+            #Done := FALSE;
+            #Error := FALSE;
+            #ErrorCode := 16#0000;
+            #ErrorPhase := 0;
+            #LoadedProgram := 0;            // buffer invalid until the copy lands
+            // POISON (2026-08-06): a failed load must leave a buffer that CANNOT
+            // pass pre-scan. DB_SelectedRecipe survives delta downloads and failed
+            // transfers, so header data from an OLD copy would otherwise sit there
+            // looking like evidence that "the copy worked". During field debugging
+            // exactly that happened: a stale header + zero lines read as "header
+            // copies, lines don't". Killing LineCount here means: if you can read
+            // a real LineCount after a start, it arrived in THIS load, and a
+            // silent no-op transfer now fails pre-scan with 16#0310.
+            "DB_SelectedRecipe".Header.LineCount := 0;
+            "DB_SelectedRecipe".Header.sName := '';
+            "DB_SelectedRecipe".Header.Valid := FALSE;
+            "DB_SelectedRecipe".Lines[0].CMD := 16#FF;   // poison first line too
+            #state := ST_REQ_HDR;
+
+        // === ST_REQ_HDR (20) -- first scan with REQ high, Header branch ===
+        ST_REQ_HDR:
+            #state := ST_WAIT_HDR;
+
+        // === ST_WAIT_HDR (30) -- hold REQ on the SAME branch until BUSY drops ===
+        // ErrorCode is LATCHED here, not mirrored every scan: once REQ falls the
+        // next call returns its idle value and would wipe the real result.
+        ST_WAIT_HDR:
+            IF #tonWatch.Q THEN
+                #ErrorCode := 16#FFFF;      // watchdog: BUSY never cleared
+                #ErrorPhase := 1;
+                #state := ST_ERROR;
+            ELSIF NOT #busyRaw THEN
+                IF #retValRaw = 0 THEN
+                    #state := ST_HDR_SETTLE;
+                ELSE
+                    #ErrorCode := INT_TO_WORD(#retValRaw);
+                    #ErrorPhase := 1;
+                    #state := ST_ERROR;
+                END_IF;
+            END_IF;
+
+        // === ST_HDR_SETTLE (35) -- one scan with REQ low ===
+        // The Header call gets one call with REQ = FALSE (see #reqActive above)
+        // before the CASE switches to the Lines branch, so no job is abandoned
+        // mid-flight and the watchdog TON resets for phase 2.
+        ST_HDR_SETTLE:
+            #phaseLines := TRUE;
+            #state := ST_REQ_LINES;
+
+        // === ST_REQ_LINES (40) -- first scan with REQ high, Lines branch ===
+        ST_REQ_LINES:
+            #state := ST_WAIT_LINES;
+
+        // === ST_WAIT_LINES (50) -- the 12 KB transfer ===
+        ST_WAIT_LINES:
+            IF #tonWatch.Q THEN
+                #ErrorCode := 16#FFFF;
+                #ErrorPhase := 2;
+                #state := ST_ERROR;
+            ELSIF NOT #busyRaw THEN
+                IF #retValRaw = 0 THEN
+                    #LoadedProgram := #selLatched;
+                    #Done := TRUE;
+                    #state := ST_DONE;
+                ELSE
+                    #ErrorCode := INT_TO_WORD(#retValRaw);
+                    #ErrorPhase := 2;
+                    #state := ST_ERROR;
+                END_IF;
+            END_IF;
+
+        // === ST_DONE (60) ===
+        // Done stays TRUE so FB_Process can move on. A new rising edge re-loads,
+        // which is what a program change or a restart must do.
+        ST_DONE:
+            #Done := TRUE;
+            IF #rtExecute AND #ProgramNo >= 1 AND #ProgramNo <= PROGRAM_COUNT THEN
+                #state := ST_LATCH;
+            END_IF;
+
+        // === ST_ERROR (90) -- cleared only by Reset ===
+        ST_ERROR:
+            #Error := TRUE;
+            #Done := FALSE;
+            #LoadedProgram := 0;
+    END_CASE;
+
+    #Busy := #reqActive AND #busyRaw;
+END_FUNCTION_BLOCK
+
+// -----------------------------------------------------------------------------
 // FB_RecipePreScan - Pre-scan recipe for limit validation
 // DOC:
 //  purpose: Scan recipe lines before execution to compute bounding box and detect
@@ -32,7 +340,9 @@ VERSION : 0.1
         Progress : Real;            // Pre-scan progress 0-100% for HMI display
     END_VAR
     VAR_IN_OUT
-        Lines : Array[0..349] of "RecipeLine"; // Recipe lines storage (in/out DB reference)
+        // Bound to "DB_SelectedRecipe".Lines -- the work-memory buffer, never a
+        // DB_RecipeProgram* (those are load-memory only). Must match that DB.
+        Lines : Array[0..999] of "RecipeLine"; // Recipe lines storage (in/out DB reference)
     END_VAR
     VAR
         state : Int;                // Local state machine
@@ -251,7 +561,9 @@ VERSION : 0.1
         Progress : Real;            // Progress percentage 0-100
     END_VAR
     VAR_IN_OUT
-        Lines : Array[0..349] of "RecipeLine"; // Reference to recipe lines in DB
+        // Bound to "DB_SelectedRecipe".Lines -- the work-memory buffer, never a
+        // DB_RecipeProgram* (those are load-memory only). Must match that DB.
+        Lines : Array[0..999] of "RecipeLine"; // Reference to recipe lines in DB
         Axis_X : TO_PositioningAxis;           // Axis TO IN_OUT
         Axis_Z : TO_PositioningAxis;
     END_VAR
@@ -930,8 +1242,8 @@ BEGIN
         // 802 hold -> 803 return -> pauseReturnState. This FB does not touch the spindle;
         // FB_Process stops it while paused (State=PAUSED) and spins it back up before it
         // releases Pause (drops bPauseActive) here, so 802 -> 803 return only starts once
-        // the spindle is back up to speed. See docs/Pause_Retract_Plan.md. Offset/velocity
-        // from DB_MachineConfig.
+        // the spindle is back up to speed. See docs/FB_Process_States.md (STATE_PAUSED).
+        // Offset/velocity from DB_MachineConfig.
         // -----------------------------------------------------------------
         800: // PAUSED -- fully stop axes, capture interruption point, then retract
             #Paused := TRUE;

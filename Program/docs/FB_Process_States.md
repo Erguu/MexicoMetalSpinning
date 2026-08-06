@@ -1,7 +1,21 @@
 # FB_Process State Machine Reference
 
 **Source file:** `Program/06_MainProcess.scl`
-**Last updated:** 2026-07-31 — **Bug fix 3:** MDI `CMD=40` now mirrors the recipe sequence (`FB_RecipeHandler` states 70/71) — `Cmd_Extend` held every scan, auto-released at `AtSetpoint` or on cylinder `Error` (`MDI_Status = 4`). It previously held `Cmd_Extend` until `Param=0`, leaving `Sol_A` latched; a following CMD=41 Param=1 then added `Sol_B` and both coils of the 5/3 valve were driven at once (ITEM-41) — valves click, cylinder stalls. **Bug fix 2 (same symptom, wider):** `bResetRecipe` was only cleared in STATE_PRE_SCAN, so after power-up / any `Cmd_Reset` / any error acknowledge it stayed TRUE while the machine sat in STOPPED or MANUAL. FB_RecipeHandler is called every scan and its `IF #Reset THEN` block is level-triggered, so it re-cleared `BackSupport.Cmd_Extend` / `SolB_Cmd41` / `SolAtmo_Cmd` every scan — killing the manual CMD=40 **and** CMD=41 buttons and the MDI. Now self-cleared right after the `fbRecipeHandler` call (guarded on `activeProgram` 1..5). **Bug fix 1:** MDI `CMD=40` never moved the valve. The STATE_MANUAL button line `BackSupport.Cmd_Extend := Btn_Cmd40_Extend` runs every scan and overwrote the MDI's write on the following scan, so the cylinder FB saw a 1-scan pulse (Mode 0: state 0 → 1 → 0, `Sol_A` up for one scan). MDI CMD=40 now sets a new FB var `bMDI_Cmd40Extend` and the button line reads `Btn_Cmd40_Extend OR bMDI_Cmd40Extend`; the latch is cleared in `bDoHardReset`, STATE_STOPPED, STATE_ERROR and on manual exit. CMD=41 was unaffected (those flags are written only inside the button `IF` chain).
+**Last updated:** 2026-08-06 — **Load-memory recipes PARTIALLY verified on the machine**: program 1
+copied (loader Done, ErrorCode=0) and its start ran — movement observed before a plant-air loss cut
+the test. No full cycle yet; programs 2..10 untested (see TODO.md ITEM-44). Two field faults fixed
+first: (1) the CAM export carried `S7_Optimized_Access := 'TRUE'` — `READ_DBL` requires a
+standard-access source (necessary fix, but operator testing showed it was not sufficient alone).
+(2) **The decisive fault:** the whole-DB `READ_DBL` at ~12 KB partial-copies silently (`Header` yes,
+`Lines` no, `RET_VAL=0`); `FB_RecipeLoader` now runs **two sequential `READ_DBL` transfers**
+(`.Header` then `.Lines`, new `ErrorPhase` output) — never revert to the whole-DB call. Two guards
+added so neither failure can ever be silent again: the loader **poisons** `DB_SelectedRecipe.Header`
+(LineCount=0, sName='') at latch time, and PRE_SCAN(12) verifies the END marker
+(`Lines[LineCount-1].CMD = 99`) → new error **`16#0313`**.
+
+**Previously, 2026-08-04:** **New STATE_RECIPE_LOAD(11).** Recipes moved to load memory: `DB_RecipeProgram1..10` are `UNLINKED` (load memory only, zero work memory) and `FB_RecipeLoader` copies the selected one whole into `DB_SelectedRecipe` with `READ_DBL` before the pre-scan. Every path that went straight to PRE_SCAN(12) now goes to RECIPE_LOAD(11) first. Both five-way `CASE` blocks over `DB_RecipeProgram1..5` are gone — the handler and pre-scan bind unconditionally to `DB_SelectedRecipe`. New error `16#0312`. The `LineCount` guard now matches the array (1..1000), closing the out-of-range read. See `LOADMEM_COPY_ON_SELECT.md`.
+
+**Previously, 2026-07-31:** **Bug fix 3:** MDI `CMD=40` now mirrors the recipe sequence (`FB_RecipeHandler` states 70/71) — `Cmd_Extend` held every scan, auto-released at `AtSetpoint` or on cylinder `Error` (`MDI_Status = 4`). It previously held `Cmd_Extend` until `Param=0`, leaving `Sol_A` latched; a following CMD=41 Param=1 then added `Sol_B` and both coils of the 5/3 valve were driven at once (ITEM-41) — valves click, cylinder stalls. **Bug fix 2 (same symptom, wider):** `bResetRecipe` was only cleared in STATE_PRE_SCAN, so after power-up / any `Cmd_Reset` / any error acknowledge it stayed TRUE while the machine sat in STOPPED or MANUAL. FB_RecipeHandler is called every scan and its `IF #Reset THEN` block is level-triggered, so it re-cleared `BackSupport.Cmd_Extend` / `SolB_Cmd41` / `SolAtmo_Cmd` every scan — killing the manual CMD=40 **and** CMD=41 buttons and the MDI. Now self-cleared right after the `fbRecipeHandler` call (guarded on `activeProgram` 1..5). **Bug fix 1:** MDI `CMD=40` never moved the valve. The STATE_MANUAL button line `BackSupport.Cmd_Extend := Btn_Cmd40_Extend` runs every scan and overwrote the MDI's write on the following scan, so the cylinder FB saw a 1-scan pulse (Mode 0: state 0 → 1 → 0, `Sol_A` up for one scan). MDI CMD=40 now sets a new FB var `bMDI_Cmd40Extend` and the button line reads `Btn_Cmd40_Extend OR bMDI_Cmd40Extend`; the latch is cleared in `bDoHardReset`, STATE_STOPPED, STATE_ERROR and on manual exit. CMD=41 was unaffected (those flags are written only inside the button `IF` chain).
 
 **Previously:** 2026-07-30 — Manual MDI added to STATE_MANUAL (5): `DB_Manual.MDI_Cmd` + `MDI_Param` executed on the rising edge of `Btn_MDI_Execute` (new FB var `prevMDIExec`, cleared in `bDoHardReset` and on manual exit); result in `MDI_Status`/`MDI_StatusText`/`_ES`. Accepts CMD=40 (Param 1/0 = extend/release) and CMD=41 (Param 1/2/3); motion commands rejected by design. Same session — Manual CMD=40 / CMD=41 buttons added to STATE_MANUAL (5): `DB_Manual.Btn_Cmd40_Extend` / `Btn_Cmd41_AtmoOn` / `Btn_Cmd41_AtmoOff` / `Btn_Cmd41_Release` write the same BackSupport flags as the matching recipe lines, and are written only in that state. `BackSupport.Cmd_Extend` is now also cleared in STATE_STOPPED (0) and STATE_ERROR (999). Recipe side gained CMD=41 Param=3 (release both overrides).
 
@@ -21,10 +35,11 @@
 
 | ID  | Name               | HMI StatusMsg                        | Entry from                              | Exits to                                                   |
 |-----|--------------------|--------------------------------------|-----------------------------------------|------------------------------------------------------------|
-| 0   | STOPPED            | "Stopped"                            | Any reset/stop path, power-up           | 5 (MANUAL), 12 (PRE_SCAN)                                  |
-| 5   | MANUAL             | "Manual Mode"                        | STOPPED                                 | 0 (STOPPED), 12 (PRE_SCAN)                                 |
+| 0   | STOPPED            | "Stopped"                            | Any reset/stop path, power-up           | 5 (MANUAL), 11 (RECIPE_LOAD)                               |
+| 5   | MANUAL             | "Manual Mode"                        | STOPPED                                 | 0 (STOPPED), 11 (RECIPE_LOAD)                              |
 | 10  | STARTING           | "Starting..."                        | PRE_SCAN                                | 13 (PRE_HOME_CLR), 15 (HOMING), 17 (LOCK_EXTEND_WAIT), 999|
-| 12  | PRE_SCAN           | "Pre-scanning..."                    | STOPPED, MANUAL, COMPLETE               | 10 (STARTING), 999 (ERROR)                                 |
+| 11  | RECIPE_LOAD        | "Loading recipe..."                  | STOPPED, MANUAL, COMPLETE               | 12 (PRE_SCAN), 999 (ERROR)                                 |
+| 12  | PRE_SCAN           | "Pre-scanning..."                    | RECIPE_LOAD                             | 10 (STARTING), 999 (ERROR)                                 |
 | 13  | PRE_HOME_CLR       | "Clearing PNP zone..."               | STARTING                                | 15 (HOMING), 999 (ERROR)                                   |
 | 14  | SHEET_WAIT         | "Waiting for sheet..."               | POST_HOME_CLR                           | 17 (LOCK_EXTEND_WAIT)                                      |
 | 15  | HOMING             | "Homing..."                          | PRE_HOME_CLR, STARTING                  | 16 (POST_HOME_CLR), 999 (ERROR)                            |
@@ -49,6 +64,8 @@
 ```
 STOPPED (0)
   -- Cmd_Start + SafeToRun -->
+RECIPE_LOAD (11): READ_DBL copy, load memory -> DB_SelectedRecipe
+  -- Copy done -->
 PRE_SCAN (12)
   -- Recipe valid -->
 STARTING (10)
@@ -316,13 +333,68 @@ longer held, the handler simply rests in `STATE_IDLE`.
 
 ---
 
+## STATE 11 — RECIPE_LOAD
+
+**Purpose:** Copy the selected recipe out of **load memory** into the work-memory buffer
+`DB_SelectedRecipe`, so the pre-scan and the handler have something to read. Added 2026-08-04 with the
+load-memory recipe change — see `Program/docs/LOADMEM_COPY_ON_SELECT.md`.
+
+**Entered from:** STOPPED (Cmd_Start), MANUAL (Cmd_Start), COMPLETE (restart/Start), COMPLETE
+(Cmd_Reset). These are exactly the four sites that previously jumped straight to PRE_SCAN(12).
+
+**Runs every scan while in this state:**
+- `bRecipeLoadExec := TRUE` — a level; `FB_RecipeLoader` takes the rising edge. The FB call itself is
+  at the bottom of FB_Process next to `fbRecipeHandler`/`fbPreScan`.
+- `FB_RecipeLoader` runs **two sequential `READ_DBL` transfers** — `.Header` first, then `.Lines`
+  (changed 2026-08-06; a single whole-DB call was the first design, see the loader's header comment
+  and `LOADMEM_COPY_ON_SELECT.md` §7.2 for the field failure that retired it).
+- At its `ST_LATCH` step the loader **poisons the buffer** (`Header.LineCount := 0`, `sName := ''`,
+  `Valid := FALSE`): a load that fails or silently no-ops leaves a buffer that PRE_SCAN(12) rejects
+  with `16#0310`, and stale data from a previous load can never masquerade as fresh.
+
+**Exits:**
+| Condition | Goes to |
+|---|---|
+| `fbRecipeLoader.Done` | PRE_SCAN (12), writes `DB_Diagnostic.Recipe_LoadedProgram` |
+| `fbRecipeLoader.Error` | ERROR (999) with `16#0312`; `DB_Diagnostic.Error_Text` carries `ErrorPhase` (1 = Header, 2 = Lines) + `READ_DBL` RET_VAL (16#FFFF = watchdog) |
+
+**Why it runs on every cycle start.** It is tempting to skip the copy when the same program is already
+in the buffer. Do not. A recipe re-downloaded from CAM changes load memory while `DB_SelectedRecipe`
+still holds the old data, so skipping would machine the previous geometry with no warning of any kind.
+The copy takes a fraction of a second with the machine standing still.
+
+**Safety treatment — identical to PRE_SCAN(12).** State 11 is a pure data copy: no motion, contactors
+open, drives not enabled. It is therefore included in the same bypasses as PRE_SCAN:
+- drive-fault → STATE_ERROR guards (7 sites) skip it
+- soft-limit `SafeToRun` bypass includes it
+- the `FB_LimitMonitor` fault guard excludes it
+`activeProgram` is already frozen here (the HMI program lock is `State < STATE_STARTING`, and 11 > 10),
+so the program cannot change under the transfer.
+
+**The selection latch.** `FB_RecipeLoader` freezes the program number at its `ST_LATCH` step and
+ignores the live `ProgramNo` for the rest of the transfer. `READ_DBL` is asynchronous and spans several
+scans; if the `CASE` branch feeding `SRCBLK` changed mid-transfer, the buffer would get the front of
+one recipe and the tail of another **with `RET_VAL = 0` and no error anywhere**. Do not remove the
+latch.
+
+---
+
 ## STATE 12 — PRE_SCAN
 
 **Purpose:** Validate every recipe line against soft limits before any motion starts. Non-blocking — processes 10 lines per PLC scan.
 
 **Runs every scan while in this state:**
-- Reads `Header.LineCount` from the active recipe DB (program 1–5)
-- Validates: 0 or >999 → immediate ERROR
+- Reads `Header.LineCount` from **`DB_SelectedRecipe.Header`** — the buffer RECIPE_LOAD(11) just
+  filled. (Was a five-way `CASE` over `DB_RecipeProgram1..5`; those are load-memory only now and
+  cannot be read directly.)
+- Validates: 0 or >1000 → immediate ERROR `16#0310`. The bound is the actual array size; it used to
+  be 999 against an `Array[0..349]`, which read past the end of the array. Because RECIPE_LOAD(11)
+  poisons `LineCount` to 0 before every transfer, this check also catches a load that silently
+  delivered nothing.
+- **END-marker guard (added 2026-08-06):** verifies `DB_SelectedRecipe.Lines[LineCount-1].CMD = 99`
+  (PROGRAM_END is mandatory, `PLC_Recipe_Format_Spec.md`). Fails → ERROR `16#0313` "Recipe data
+  empty/corrupt". Added after a field fault where the Lines array arrived all zero behind a plausible
+  header and the machine "ran" a program of no-op moves.
 - Sets `bPreScanExec = TRUE`. The `FB_RecipePreScan` call itself sits at the bottom of FB_Process (next to the `fbRecipeHandler` call) and runs **every scan in every state** — with `Execute = FALSE` outside PRE_SCAN so the FB rearms between runs. (2026-06-12 bug fix: when the call lived inside this CASE branch, `Execute` never dropped, the FB latched in DONE, and every start after the first reused the previous run's `Valid`/bounding box — validation was silently skipped.)
 - Updates `DB_HMI.PreScanProgress` every scan (HMI progress bar)
 - Resets `bResetRecipe = FALSE` on entry (consumes the one-shot flag from previous stop/reset)
@@ -333,7 +405,8 @@ longer held, the handler simply rests in `STATE_IDLE`.
 
 | Condition | Next State |
 |-----------|-----------|
-| `LineCount` invalid (0 or >999) | **999** ERROR (`0x0310` — "Recipe not loaded") |
+| `LineCount` invalid (0 or >1000) | **999** ERROR (`0x0310` — "Recipe not loaded") |
+| `Lines[LineCount-1].CMD <> 99` | **999** ERROR (`0x0313` — "Recipe data empty/corrupt - no END marker") |
 | Pre-scan `Done` AND `Valid = TRUE` | **10** STARTING |
 | Pre-scan `Done` AND `Valid = FALSE` | **999** ERROR (`0x0305` — shows first failing line number and axis) |
 
@@ -528,7 +601,7 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 - ToolHeadLock `Cmd_Extend = TRUE` (still driven by outside-CASE assignment)
 - `bStartSeq = FALSE` while checking but recipe Start not driven in PAUSED
 
-> Retract offsets and velocity are HMI-editable (`DB_MachineConfig.PauseRetract_X/Z/_Vel`). Offset 0 on an axis = that axis does not move on pause (legacy behavior). See `docs/Pause_Retract_Plan.md`.
+> Retract offsets and velocity are HMI-editable (`DB_MachineConfig.PauseRetract_X/Z/_Vel`). Offset 0 on an axis = that axis does not move on pause (legacy behavior). Implemented 2026-07-08 — see `docs/CHANGELOG.md`.
 
 **Resume (Continue) sequence — spindle spins up before axes return:**
 1. `continueEdge` sets `bResumeSpeedup = TRUE`. `bPauseActive` stays TRUE, so `FB_RecipeHandler` holds at the retract point (state 802) — axes remain clear of the workpiece.

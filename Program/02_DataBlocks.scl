@@ -1,7 +1,8 @@
 // =============================================================================
 // 02_DataBlocks.scl
 // All non-recipe data blocks.
-// Recipe program DBs (DB_RecipeProgram1..5) are in 02b_RecipePrograms.scl.
+// Recipe program DBs (DB_RecipeProgram1..10) are in 02b_RecipePrograms.scl.
+// They live in LOAD memory; the machine runs from DB_SelectedRecipe (this file).
 // Target: CPU 1214C (100KB work memory)
 // =============================================================================
 
@@ -33,7 +34,7 @@ NON_RETAIN
         // ===========================================================
         // MODE SELECTION (Input)
         // ===========================================================
-        ProductSelect : Int := 1;           // Recipe selector (1-5)
+        ProductSelect : Int := 1;           // Recipe selector (1-10) -- 10 programs since 2026-08-04
         FeedrateOverride : Real := 100.0;   // Speed % for G1 moves (50-200, 100=normal)
         RapidOverride : Real := 100.0;      // Speed % for G0 rapid moves (50-200)
         SingleStepMode : Bool := FALSE;     // TRUE = stop after each line, wait for StepNext
@@ -42,8 +43,11 @@ NON_RETAIN
         // Program names and validity -- PLC does NOT write to these tags.
         // Written by CAM post-processor or HMI operator.
         // Can be read for displaying the program list on HMI.
-        ProgramNames : Array[1..5] of String[20];  // Operator-defined program names
-        ProgramValid : Array[1..5] of Bool;        // Is program loaded? (written by HMI/CAM)
+        // Extended 1..5 -> 1..10 on 2026-08-04 with the load-memory recipe change.
+        // HMI ACTION REQUIRED: the HMI project must be updated to match, or entries
+        // 6..10 will be unnamed and unselectable from the program list screen.
+        ProgramNames : Array[1..10] of String[20];  // Operator-defined program names
+        ProgramValid : Array[1..10] of Bool;        // Is program loaded? (written by HMI/CAM)
         
         // Tool slot codes editable from HMI. Enter external codes like 101, 406 etc.
         // These are copied to DB_ToolConfig.ToolCode_List when operator presses Apply.
@@ -191,7 +195,8 @@ NON_RETAIN
         // On Pause, X and Z jog by these signed offsets to pull the tool clear
         // (spindle keeps running). On Continue they return to the exact interruption
         // point before the recipe resumes. Retract target is clamped to soft limits.
-        // Offset 0 = that axis does not move on pause. See docs/Pause_Retract_Plan.md.
+        // Offset 0 = that axis does not move on pause. See docs/FB_Process_States.md
+        // (STATE_PAUSED) for the full pause/resume sequence.
         PauseRetract_X   : Real := -10.0;   // Pause retract offset X (signed, mm)
         PauseRetract_Z   : Real := -10.0;   // Pause retract offset Z (signed, mm)
         PauseRetract_Vel : Real := 20.0;    // Retract/return velocity (mm/s)
@@ -236,6 +241,12 @@ NON_RETAIN
         // The axes stay clear of the workpiece (held at the pause-retract position)
         // for this whole window. Set to the measured VFD ramp-up time + margin.
         SpindleResumeSpeedupTime : Time := T#5S;
+        // Load-memory recipe copy (FB_RecipeLoader, STATE_RECIPE_LOAD(11)):
+        // hang watchdog on the READ_DBL transfer. A 1000-line recipe is ~12 KB
+        // and completes in well under a second; this only catches a transfer
+        // that never reports BUSY=FALSE. Expiry -> 16#0312, machine goes to
+        // STATE_ERROR rather than starting a cycle on a half-copied recipe.
+        RecipeLoadTimeout : Time := T#10S;
         // In-place spindle speed change (FB_SpindleControl): how long MC_MoveVelocity
         // Execute is held LOW to regenerate the trigger edge for the new velocity.
         // RunForward (VFD run) stays TRUE throughout -- only the PTO command edge is
@@ -425,7 +436,12 @@ NON_RETAIN
         // =========================================================
         // RECIPE HANDLER STATE
         // =========================================================
-        Recipe_CurrentProgram : Int;    // Active program number (1-5)
+        Recipe_CurrentProgram : Int;    // Active program number (1-10)
+        // Which recipe is actually sitting in DB_SelectedRecipe (0 = none/invalid).
+        // Written by STATE_RECIPE_LOAD(11) after a successful READ_DBL copy.
+        // Diagnostic value: if this disagrees with Recipe_CurrentProgram, the
+        // buffer is stale and the machine would be cutting the wrong geometry.
+        Recipe_LoadedProgram : Int;
         Recipe_CurrentLine : Int;       // Current line being executed
         Recipe_TotalLines : Int;        // Total lines in program
         Recipe_TargetX : Real;          // Current target X
@@ -932,6 +948,39 @@ NON_RETAIN
         Hist_SeqNum : DInt := 0;       // Monotonically increasing — HMI polls for change detection
         Hist_Clear  : Bool := FALSE;   // HMI writes TRUE to clear history; auto-resets next scan
         Hist_Log    : Array[0..19] of "AlarmEntry";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_SelectedRecipe - the ONE recipe buffer the machine actually runs from
+//                     (load-memory recipes, 2026-08-04)
+//
+// DB_RecipeProgram1..10 live in LOAD memory (UNLINKED) and cost no work memory.
+// FB_RecipeLoader copies the selected one into here with READ_DBL during
+// STATE_RECIPE_LOAD(11), before the pre-scan. FB_RecipePreScan and
+// FB_RecipeHandler are then bound to THIS block and nothing else.
+//
+// { S7_Optimized_Access := 'FALSE' } is MANDATORY, not a style choice:
+//   - READ_DBL requires source and destination to share a block access type,
+//     and the recipe DBs must be standard (an optimized DB may not contain a
+//     STRUCT, and RecipeLine is a UDT).
+//   - Change it to 'TRUE' and every recipe load fails at runtime with 16#0312.
+//
+// This block must NEVER get the UNLINKED / "only store in load memory"
+// attribute -- it is the destination, and it has to be readable by the program.
+//
+// Array bound must stay identical to DB_RecipeProgram*. Work memory cost:
+// ~12 KB total, replacing the ~21 KB the five old work-memory recipe DBs used.
+// See Program/docs/LOADMEM_COPY_ON_SELECT.md
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_SelectedRecipe"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Copy of the selected recipe's header
+        Lines  : Array[0..999] of "RecipeLine"; // Copy of the selected recipe's lines
     END_VAR
 BEGIN
 END_DATA_BLOCK

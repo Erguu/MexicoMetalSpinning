@@ -1,0 +1,412 @@
+// =============================================================================
+// Test_03_FB_Loader.scl -- Load-memory gate test, READ_DBL driver
+//
+// Part of the throwaway gate-test project for LOADMEM_COPY_ON_SELECT.md.
+// DO NOT IMPORT INTO THE MACHINE PROJECT.
+//
+// Answers the gate checks:
+//   G1  does READ_DBL move an Array[0..N] of a UDT, standard access?
+//         -> RetVal = 0 AND TestPassed = TRUE
+//   G4  how long does a full-recipe transfer take?
+//         -> Elapsed, ScanCount
+//   G5  is there a per-call size cap?
+//         -> SelectRecipe := 2 moves 12 000 bytes in one call
+//   plus: can a whole standard-access DB (header + lines) go in ONE call?
+//         -> TestMode := 2
+//
+// It also demonstrates the selection-latch rule that the real FB_RecipeLoader
+// must obey (see LOADMEM_COPY_ON_SELECT.md section 9): READ_DBL is
+// asynchronous and spans several scans, so the CASE branch that supplies
+// SRCBLK/DSTBLK must be chosen by a LATCHED copy of the selection. If the
+// branch changed mid-transfer the buffer would get the front of one recipe
+// and the tail of another, with RET_VAL = 0.
+//
+// READ_DBL is an instance-less system function: it is called directly, never
+// declared as a multi-instance. Only ONE call is ever active at a time (the
+// CASE picks exactly one branch, and REQ comes from a single state machine),
+// so W#16#80C3 (too many concurrent instances) cannot occur.
+// =============================================================================
+FUNCTION_BLOCK "FB_TestLoader"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_INPUT
+        Execute      : Bool;        // rising edge starts a transfer
+        Reset        : Bool;        // level: abort / clear error
+        SelectRecipe : Int := 1;    // 1..3
+        TestMode     : Int := 1;    // 1=Lines array  2=whole DB  3=Header only
+    END_VAR
+    VAR_OUTPUT
+        State        : Int;
+        Busy         : Bool;
+        Done         : Bool;
+        ErrorFlag    : Bool;
+        RetVal       : Int;         // READ_DBL return value (0 = OK), latched
+        LoadedRecipe : Int;         // which recipe landed in the buffer (0 = none)
+        Elapsed      : Time;        // G4
+        ScanCount    : Int;         // G4 -- async, so expect > 1
+
+        // --- verdict ---------------------------------------------------------
+        // Result is the one to read. The flags below are the detail behind it.
+        Result       : String[70];  // plain English: what passed, or what broke
+        TestPassed   : Bool;        // all applicable checks below passed
+
+        Chk_FirstLine : Bool;       // Lines[0] matches -- proves SOMETHING copied
+        Chk_LastLine  : Bool;       // final line (349 / 999) matches
+                                    //   -> FALSE here = transfer TRUNCATED
+        Chk_AllLines  : Bool;       // checksum over EVERY line matches
+                                    //   -> FALSE here = partial or wrong recipe
+        Chk_Header    : Bool;       // header copied correctly.
+                                    //   Forced TRUE in mode 1, where the header
+                                    //   is deliberately not part of the transfer
+                                    //   -- Result says so in words.
+
+        Checksum          : Real;   // measured sum of every Lines[].X
+        Checksum_Expected : Real;   // what it should have been
+    END_VAR
+    VAR
+        // NOTE: READ_DBL is NOT declared here. It is an instance-less system
+        // function (SFC 83 heritage) -- declaring it as a multi-instance gives
+        // "Data type READ_DBL is unknown". It is called directly below, and the
+        // OS tracks the async job internally. That is also why the documented
+        // W#16#80C3 error is "too many concurrent instances" globally rather
+        // than per-instance: there is no instance to count.
+        tonWatch    : TON;          // doubles as elapsed measurement and hang timeout
+        selLatched  : Int := 1;     // latched selection -- never cleared, so the
+                                    // instruction keeps being called with REQ=FALSE
+        modeLatched : Int := 1;
+        reqActive   : Bool;
+        busyRaw     : Bool;
+        retValRaw   : Int;
+        prevExecute : Bool;
+        rtExecute   : Bool;
+        i           : Int;
+        sumTmp      : Real;
+        expFirstX   : Real;
+        expLastX    : Real;
+        expLastIdx  : Int;
+        expLineCnt  : Int;
+        expToolCnt  : Int;
+        selStr      : String[4];    // selLatched as text, WITHOUT the leading
+                                    // sign INT_TO_STRING emits ("+1" -> "1")
+    END_VAR
+    CONST
+        ST_IDLE   : Int := 0;
+        ST_LATCH  : Int := 10;
+        ST_REQ    : Int := 20;
+        ST_WAIT   : Int := 30;
+        ST_VERIFY : Int := 40;
+        ST_DONE   : Int := 50;
+        ST_ERROR  : Int := 90;
+        WATCHDOG  : Time := T#10S;
+    END_CONST
+BEGIN
+    // -------------------------------------------------------------------------
+    // Rising edge on Execute
+    // -------------------------------------------------------------------------
+    #rtExecute := #Execute AND NOT #prevExecute;
+    #prevExecute := #Execute;
+
+    // -------------------------------------------------------------------------
+    // Reset -- always available, drives REQ low via the state
+    // -------------------------------------------------------------------------
+    IF #Reset THEN
+        #State := ST_IDLE;
+        #ErrorFlag := FALSE;
+        #Done := FALSE;
+        #LoadedRecipe := 0;
+    END_IF;
+
+    // -------------------------------------------------------------------------
+    // REQ is derived from state EVERY SCAN -- never latched independently.
+    // (Reset-path rule: there is no way for REQ to stay high without the state
+    //  machine holding it there.)
+    // -------------------------------------------------------------------------
+    #reqActive := (#State = ST_REQ) OR (#State = ST_WAIT);
+
+    // -------------------------------------------------------------------------
+    // THE READ_DBL CALL BLOCK
+    // Called every scan. The branch is chosen by #selLatched / #modeLatched --
+    // NOT by the live #SelectRecipe / #TestMode inputs. This is the latch rule.
+    //
+    // CALL FORM: RET_VAL is the FUNCTION RETURN VALUE, not an output parameter.
+    // Passing it as `RET_VAL => x` gives "The formal parameter 'RET_VAL' is
+    // invalid" + a parameter-count error. Assign the call instead.
+    // -------------------------------------------------------------------------
+    CASE #selLatched OF
+        1:  // DB_TestRecipe1 -> DB_SelectedTestRecipe
+            CASE #modeLatched OF
+                2:  // whole DB in one call (header + lines)
+                    #retValRaw := READ_DBL(
+                        REQ := #reqActive,
+                        SRCBLK := "DB_TestRecipe1",
+                        BUSY => #busyRaw,
+                        DSTBLK := "DB_SelectedTestRecipe");
+                3:  // header only
+                    #retValRaw := READ_DBL(
+                        REQ := #reqActive,
+                        SRCBLK := "DB_TestRecipe1".Header,
+                        BUSY => #busyRaw,
+                        DSTBLK := "DB_SelectedTestRecipe".Header);
+                ELSE // mode 1 -- Lines array only (the shape the real design uses)
+                    #retValRaw := READ_DBL(
+                        REQ := #reqActive,
+                        SRCBLK := "DB_TestRecipe1".Lines,
+                        BUSY => #busyRaw,
+                        DSTBLK := "DB_SelectedTestRecipe".Lines);
+            END_CASE;
+
+        2:  // DB_TestRecipe2 -> DB_SelectedTestRecipeBig
+            // 1000 lines / 12 000 bytes -- the size-cap probe
+            CASE #modeLatched OF
+                2:
+                    #retValRaw := READ_DBL(
+                        REQ := #reqActive,
+                        SRCBLK := "DB_TestRecipe2",
+                        BUSY => #busyRaw,
+                        DSTBLK := "DB_SelectedTestRecipeBig");
+                3:
+                    #retValRaw := READ_DBL(
+                        REQ := #reqActive,
+                        SRCBLK := "DB_TestRecipe2".Header,
+                        BUSY => #busyRaw,
+                        DSTBLK := "DB_SelectedTestRecipeBig".Header);
+                ELSE
+                    #retValRaw := READ_DBL(
+                        REQ := #reqActive,
+                        SRCBLK := "DB_TestRecipe2".Lines,
+                        BUSY => #busyRaw,
+                        DSTBLK := "DB_SelectedTestRecipeBig".Lines);
+            END_CASE;
+
+        3:  // DB_TestRecipe3 -> DB_SelectedTestRecipe
+            // Same buffer as recipe 1, different pattern -- proves which landed
+            CASE #modeLatched OF
+                2:
+                    #retValRaw := READ_DBL(
+                        REQ := #reqActive,
+                        SRCBLK := "DB_TestRecipe3",
+                        BUSY => #busyRaw,
+                        DSTBLK := "DB_SelectedTestRecipe");
+                3:
+                    #retValRaw := READ_DBL(
+                        REQ := #reqActive,
+                        SRCBLK := "DB_TestRecipe3".Header,
+                        BUSY => #busyRaw,
+                        DSTBLK := "DB_SelectedTestRecipe".Header);
+                ELSE
+                    #retValRaw := READ_DBL(
+                        REQ := #reqActive,
+                        SRCBLK := "DB_TestRecipe3".Lines,
+                        BUSY => #busyRaw,
+                        DSTBLK := "DB_SelectedTestRecipe".Lines);
+            END_CASE;
+    END_CASE;
+
+    // -------------------------------------------------------------------------
+    // Elapsed / watchdog. Runs only while a transfer is in flight.
+    // -------------------------------------------------------------------------
+    #tonWatch(IN := #reqActive, PT := WATCHDOG);
+    IF #reqActive THEN
+        #ScanCount := #ScanCount + 1;
+        #Elapsed := #tonWatch.ET;
+    END_IF;
+
+    // -------------------------------------------------------------------------
+    // State machine
+    // -------------------------------------------------------------------------
+    CASE #State OF
+
+        // --- IDLE ------------------------------------------------------------
+        ST_IDLE:
+            IF #rtExecute AND #SelectRecipe >= 1 AND #SelectRecipe <= 3 THEN
+                #State := ST_LATCH;
+            END_IF;
+
+        // --- LATCH: freeze the selection, wipe the buffer ---------------------
+        // Wiping matters: without it a stale buffer from a previous run could
+        // make the verification pass without any data having moved.
+        ST_LATCH:
+            #selLatched  := #SelectRecipe;
+            #modeLatched := #TestMode;
+            #Done := FALSE;
+            #ErrorFlag := FALSE;
+            #TestPassed := FALSE;
+            #Chk_FirstLine := FALSE;
+            #Chk_LastLine := FALSE;
+            #Chk_AllLines := FALSE;
+            #Chk_Header := FALSE;
+            #LoadedRecipe := 0;
+            #ScanCount := 0;
+            #Checksum := 0.0;
+            #RetVal := 0;
+            #Result := 'running...';
+
+            IF #selLatched = 2 THEN
+                FOR #i := 0 TO 999 DO
+                    "DB_SelectedTestRecipeBig".Lines[#i].X := 0.0;
+                    "DB_SelectedTestRecipeBig".Lines[#i].Z := 0.0;
+                    "DB_SelectedTestRecipeBig".Lines[#i].F := 0;
+                    "DB_SelectedTestRecipeBig".Lines[#i].CMD := B#16#0;
+                    "DB_SelectedTestRecipeBig".Lines[#i].Param := B#16#0;
+                END_FOR;
+                "DB_SelectedTestRecipeBig".Header.LineCount := 0;
+                "DB_SelectedTestRecipeBig".Header.ToolCount := 0;
+                "DB_SelectedTestRecipeBig".Header.sName := '';
+            ELSE
+                FOR #i := 0 TO 349 DO
+                    "DB_SelectedTestRecipe".Lines[#i].X := 0.0;
+                    "DB_SelectedTestRecipe".Lines[#i].Z := 0.0;
+                    "DB_SelectedTestRecipe".Lines[#i].F := 0;
+                    "DB_SelectedTestRecipe".Lines[#i].CMD := B#16#0;
+                    "DB_SelectedTestRecipe".Lines[#i].Param := B#16#0;
+                END_FOR;
+                "DB_SelectedTestRecipe".Header.LineCount := 0;
+                "DB_SelectedTestRecipe".Header.ToolCount := 0;
+                "DB_SelectedTestRecipe".Header.sName := '';
+            END_IF;
+
+            // expected values for the verification step
+            CASE #selLatched OF
+                1: #expFirstX := 1.110000e+002; #expLastX := 3.495000e+002;
+                   #expLastIdx := 349; #Checksum_Expected := 6.350000e+002;
+                   #expLineCnt := 350; #expToolCnt := 4;
+                2: #expFirstX := 2.220000e+002; #expLastX := 9.995000e+002;
+                   #expLastIdx := 999; #Checksum_Expected := 1.722000e+003;
+                   #expLineCnt := 1000; #expToolCnt := 4;
+                3: #expFirstX := 3.330000e+002; #expLastX := 3.335000e+002;
+                   #expLastIdx := 349; #Checksum_Expected := 6.665000e+002;
+                   #expLineCnt := 350; #expToolCnt := 2;
+            END_CASE;
+
+            #State := ST_REQ;
+
+        // --- REQ: first scan with REQ high (issued at the top of this scan) ---
+        ST_REQ:
+            #State := ST_WAIT;
+
+        // --- WAIT: hold REQ on the SAME branch until BUSY drops --------------
+        // RetVal is LATCHED here, not mirrored every scan: once REQ drops, the
+        // next call returns its idle value and would wipe the result before the
+        // tester ever saw it.
+        ST_WAIT:
+            IF #tonWatch.Q THEN
+                #RetVal := -1;              // watchdog: BUSY never cleared
+                #Result := 'FAIL - timeout, BUSY never cleared';
+                #State := ST_ERROR;
+            ELSIF NOT #busyRaw THEN
+                #RetVal := #retValRaw;      // the value that matters
+                IF #retValRaw = 0 THEN
+                    #State := ST_VERIFY;
+                ELSE
+                    #Result := CONCAT(IN1 := 'FAIL - READ_DBL refused it, RetVal=',
+                                      IN2 := INT_TO_STRING(#retValRaw));
+                    #State := ST_ERROR;
+                END_IF;
+            END_IF;
+
+        // --- VERIFY: did the data actually land? -----------------------------
+        ST_VERIFY:
+            #sumTmp := 0.0;
+
+            IF #modeLatched = 3 THEN
+                // header-only transfer: line checks are not applicable.
+                // Zero the expected checksum too, so the watch table does not
+                // show "Checksum 0.0 / Expected 635.0" and read as a failure.
+                #Chk_FirstLine := TRUE;
+                #Chk_LastLine := TRUE;
+                #Chk_AllLines := TRUE;
+                #Checksum_Expected := 0.0;
+            ELSIF #selLatched = 2 THEN
+                #Chk_FirstLine := ("DB_SelectedTestRecipeBig".Lines[0].X = #expFirstX);
+                #Chk_LastLine := ("DB_SelectedTestRecipeBig".Lines[#expLastIdx].X = #expLastX);
+                FOR #i := 0 TO 999 DO
+                    #sumTmp := #sumTmp + "DB_SelectedTestRecipeBig".Lines[#i].X;
+                END_FOR;
+            ELSE
+                #Chk_FirstLine := ("DB_SelectedTestRecipe".Lines[0].X = #expFirstX);
+                #Chk_LastLine := ("DB_SelectedTestRecipe".Lines[#expLastIdx].X = #expLastX);
+                FOR #i := 0 TO 349 DO
+                    #sumTmp := #sumTmp + "DB_SelectedTestRecipe".Lines[#i].X;
+                END_FOR;
+            END_IF;
+
+            IF #modeLatched <> 3 THEN
+                #Checksum := #sumTmp;
+                #Chk_AllLines := (#sumTmp = #Checksum_Expected);
+            END_IF;
+
+            // header only travels in modes 2 and 3
+            IF #modeLatched = 1 THEN
+                #Chk_Header := TRUE;        // not applicable
+            ELSIF #selLatched = 2 THEN
+                #Chk_Header := ("DB_SelectedTestRecipeBig".Header.LineCount = #expLineCnt)
+                               AND ("DB_SelectedTestRecipeBig".Header.ToolCount = #expToolCnt);
+            ELSE
+                #Chk_Header := ("DB_SelectedTestRecipe".Header.LineCount = #expLineCnt)
+                               AND ("DB_SelectedTestRecipe".Header.ToolCount = #expToolCnt);
+            END_IF;
+
+            #TestPassed := #Chk_FirstLine AND #Chk_LastLine AND #Chk_AllLines AND #Chk_Header;
+            #LoadedRecipe := #selLatched;
+
+            // --- put the verdict into words --------------------------------
+            // Failure order matters: it is the most diagnostic thing here.
+            // Nothing copied -> truncated -> wrong/partial -> header.
+            // INT_TO_STRING emits a sign character, so 1 becomes '+1'. Strip it.
+            #selStr := DELETE(IN := INT_TO_STRING(#selLatched), L := 1, P := 1);
+
+            IF NOT #Chk_FirstLine THEN
+                #Result := 'FAIL - line 0 wrong: nothing was copied';
+            ELSIF NOT #Chk_LastLine THEN
+                #Result := 'FAIL - last line wrong: transfer TRUNCATED (size cap)';
+            ELSIF NOT #Chk_AllLines THEN
+                #Result := 'FAIL - checksum wrong: partial copy or wrong recipe';
+            ELSIF NOT #Chk_Header THEN
+                #Result := 'FAIL - header did not copy correctly';
+            ELSIF #modeLatched = 3 THEN
+                #Result := CONCAT(IN1 := 'PASS - recipe ',
+                           IN2 := CONCAT(IN1 := #selStr,
+                           IN2 := ' header only (lines not part of this mode)'));
+            ELSIF #modeLatched = 2 THEN
+                #Result := CONCAT(IN1 := 'PASS - recipe ',
+                           IN2 := CONCAT(IN1 := #selStr,
+                           IN2 := ' whole DB: header + every line'));
+            ELSE
+                #Result := CONCAT(IN1 := 'PASS - recipe ',
+                           IN2 := CONCAT(IN1 := #selStr,
+                           IN2 := ' every line (header not copied in mode 1)'));
+            END_IF;
+
+            #State := ST_DONE;
+
+        // --- DONE ------------------------------------------------------------
+        ST_DONE:
+            #Done := TRUE;
+            IF #rtExecute AND #SelectRecipe >= 1 AND #SelectRecipe <= 3 THEN
+                #State := ST_LATCH;
+            END_IF;
+
+        // --- ERROR: cleared only by Reset ------------------------------------
+        ST_ERROR:
+            #ErrorFlag := TRUE;
+            #Done := FALSE;
+            #LoadedRecipe := 0;
+    END_CASE;
+
+    // -------------------------------------------------------------------------
+    // Output mirror. NOTE: RetVal is deliberately NOT mirrored here -- it is
+    // latched in ST_WAIT (see the comment there).
+    // -------------------------------------------------------------------------
+    #Busy := #reqActive AND #busyRaw;
+END_FUNCTION_BLOCK
+
+// -----------------------------------------------------------------------------
+// Instance DB for FB_TestLoader
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_TestLoaderInst"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_TestLoader"
+BEGIN
+END_DATA_BLOCK

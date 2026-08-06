@@ -1,0 +1,53 @@
+// =============================================================================
+// Test_01_Types.scl -- Load-memory gate test, UDTs
+//
+// Part of the throwaway gate-test project for LOADMEM_COPY_ON_SELECT.md.
+// DO NOT IMPORT INTO THE MACHINE PROJECT.
+//
+// These are structural copies of "RecipeLine" / "RecipeHeader" from
+// 01_DataTypes.scl, renamed with a Test prefix so that an accidental import
+// into the machine project cannot overwrite the real UDTs.
+//
+// Byte layout must stay identical to the real types -- that is what is
+// being tested. RecipeLine = 4+4+2+1+1 = 12 bytes, no padding.
+//
+// Import order: this file FIRST, then Test_02, Test_03, Test_04.
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// TestRecipeLine -- structural copy of "RecipeLine" (12 bytes)
+// -----------------------------------------------------------------------------
+TYPE "TestRecipeLine"
+VERSION : 0.1
+    STRUCT
+        X : Real;       // 4 bytes
+        Z : Real;       // 4 bytes
+        F : Int;        // 2 bytes
+        CMD : Byte;     // 1 byte
+        Param : Byte;   // 1 byte
+    END_STRUCT;
+END_TYPE
+
+// -----------------------------------------------------------------------------
+// TestRecipeHeader -- structural copy of "RecipeHeader"
+// Included so the "copy the whole DB in one call" test (mode 2) exercises the
+// same header-then-array layout the real design would use.
+// -----------------------------------------------------------------------------
+TYPE "TestRecipeHeader"
+VERSION : 0.1
+    STRUCT
+        sName : String[20];
+        LineCount : Int;
+        Valid : Bool;
+        PreScanned : Bool;
+        MinX : Real;
+        MaxX : Real;
+        MinZ : Real;
+        MaxZ : Real;
+        ProvidesToolConfig : Bool;
+        ToolCount : Int;
+        AutoCalcAngles : Bool;
+        ToolCode_List : Array[1..4] of Int;
+        ToolAngle_List : Array[1..4] of Real;
+    END_STRUCT;
+END_TYPE

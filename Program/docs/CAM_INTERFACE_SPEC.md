@@ -56,6 +56,26 @@ The blank (sheet metal disc) is clamped against a rotating mandrel. The CNC-cont
 
 The CAM program must output a single `.scl` file containing one `DATA_BLOCK` per program. This file is imported directly into TIA Portal.
 
+> ### ⚠️ MANDATORY BLOCK ATTRIBUTES (changed 2026-08-04 — load-memory recipes)
+>
+> Recipes now live in **load memory** and are copied into `DB_SelectedRecipe` at cycle start. Three
+> things in the block header are no longer optional:
+>
+> | Line | Value | If you get it wrong |
+> |---|---|---|
+> | `{ S7_Optimized_Access := ... }` | **`'FALSE'`** | `READ_DBL` refuses the transfer at runtime → `16#0312`, machine will not start |
+> | `UNLINKED` | present, **before `NON_RETAIN`** | Wrong order → blocks will not generate from source (loud). **Missing entirely → SILENT FAILURE**, see below |
+> | `Lines : Array[0..999]` | exactly 1000 | Must match `DB_SelectedRecipe`; `LineCount` is validated against 1..1000 |
+>
+> **The silent failure.** If `UNLINKED` is omitted, the recipe DB lands in **work memory** instead of
+> load memory. `READ_DBL` still succeeds (it reads the block's start values either way), the recipe
+> runs correctly, every test passes — and roughly 12 KB of work memory per recipe is quietly consumed
+> again. Nothing reports it. It surfaces only when the CPU runs out of memory, long after the fact.
+> A load-memory DB is also **not monitorable online** — that is the quickest way to confirm the
+> attribute took effect.
+>
+> Verified on TIA V17 / CPU 1214C, 2026-08-04. Evidence: `Program/docs/LOADMEM_COPY_ON_SELECT.md`.
+
 ### 3.1 File Template
 
 ```scl
@@ -67,8 +87,9 @@ The CAM program must output a single `.scl` file containing one `DATA_BLOCK` per
 // ============================================
 
 DATA_BLOCK "DB_RecipeProgram[N]"
-{ S7_Optimized_Access := 'TRUE' }
+{ S7_Optimized_Access := 'FALSE' }
 VERSION : 0.1
+UNLINKED
 NON_RETAIN
     VAR
         Header : "RecipeHeader";
@@ -254,8 +275,9 @@ A simple bowl-forming program (illustrative coordinates):
 
 ```scl
 DATA_BLOCK "DB_RecipeProgram1"
-{ S7_Optimized_Access := 'TRUE' }
+{ S7_Optimized_Access := 'FALSE' }
 VERSION : 0.1
+UNLINKED
 NON_RETAIN
     VAR
         Header : "RecipeHeader";
@@ -356,7 +378,10 @@ Before finalizing the SCL file, verify:
 - [ ] Total lines ≤ 1000
 - [ ] Header.sName ≤ 20 characters
 - [ ] DB name matches slot: `DB_RecipeProgram[1-5]`
-- [ ] File includes `NON_RETAIN` keyword
+- [ ] File includes `UNLINKED` **before** `NON_RETAIN` (both keywords present, in that order)
+- [ ] Block attribute is `{ S7_Optimized_Access := 'FALSE' }`, not `'TRUE'`
+- [ ] `Lines : Array[0..999]`
+- [ ] After import: the DB **cannot** be monitored online (proves it is in load memory)
 
 ---
 

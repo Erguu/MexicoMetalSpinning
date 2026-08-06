@@ -26,7 +26,10 @@
 | HMI Object | PLC Address | Type | Range | Description |
 |------------|-------------|------|-------|-------------|
 | **Mode Switch** | `DB_HMI.UseTextParser` | Bool | - | Not used — leave FALSE |
-| **Recipe Selector** | `DB_HMI.ProductSelect` | Int | 1-5 | Which recipe to use |
+| **Recipe Selector** | `DB_HMI.ProductSelect` | Int | **1-10** | Which recipe to use. Extended from 1-5 on 2026-08-04 (load-memory recipes). Clamped 1..10 in FB_Process |
+| Program names | `DB_HMI.ProgramNames[1..10]` | String[20] | — | **Array extended 1..5 → 1..10 on 2026-08-04. HMI project must be updated to match**, or programs 6-10 are unnamed |
+| Program valid | `DB_HMI.ProgramValid[1..10]` | Bool | — | Same extension as above |
+| Loaded recipe | `DB_Diagnostic.Recipe_LoadedProgram` | Int | 0-10 | Which recipe is actually in `DB_SelectedRecipe` (0 = none). If it disagrees with the selector, the buffer is stale |
 | **Feedrate Override** | `DB_HMI.FeedrateOverride` | Real | 50-200 | G1 speed % (100=normal) |
 | **Rapid Override** | `DB_HMI.RapidOverride` | Real | 50-200 | G0 speed % (100=normal) |
 | **Single Step Mode** | `DB_HMI.SingleStepMode` | Bool | - | TRUE=stop after each line |

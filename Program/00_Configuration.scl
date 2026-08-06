@@ -415,6 +415,7 @@ BEGIN
     "DB_MachineConfig".SpindleSpeedChange_ExecLowTime := T#0S;      // one scan; raise if VFD needs settle time
     "DB_MachineConfig".SpindleSpeedChange_DropRunForward := FALSE;  // TRUE only if VFD latches freq at RunForward edge
     "DB_MachineConfig".SpindleResumeSpeedupTime := T#5S;           // spin-up wait on Continue from PAUSED before axes return
+    "DB_MachineConfig".RecipeLoadTimeout      := T#10S;            // READ_DBL hang watchdog in STATE_RECIPE_LOAD(11) -> 16#0312
 
     "DB_MachineConfig".Timeout_ToolChange     := T#30S;
     "DB_MachineConfig".Timeout_EStopDiscrep   := T#500MS;

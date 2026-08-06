@@ -97,8 +97,8 @@ The schema of all DBs in the project is defined here. All HMI tag connections ar
 
 | DB | Capacity | Description |
 |----|---------|-------------|
-| `DB_RecipeProgram1` | 1000 lines × 12 bytes = 12 KB | Program 1 lines |
-| `DB_RecipeProgram2..5` | Same | Program 2-5 lines |
+| `DB_RecipeProgram1..10` | 1000 lines × 12 bytes ≈ 12 KB each | **LOAD MEMORY ONLY** (`UNLINKED`) — zero work memory, cannot be read directly or monitored online. Standard access (mandatory for `READ_DBL`) |
+| `DB_SelectedRecipe` | Header + 1000 lines ≈ 12 KB | **The one buffer the machine runs from.** Work memory, standard access. Filled by `FB_RecipeLoader` in STATE_RECIPE_LOAD(11). `FB_RecipePreScan` and `FB_RecipeHandler` bind here and nowhere else |
 
 #### Interface and Control DBs
 
@@ -182,6 +182,32 @@ STATE 999→ Error (reset with Execute=FALSE)
 ### `05_RecipeHandler.scl` — Recipe Engine
 
 The most critical business logic file.
+
+#### `FB_RecipeLoader`
+**File:** `05_RecipeHandler.scl` · **Added:** 2026-08-04
+Copies the selected `DB_RecipeProgram<n>` out of load memory into `DB_SelectedRecipe` with **two
+sequential `READ_DBL` sub-reference transfers — `.Header`, then `.Lines`**. Called every scan from
+FB_Process; `Execute` is TRUE only in STATE_RECIPE_LOAD(11).
+- **In:** `Execute`, `ProgramNo` (1..10), `Reset` · **Out:** `Done`, `Busy`, `Error`, `ErrorCode`, `ErrorPhase`, `LoadedProgram`
+- States: 0 IDLE → 10 LATCH → 20 REQ_HDR → 30 WAIT_HDR → 35 HDR_SETTLE → 40 REQ_LINES → 50 WAIT_LINES → 60 DONE / 90 ERROR
+- **Why two calls, not one whole-DB call (2026-08-06, field fault):** the original version copied the
+  whole DB in one call. On the machine that delivered `Header` correctly and left `Lines` entirely
+  zero, `RET_VAL = 0`, no error — a structured copy that matched the first member and abandoned the
+  second. The gate test missed it: whole-DB mode was only proven at 350 lines / 4.3 KB, while the
+  1000-line / 12 KB case was proven with the `.Lines` sub-reference. Both calls now use the exact form
+  the gate test passed, and a sub-reference copy cannot half-succeed — a bad `Lines` transfer returns a
+  non-zero `RET_VAL` instead of an empty buffer. `ErrorPhase` (1 = Header, 2 = Lines) reaches the HMI
+  through `DB_Diagnostic.Error_Text`.
+- `phaseLines` is latched exactly like `selLatched`, and only ever flips in state 35 where `REQ` is low,
+  so a phase can never change mid-transfer
+- `REQ` is derived from the state every scan, never latched independently (reset-path rule)
+- **Selection latch:** the program number is frozen at LATCH and the live `ProgramNo` ignored for the
+  rest of the transfer. `READ_DBL` is async; a branch change mid-transfer would splice two recipes
+  together with `RET_VAL = 0`. Do not remove.
+- `READ_DBL` is instance-less and `RET_VAL` is its **return value**, not a parameter — see the block
+  header comment; both mistakes cost a build.
+- Failure → `16#0312` raised by FB_Process. Watchdog `DB_MachineConfig.RecipeLoadTimeout` (T#10S).
+- Design + gate-test evidence: `Program/docs/LOADMEM_COPY_ON_SELECT.md`
 
 #### `FB_RecipePreScan`
 Validates recipe lines before each run: G0/G1 soft limits + bounding box,
@@ -581,7 +607,7 @@ higher**; same or lower tier goes to history only. All errors always go to histo
 |------|---------|-------------|
 | 4 | Safety interlock | 0x04xx (E-Stop, door, air, drives), 0x0111–0x011F (HW limit) |
 | 3 | Motion / TO fault | 0x0001–0x002F (axis/homing/power/TO poller), 0x0101–0x0104 (soft limit), 0x0121–0x0124 (PNP), 0x0203–0x0206 (tool motion), 0x05xx (spindle) |
-| 2 | Project error | 0x0300–0x0311 (recipe, incl. 0x0311 missing tool table), 0x0201–0x0202 (tool config) |
+| 2 | Project error | 0x0300–0x0313 (recipe, incl. 0x0311 missing tool table, 0x0312 load failure, 0x0313 empty/corrupt buffer), 0x0201–0x0202 (tool config) |
 | 1 | Warning / info | 0x0010 (user STOP), unknown codes |
 
 ### Single-Writer Rule for DB_HMI.ErrorText (2026-07-02)
@@ -623,6 +649,8 @@ text; the queue path (`FC_ReportError`) shows its `Details` string as the EN tex
 | 0x030B | RecipeHandler | Spindle stop timeout (15s) |
 | 0x0310 | FB_Process | Recipe not loaded (TotalLines invalid) |
 | 0x0311 | FB_Process | Recipe has no tool table (Header.ProvidesToolConfig=FALSE) — regenerate in CAM |
+| 0x0312 | FB_Process | Recipe load from load memory failed (STATE_RECIPE_LOAD(11), `READ_DBL`). `DB_Diagnostic.Error_Text` carries phase (1=Header, 2=Lines) + RET_VAL; 16#FFFF = watchdog, transfer never completed |
+| 0x0313 | FB_Process | Recipe buffer empty/corrupt after load: `Lines[LineCount-1].CMD <> 99` in STATE_PRE_SCAN(12). The END marker (CMD=99) is mandatory (PLC_Recipe_Format_Spec.md); its absence means the Lines array did not arrive. Added 2026-08-06 after a field fault where an all-zero Lines array ran as a silent no-op program |
 | 0x0401 | SafetyMonitor | E-Stop active |
 | 0x0402 | SafetyMonitor | Safety door open |
 | 0x0403 | SafetyMonitor | Drives not ready |
