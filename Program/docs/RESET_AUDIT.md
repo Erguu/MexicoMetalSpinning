@@ -254,6 +254,51 @@ no reset path themselves — but the three actuator flags they drive do.
 
 **Result: PASS** (no gaps)
 
+**Findings — 2026-08-07 (SheetHolder 5/2 → 5/3 blocked centre, `bSheetHolderRetractHold`):**
+
+`DB_Cylinder_SheetHolder.ValveType` 1→2; `Sol_B` now driven on `%Q12.3` from OB1; the one-scan
+`bSheetHolderRetractPulse` replaced by the held latch `bSheetHolderRetractHold`.
+
+- [x] **Checkpoint 1 — hard reset.** `bDoHardReset` sets `bSheetHolderRetractHold := TRUE`
+      (`06:1797`), not FALSE. TRUE *is* the safe default here: the latch commands the retract,
+      and a blocked centre holds the piston wherever a fault left it, so clearing the latch on
+      reset would strand the sheet holder extended. This is the same polarity the old pulse had.
+- [x] **Checkpoint 2 — recipe reset.** Nothing to do. `FB_RecipeHandler` never writes any
+      SheetHolder field; the cylinder is driven only from FB_Process and `FC_CylinderDispatch`.
+- [x] **Checkpoints 3 & 4 — STATE_STOPPED / STATE_ERROR.** Both already clear
+      `SheetHolder.Cmd_Extend` every scan (`06:1881`, `06:2960`) and that is unchanged. The
+      retract latch is **deliberately not cleared** in either state: STOPPED is reached from
+      STOPPING while the retract may still be in progress, and the latch drives the *safe*
+      direction. Clearing it there would abandon the piston mid-stroke — the exact failure the
+      pulse→hold change exists to prevent.
+- [x] **Deterministic clear path** (the requirement the checkpoints exist to satisfy) is
+      unconditional and outside the state CASE (`06:3149-3152`): the latch drops the scan the
+      cylinder FB reports **State 4 (AT RETRACT)**. `PositioningMode=0` reaches State 4 from
+      State 2 on `tRetract.Q` (`09:612-613`) after `Timeout_Retract` = T#1S, with no branch that
+      can skip it — the latch cannot hang. It is cleared a second time in STATE_SHEET_WAIT Ph1
+      before `Cmd_Extend` is asserted, so it can never block an extend.
+- [x] Dropping the latch at State 4 does **not** release the cylinder: `09:852-854` keeps
+      `Sol_B := TRUE` in State 4 for `PositioningMode=0 AND ValveType<>1`. Consequence to accept:
+      the retract coil is continuously energised while the machine is idle, matching BackSupport.
+- [x] **No new TON timer.** `tonSheetHolderRetract` is unchanged and still gated on
+      `State = 14 AND bSheetWaitPhase3`, so it cannot accumulate ET elsewhere.
+- [x] No new `HasWarning` / `WarningText` write, no new DB field, no new HMI tag.
+- [x] **State -1 (SafetyOK=FALSE) re-verified for ValveType=2.** The guard at `09:454-462` runs
+      before any valve-type branching and drives both `Sol_A` and `Sol_B` FALSE, so E-Stop
+      de-energises the new `%Q12.3` output too.
+- [ ] **OPEN — fail-safe behavior change, needs machine sign-off (not a reset-path defect).**
+      Both coils off on a blocked centre means the SheetHolder now **freezes in place** on power
+      loss or E-Stop instead of spring-retracting. Rationale matches MandrelLock (do not release
+      a blank while the spindle coasts), and Reset recovers it, but this must be confirmed
+      against the risk assessment before shipping.
+- [ ] **OPEN — commissioning.** Verify `%Q12.3` is the retract coil, confirm the real retract
+      stroke time against `Timeout_Retract` (T#1S) and against the Ph3 advance timer
+      `CylSheetHolder_RetractTime` (T#0.5S, FC_LoadConfig `00:422`) — Ph3 hands over to
+      LOCK_EXTEND_WAIT after 0.5 s while the retract is still being driven, which was also true
+      of the old spring behavior but is worth re-timing now that the stroke is powered.
+
+**Result: PASS on all four checkpoints** (2 open items: fail-safe sign-off, commissioning timings)
+
 ---
 
 ### `08_Main_OB1.scl` — Physical Output Assignments
@@ -267,6 +312,9 @@ Priority: **MEDIUM** — outputs must be assigned every scan from FB state; no l
 - [ ] BackSupport Sol_B: `FB.Sol_B OR SolB_Cmd41` — confirm SolB_Cmd41 clears on reset
       (handled in FB_Process STATE_STOPPED and RecipeHandler RESET — cross-check both fire).
 - [ ] BackSupport SolAtmosphere: `SolAtmo_Cmd` — same as above.
+- [x] SheetHolder Sol_A/Sol_B (`%Q12.2` / `%Q12.3`): plain `Output := FB.Sol_X`, no override on
+      either. Both come from one exclusive `CASE` in FB_CylinderControl, so the 5/3 valve can
+      never see both coils energised — do **not** add a CMD-style OR-override here (ITEM-41).
 - [ ] MandrelLock Sol_A: driven by FB_CylinderControl.Sol_A — FB state -1 clears it when SafetyOK=FALSE.
 - [ ] ToolHeadLock Sol_A: driven by FB_CylinderControl.Sol_A — same EStop path.
 - [ ] Contactor / Enable outputs: FC_ContactorControl blocks them when MachineState=0 (STOPPED).
@@ -447,3 +495,40 @@ Additional:
 - **State 11 safety treatment** matches PRE_SCAN(12) — included in the drive-fault bypass (7 sites),
   the soft-limit `SafeToRun` bypass, and excluded from the `FB_LimitMonitor` fault guard. No motion
   occurs in this state.
+
+---
+
+## BackSupport coil sequence + end-of-recipe retract (2026-08-07) — NOT COMPILED, NOT COMMISSIONED
+
+Branch `fix/backsupport-coil-sequence`. Closes ITEM-41. Three new things need reset-path cover:
+the latched `DB_Cylinder_BackSupport.Cmd_Retract`, the `bBSEndRetract` latch, and the
+`tonBSEndRetract` timer. `SolB_Cmd41` was **deleted** — one fewer thing to reset.
+
+| # | Checkpoint | Where | Status |
+|---|---|---|---|
+| 1 | Hard reset clears it | `bDoHardReset` block, `06_MainProcess.scl` | **PASS** — `Cmd_Retract := FALSE`, `bBSEndRetract := FALSE`, `tonBSEndRetract(IN := FALSE)`, and `bBSTerminalPrev := TRUE` (seeded, see below) |
+| 2 | Recipe reset clears it | `IF #Reset THEN`, `05_RecipeHandler.scl` | **PASS** — `Cmd_Retract := FALSE` added alongside the existing `Cmd_Extend` / `SolAtmo_Cmd` clears, so a recipe can never start with a stale retract held |
+| 3 | STATE_STOPPED clears it | STOPPED CASE block + end-retract block | **PASS** — entering STOPPED *fires* the retract, which ends by driving `Cmd_Retract := FALSE` and dropping its own latch. `SolAtmo_Cmd := FALSE` for the whole window |
+| 4 | STATE_ERROR clears it | ERROR CASE block + end-retract block | **PASS** — same path. ERROR additionally clears `Cmd_Extend` and `SolAtmo_Cmd` every scan |
+
+Additional:
+- **Edge-triggered, and the edge memory is seeded.** `bBSTerminalPrev := TRUE` in the hard reset.
+  Without it, power-up (which begins in STOPPED, a terminal state) would fire a retract nobody asked
+  for. Same seeding pattern as the CMD=41 button edges.
+- **Leaving a terminal state mid-window clears `Cmd_Retract` explicitly.** Start pressed, or MANUAL
+  entered, inside the 2 s retract: the latch drops *and* `Cmd_Retract := FALSE` is written. The MANUAL
+  route never raises `bResetRecipe`, so relying on checkpoint 2 alone would have left the cylinder held
+  retracting for the whole manual session. This was found by tracing, not by test.
+- **New TON:** `tonBSEndRetract`, `IN := bBSEndRetract`. The latch is FALSE in every non-terminal
+  state, so `IN` drops and the timer resets on leaving. Also called with `IN := FALSE` in the hard reset.
+- **Ordering is load-bearing.** The end-retract block sits **after** the `#fbRecipeHandler` call, making
+  FB_Process the last writer of `Cmd_Retract` in the scan. The handler's `IF #Reset THEN` block is
+  level-triggered and also writes BackSupport commands; if the order were reversed it would wipe the
+  retract command within the same scan.
+- **`Timeout_Retract := T#24H` is deliberate.** While `Cmd_Retract` is held the FB must stay in State 2
+  (`Sol_A` off, `Sol_B` on). If the timeout expired it would drop to State 4, where Mode 0 + 5/3 latches
+  `Sol_B` ON with no exit except `Cmd_Extend` (`09:851-854`) — the same dead-end as State 3. Do not
+  "tidy" this value.
+- **Physical outputs:** `%Q12.0` and `%Q12.1` are now assigned straight from the FB, which is internally
+  mutually exclusive. The `OR SolB_Cmd41` override on `%Q12.1` is gone, so both-coils-energised is no
+  longer reachable by any input combination.

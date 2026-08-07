@@ -716,9 +716,13 @@ BEGIN
         #tonMoveTimeout(IN := FALSE, PT := "DB_MachineConfig".Timeout_Motion);
         #tonPauseMove(IN := FALSE, PT := "DB_MachineConfig".Timeout_Motion);
         #tonDwell(IN := FALSE, PT := T#0S);
-        // Clear CMD=40/41 BackSupport overrides so next run starts clean
+        // Clear CMD=40/41 BackSupport commands so next run starts clean.
+        // Cmd_Retract is cleared here too: it is latched by CMD=41 P2 and by the
+        // end-of-recipe retract in FB_Process, and a recipe must never start with a
+        // stale retract command still held. FB_Process drops its end-retract latch on
+        // leaving STOPPED/ERROR/COMPLETE, so this cannot cut that sequence short.
         "DB_Cylinder_BackSupport".Cmd_Extend  := FALSE;
-        "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;
+        "DB_Cylinder_BackSupport".Cmd_Retract := FALSE;
         "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
     END_IF;
     
@@ -839,19 +843,25 @@ BEGIN
                         #state := STATE_CYL_GOTO;
 
                     CMD_ATMO:
-                        // BackSupport atmosphere control — fire-and-go (no axis wait)
+                        // BackSupport atmosphere / retract control — fire-and-go (no axis wait).
+                        // Operator spec 2026-08-07 (see DB_Cylinder_BackSupport header):
+                        //   P1 -> atmosphere ON, Sol_A stays ON  (cylinder slack, still commanded out)
+                        //   P2 -> atmosphere OFF, retract        (Sol_A off, Sol_B on)
+                        //   P3 -> release retract                (all coils off, blocked centre holds)
+                        //
+                        // Sol_B is driven by the cylinder FB's own State 2, NOT by an output override.
+                        // Cmd_Retract is a level input and nothing else writes it for this cylinder
+                        // (FC_CylinderDispatch wires only the two *Full buttons), so a single write
+                        // latches until we clear it at P3 or at end of recipe.
                         IF #Lines[#lineIndex].Param = 1 THEN
-                            "DB_Cylinder_BackSupport".SolB_Cmd41  := TRUE;   // hold Sol_B ON independently
                             "DB_Cylinder_BackSupport".SolAtmo_Cmd := TRUE;   // energise atmosphere valve
+                            // Sol_A deliberately left ON here (FB stays in State 3).
                         ELSIF #Lines[#lineIndex].Param = 2 THEN
                             "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;  // de-energise atmosphere valve
-                            // SolB_Cmd41 stays TRUE — Sol_B remains energised
+                            "DB_Cylinder_BackSupport".Cmd_Retract  := TRUE;  // FB State 3 -> 2: Sol_A off, Sol_B on
                         ELSIF #Lines[#lineIndex].Param = 3 THEN
-                            // Release BOTH overrides — identical clear to STATE_STOPPED / ERROR / COMPLETE.
-                            // Without this the Sol_B override latches until the program ends: Param=2
-                            // only closes the atmosphere valve, Sol_B stays energised with no way back.
-                            "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;  // release retract solenoid override
-                            "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;  // de-energise atmosphere valve
+                            "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
+                            "DB_Cylinder_BackSupport".Cmd_Retract  := FALSE; // FB State 2 -> 0: both coils off
                         END_IF;
                         #state := STATE_NEXT;
 
@@ -1170,7 +1180,11 @@ BEGIN
         // === STATE_CYL_GOTO_WAIT (71) ===
         // CMD=40: Wait for BackSupport AtSetpoint (Mode=0: after Timeout_Extend elapses).
         // Cmd_Extend re-written every scan to hold the extend command.
-        // On done: clear Cmd_Extend (5/3 blocked-center valve holds mechanically).
+        // On done: clear Cmd_Extend. NOTE this does NOT de-energise the cylinder -- the FB
+        // stays in State 3 and holds Sol_A ON (09:833-835). That is the operator's spec:
+        // Sol_A stays energised until CMD=41 P2 latches Cmd_Retract. (The old comment here
+        // claimed "5/3 blocked-center holds position", which was wrong for Mode 0: the hold
+        // is live pressure, not the blocked centre.)
         // On error: report and go to STATE_ERROR.
         // -----------------------------------------------------------------
         71: // STATE_CYL_GOTO_WAIT
@@ -1184,7 +1198,7 @@ BEGIN
                 #pauseReturnState := STATE_CYL_GOTO;
                 #state := STATE_PAUSED;
             ELSIF "DB_Cylinder_BackSupport".AtSetpoint THEN
-                "DB_Cylinder_BackSupport".Cmd_Extend := FALSE;  // 5/3 blocked-center holds position
+                "DB_Cylinder_BackSupport".Cmd_Extend := FALSE;  // FB stays in State 3, Sol_A held ON
                 #state := STATE_NEXT;
             ELSIF "DB_Cylinder_BackSupport".Error THEN
                 "DB_Cylinder_BackSupport".Cmd_Extend := FALSE;

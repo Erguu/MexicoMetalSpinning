@@ -251,8 +251,8 @@ flowchart LR
 | %Q8.7 | Output_Contactor_Tool | Tool contactor coil | |
 | %Q12.0 | Output_Cyl_Backsupport_SolA | BackSupport extend solenoid | 5/3 BC |
 | %Q12.1 | Output_Cyl_Backsupport_SolB | BackSupport retract solenoid | 5/3 BC |
-| %Q12.2 | Output_Cyl_SheetHolder_SolA | SheetHolder extend solenoid | 5/2 SR |
-| %Q12.3 | Output_Cyl_SheetHolder_SolB | SheetHolder (2nd sol, see note) | tag exists; DB ValveType=1 |
+| %Q12.2 | Output_Cyl_SheetHolder_SolA | SheetHolder extend solenoid | 5/3 BC |
+| %Q12.3 | Output_Cyl_SheetHolder_SolB | SheetHolder retract solenoid | 5/3 BC — wired 2026-08-07 |
 | %Q12.4 | Output_Cyl_ToolHeadLock_SolA | ToolHeadLock lock solenoid | 5/2 SR (safety) |
 | %Q12.5 | Output_Cyl_MandrelLock_SolA | MandrelLock clamp solenoid | 5/2 SR |
 | %Q12.7 | Output_Cyl_Backsupport_SolAtmosphere | BackSupport vent solenoid | CMD=41 pressure relief |
@@ -324,8 +324,8 @@ flowchart LR
     PLC -->|%Q12.7 vent| VBS
     VBS --> CBS["BackSupport cylinder"]
 
-    PLC -->|%Q12.2 SolA| VSH["SheetHolder valve<br/>5/2 spring return"]
-    PLC -->|%Q12.3 SolB*| VSH
+    PLC -->|%Q12.2 SolA| VSH["SheetHolder valve<br/>5/3 blocked center"]
+    PLC -->|%Q12.3 SolB| VSH
     VSH --> CSH["SheetHolder cylinder"]
 
     PLC -->|%Q12.4 SolA| VTL["ToolHeadLock valve<br/>5/2 spring return"]
@@ -344,7 +344,7 @@ flowchart LR
 | Cylinder | Valve | Solenoid(s) | Fail-safe (power loss) | Position feedback |
 |----------|-------|-------------|------------------------|-------------------|
 | **BackSupport** | 5/3 blocked center (ValveType=2) | SolA %Q12.0 (extend), SolB %Q12.1 (retract), Atmosphere %Q12.7 (vent) | Holds last position (blocked center) | Analog ruler %IW64 (timed mode, feedback unused) |
-| **SheetHolder** | 5/2 spring return (ValveType=1) | SolA %Q12.2 (extend/hold) | Spring retracts = safe | None (timed full stroke). %Q12.3 SolB tag exists but DB is single-solenoid — leave unwired unless re-configured.* |
+| **SheetHolder** | 5/3 blocked center (ValveType=2) | SolA %Q12.2 (extend), SolB %Q12.3 (retract) | **Holds last position** — no longer spring-retracts* | None (timed full stroke) |
 | **ToolHeadLock** | 5/2 spring return (ValveType=1) | SolA %Q12.4 (lock) | Spring retracts = **unlocked (safe)** | Magnetic sensor %I8.2 (confirms locked); 6 s timeout → error |
 | **MandrelLock** | 5/2 spring return (ValveType=1) | SolA %Q12.5 (clamp) | Spring retracts | None (timed full stroke) |
 
@@ -357,10 +357,20 @@ flowchart LR
   on Ack/Reset.
 - **BackSupport** blocked-center valve keeps the cylinder in place when both solenoids are off; the
   atmosphere/vent solenoid (%Q12.7) is used for pressure relief via recipe command CMD=41.
+- **SheetHolder** was converted from 5/2 spring return to 5/3 blocked center on **2026-08-07**.
+  See the fail-safe change note below — this is the one behavioral difference that needs a
+  risk-assessment sign-off before the machine ships.
 
-\* The SheetHolder `SolB` (%Q12.3) and a SheetHolder ruler (%IW66) appear in the tag export but the
-current DB configures SheetHolder as a single-solenoid, timed (no-sensor) cylinder. Treat these as
-reserved/future and confirm with Maintenance before wiring.
+\* **Fail-safe change (2026-08-07).** The SheetHolder no longer spring-retracts. With both coils
+de-energised — power loss, E-Stop, or `SafetyOK=FALSE` in `FB_CylinderControl` — the blocked center
+traps air on both sides and the piston **freezes wherever it stands** instead of releasing the sheet.
+This matches the MandrelLock rationale (do not release a blank while the spindle is coasting), but it
+is a genuine change from the previous behavior and must be reviewed on the machine. Recovery is by
+Reset: `FB_Process` asserts `bSheetHolderRetractHold` on every hard-reset and error-ack path, which
+drives `%Q12.3` until the cylinder reports AT RETRACT.
+
+A SheetHolder ruler (%IW66) still appears in the tag export but is unused — the cylinder remains
+`PositioningMode=0` (timed, no feedback). Treat that input as reserved/future.
 
 ---
 

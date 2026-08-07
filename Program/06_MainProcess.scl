@@ -1172,6 +1172,16 @@ VERSION : 4.0
         prevBtnCmd41Release : Bool;
         prevBtnCmd41AtmoOff : Bool;
         prevBtnCmd41AtmoOn  : Bool;
+        // End-of-recipe BackSupport retract (operator spec 2026-08-07). On ENTRY to a
+        // terminal state (STOPPED / ERROR / COMPLETE) drive Sol_B for
+        // DB_MachineConfig.CylBackSupport_EndRetractTime, then drop every coil, so the
+        // next recipe always starts from a known clean state regardless of how the
+        // previous one ended. bBSTerminalPrev is the edge memory; it is SEEDED TRUE on
+        // hard reset so power-up (which starts in STOPPED) does not fire a retract.
+        bBSEndRetract   : Bool;
+        bBSTerminalNow  : Bool;   // recomputed every scan (this FB has no VAR_TEMP section)
+        bBSTerminalPrev : Bool;
+        tonBSEndRetract : TON;
         bInitDone    : Bool;   // TRUE after first PLC scan; prevents re-triggering startup reset
         bDoHardReset : Bool;   // Pulse: set TRUE to trigger hard-reset block this scan (startup + Cmd_Reset)
 
@@ -1203,7 +1213,11 @@ VERSION : 4.0
         bMandrelRetractPulse      : Bool;   // One-shot: pulse Cmd_Retract for one scan to release MandrelLock FB from State 3
         bMandrelRetractPending    : Bool;   // ITEM-32: deferred retract — unsafe paths (Reset/Error/Complete) set this; SpindleStopSafeTime timer promotes to pulse
         tonMandrelRetractWait     : TON;    // ITEM-32: safety gate timer for deferred retract (PT = DB_MachineConfig.SpindleStopSafeTime)
-        bSheetHolderRetractPulse  : Bool;   // One-shot: pulse Cmd_Retract for one scan to release SheetHolder FB from State 3
+        // SheetHolder is a 5/3 blocked centre (ValveType=2) -- no spring. Cmd_Retract must be
+        // HELD for the whole stroke, not pulsed: a one-scan pulse energises Sol_B for one scan
+        // and the blocked centre then locks the piston mid-stroke. Cleared when the cylinder FB
+        // reports State 4 (AT RETRACT), and on STATE_SHEET_WAIT Ph1 so an extend always wins.
+        bSheetHolderRetractHold   : Bool;   // Held: drives Cmd_Retract until the FB reaches State 4
         bWaitingSpindleStop       : Bool;   // TRUE while STATE_STOPPING waits for spindle decel before retracting MandrelLock
         tonSpindleStopWait        : TON;    // Proportional wait before MandrelLock retract (see SpindleStopSafeTime). Fires immediately if speed was 0.
         capturedSpindleRPM        : Real;   // Speed captured when bWaitingSpindleStop is set (ITEM-28)
@@ -1790,7 +1804,10 @@ BEGIN
         IF NOT "DB_MachineConfig".Bypass_MandrelLock THEN
             #bMandrelRetractPending  := TRUE;   // ITEM-32: deferred — machine may have been RUNNING; wait SpindleStopSafeTime
         END_IF;
-        #bSheetHolderRetractPulse    := TRUE;   // Release sheet holder regardless of which state was active
+        #bSheetHolderRetractHold     := TRUE;   // Release sheet holder regardless of which state was active.
+                                                // TRUE (not FALSE) is the safe hard-reset default: this latch
+                                                // commands the retract, and the blocked centre will otherwise
+                                                // hold the piston wherever the fault left it.
         #bWaitingSpindleStop         := FALSE;  // Cancel any pending spindle-stop wait
         #capturedSpindleRPM          := 0.0;
         #spindleStopPT               := T#0MS;
@@ -1875,13 +1892,21 @@ BEGIN
             "DB_Cylinder_MandrelLock".Cmd_Extend  := FALSE;
             // SheetHolder: clear Cmd_Extend so it does not extend on the next cycle entry.
             "DB_Cylinder_SheetHolder".Cmd_Extend  := FALSE;
-            // BackSupport CMD=41 overrides: de-energise Sol_B and atmosphere valve at rest
-            "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;
+            // BackSupport: de-energise the atmosphere valve at rest.
             "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
             // BackSupport extend: clear here too. Previously cleared only by
             // FB_RecipeHandler (RESET / STOP handlers), which left no clear path for
             // the manual CMD=40 button -- it would stay asserted after leaving manual.
             "DB_Cylinder_BackSupport".Cmd_Extend  := FALSE;
+            // BackSupport retract: latched by CMD=41 P2 and by the end-of-recipe retract,
+            // so a hard reset must drop it or the cylinder would be held retracting.
+            "DB_Cylinder_BackSupport".Cmd_Retract := FALSE;
+            #bBSEndRetract := FALSE;
+            #tonBSEndRetract(IN := FALSE, PT := "DB_MachineConfig".CylBackSupport_EndRetractTime);
+            // Seed the terminal-state edge memory TRUE: the hard reset runs at power-up
+            // with State already STOPPED, and an unseeded edge would fire a retract nobody
+            // asked for. Same seeding pattern as the CMD=41 button edges below.
+            #bBSTerminalPrev := TRUE;
             #bMDI_Cmd40Extend                     := FALSE;  // Drop MDI CMD=40 latch while idle
             // CMD=41 edge memory: track the live button state every scan while idle.
             // STATE_MANUAL is entered only from here (see below), so a button left
@@ -1927,17 +1952,15 @@ BEGIN
             //
             // MDI CMD=40 auto-release -- mirrors FB_RecipeHandler STATE_CYL_GOTO(70) /
             // STATE_CYL_GOTO_WAIT(71): hold Cmd_Extend every scan, then drop it the scan
-            // AtSetpoint reports done (5/3 blocked centre holds position mechanically),
-            // or on a cylinder Error. Runs before the assignment below so the release
-            // takes effect in the same scan, exactly as state 71 does.
+            // AtSetpoint reports done, or on a cylinder Error. Runs before the assignment
+            // below so the release takes effect in the same scan, exactly as state 71 does.
             //
-            // Why this matters (2026-07-31): the MDI used to hold Cmd_Extend until the
-            // operator sent Param=0, so FB_CylinderControl parked in state 3 and -- with
-            // PositioningMode=0 -- kept Sol_A energised indefinitely (09:833-835). A
-            // CMD=41 Param=1 afterwards ORs Sol_B onto the output (08:259), so both coils
-            // of the 5/3 valve were driven at once and the spool stalled: solenoids click,
-            // cylinder does not move (ITEM-41). The recipe never showed this because
-            // state 71 releases Cmd_Extend at AtSetpoint before CMD=41 ever runs.
+            // Dropping Cmd_Extend does NOT release the cylinder: FB State 3 with
+            // PositioningMode=0 holds Sol_A energised (09:833-835) and is left only by
+            // Cmd_Retract / Cmd_RetractFull / Cmd_ExtendFull. That is intentional and is
+            // the operator's spec -- Sol_A stays ON from CMD=40 through CMD=41 P1, and is
+            // released by P2 (Cmd_Retract -> State 2). See the DB_Cylinder_BackSupport
+            // header in 02_DataBlocks.scl for the full coil table.
             IF #bMDI_Cmd40Extend THEN
                 IF "DB_Cylinder_BackSupport".AtSetpoint THEN
                     #bMDI_Cmd40Extend             := FALSE;
@@ -1978,13 +2001,13 @@ BEGIN
             // Note this no longer forces Sol_B off for as long as Release is held
             // -- with one-shot writes each press acts exactly once.
             IF "DB_Manual".Btn_Cmd41_Release AND NOT #prevBtnCmd41Release THEN      // = CMD=41 Param=3
-                "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;
                 "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
+                "DB_Cylinder_BackSupport".Cmd_Retract := FALSE;  // State 2 -> 0: all coils off
             ELSIF "DB_Manual".Btn_Cmd41_AtmoOff AND NOT #prevBtnCmd41AtmoOff THEN   // = CMD=41 Param=2
                 "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
+                "DB_Cylinder_BackSupport".Cmd_Retract := TRUE;   // State 3 -> 2: Sol_A off, Sol_B on
             ELSIF "DB_Manual".Btn_Cmd41_AtmoOn AND NOT #prevBtnCmd41AtmoOn THEN     // = CMD=41 Param=1
-                "DB_Cylinder_BackSupport".SolB_Cmd41  := TRUE;
-                "DB_Cylinder_BackSupport".SolAtmo_Cmd := TRUE;
+                "DB_Cylinder_BackSupport".SolAtmo_Cmd := TRUE;   // Sol_A deliberately stays ON
             END_IF;
 
             // -----------------------------------------------------------------
@@ -2020,15 +2043,15 @@ BEGIN
                             "DB_Manual".MDI_StatusText_ES := 'CMD40: use Param 0 o 1';
                         END_IF;
 
-                    41: // BackSupport atmosphere -- identical to the recipe CMD=41
+                    41: // BackSupport atmosphere / retract -- identical to the recipe CMD=41
                         IF "DB_Manual".MDI_Param = 1 THEN
-                            "DB_Cylinder_BackSupport".SolB_Cmd41  := TRUE;
-                            "DB_Cylinder_BackSupport".SolAtmo_Cmd := TRUE;
+                            "DB_Cylinder_BackSupport".SolAtmo_Cmd := TRUE;   // Sol_A stays ON
                         ELSIF "DB_Manual".MDI_Param = 2 THEN
                             "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
+                            "DB_Cylinder_BackSupport".Cmd_Retract := TRUE;   // State 3 -> 2
                         ELSIF "DB_Manual".MDI_Param = 3 THEN
-                            "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;
                             "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
+                            "DB_Cylinder_BackSupport".Cmd_Retract := FALSE;  // State 2 -> 0
                         ELSE
                             "DB_Manual".MDI_Status        := 3;
                             "DB_Manual".MDI_StatusText    := 'CMD41: use Param 1,2,3';
@@ -2501,7 +2524,11 @@ BEGIN
         14: // SHEET_WAIT
             #StatusID := 14;
             IF NOT #bSheetWaitPhase2 AND NOT #bSheetWaitPhase3 THEN
-                // Phase 1: extend SheetHolder and prompt operator to insert the sheet
+                // Phase 1: extend SheetHolder and prompt operator to insert the sheet.
+                // Drop any retract hold left over from the previous cycle first -- the FB
+                // gives Cmd_Extend priority anyway, but leaving both asserted is confusing
+                // to read online and pointless once we are commanding the other direction.
+                #bSheetHolderRetractHold := FALSE;
                 "DB_Cylinder_SheetHolder".Cmd_Extend := TRUE;
                 "DB_HMI".HasWarning     := TRUE;
                 "DB_HMI".WarningText    := 'Insert sheet, then press both start buttons';
@@ -2518,7 +2545,7 @@ BEGIN
                     ELSE
                         // Bypass: no MandrelLock cylinder — skip Ph2, go straight to Ph3 (SheetHolder retract)
                         "DB_Cylinder_SheetHolder".Cmd_Extend := FALSE;
-                        #bSheetHolderRetractPulse := TRUE;
+                        #bSheetHolderRetractHold := TRUE;
                         #bSheetWaitPhase3 := TRUE;
                     END_IF;
                 END_IF;
@@ -2528,7 +2555,7 @@ BEGIN
                 IF #tonMandrelWait.Q THEN
                     // MandrelLock assumed clamped — retract SheetHolder
                     "DB_Cylinder_SheetHolder".Cmd_Extend := FALSE;
-                    #bSheetHolderRetractPulse := TRUE;  // Force FB out of State 3 → spring retracts
+                    #bSheetHolderRetractHold := TRUE;   // Hold Cmd_Retract → Sol_B drives the piston back
                     #bSheetWaitPhase2 := FALSE;
                     #bSheetWaitPhase3 := TRUE;
                 END_IF;
@@ -2682,7 +2709,7 @@ BEGIN
             // retracting while spinning could throw the sheet at the operator.
             IF NOT #fbRecipeHandler.Busy AND NOT #bWaitingSpindleStop THEN
                 #bSpindleStop             := TRUE;
-                #bSheetHolderRetractPulse := TRUE;  // One-shot: release sheet holder (may be extended if stopped during SHEET_WAIT Ph1/2)
+                #bSheetHolderRetractHold  := TRUE;  // Held: release sheet holder (may be extended if stopped during SHEET_WAIT Ph1/2)
                 #bSheetWaitPhase2         := FALSE;
                 #bSheetWaitPhase3         := FALSE;
                 // ITEM-28: capture commanded speed before issuing stop; compute proportional wait time.
@@ -2935,8 +2962,9 @@ BEGIN
             #bRecipeLoadExec := FALSE;   // a recipe copy must not stay in flight across an error ack
             #timerRunning := FALSE;  // Stop cycle timer
             #bResumeSpeedup := FALSE;  // Cancel any pending pause spin-up wait (e.g. fault during spin-up)
-            // Clear CMD=41 BackSupport overrides — valves de-energise on error
-            "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;
+            // Clear the BackSupport atmosphere valve — de-energises on error.
+            // Cmd_Retract is deliberately NOT touched here: the end-of-recipe retract
+            // block (bottom of this FB) owns it and needs it held for the retract window.
             "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
             // Clear BackSupport extend (recipe CMD=40 or manual button/MDI) while faulted
             "DB_Cylinder_BackSupport".Cmd_Extend  := FALSE;
@@ -2982,7 +3010,7 @@ BEGIN
                 IF NOT "DB_MachineConfig".Bypass_MandrelLock THEN
                     #bMandrelRetractPending := TRUE;  // ITEM-32: deferred — spindle may still be spinning; wait SpindleStopSafeTime
                 END_IF;
-                #bSheetHolderRetractPulse := TRUE;  // Release sheet holder (may be extended from last run)
+                #bSheetHolderRetractHold  := TRUE;  // Release sheet holder (may be extended from last run)
                 #fbAlarmManager(NewError := FALSE, NewErrorCode := 0,
                                 AcknowledgeError := TRUE);
                 #State := STATE_STOPPED;
@@ -2996,7 +3024,7 @@ BEGIN
                 IF NOT "DB_MachineConfig".Bypass_MandrelLock THEN
                     #bMandrelRetractPending := TRUE;  // ITEM-32: deferred — spindle may still be spinning; wait SpindleStopSafeTime
                 END_IF;
-                #bSheetHolderRetractPulse := TRUE;  // Release sheet holder
+                #bSheetHolderRetractHold  := TRUE;  // Release sheet holder
                 #fbAlarmManager(NewError := FALSE, NewErrorCode := 0,
                                 AcknowledgeError := TRUE);
                 #State := STATE_STOPPED;
@@ -3013,7 +3041,7 @@ BEGIN
                 IF NOT "DB_MachineConfig".Bypass_MandrelLock THEN
                     #bMandrelRetractPending := TRUE;  // ITEM-32: deferred — spindle may still be spinning; wait SpindleStopSafeTime
                 END_IF;
-                #bSheetHolderRetractPulse := TRUE;  // Release sheet holder
+                #bSheetHolderRetractHold  := TRUE;  // Release sheet holder
                 #fbAlarmManager(NewError := FALSE, NewErrorCode := 0,
                                 AcknowledgeError := TRUE);
                 #State := STATE_STOPPED;
@@ -3039,8 +3067,9 @@ BEGIN
             "DB_Cylinder_MandrelLock".Cmd_Extend := FALSE;
             #bMandrelRetractPending := TRUE;    // ITEM-32: deferred — spindle still decelerating at program end; wait SpindleStopSafeTime
         END_IF;
-        "DB_Cylinder_BackSupport".SolB_Cmd41  := FALSE;  // De-energise CMD=41 Sol_B override
-        "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;  // De-energise atmosphere valve
+        // De-energise the atmosphere valve. Cmd_Retract is left alone -- the
+        // end-of-recipe retract block at the bottom of this FB owns it.
+        "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
         "DB_HMI".StatusMsg    := 'Program Complete';
         "DB_HMI".StatusMsg_ES := 'Programa Completado';
         // Single-writer: ErrorText is owned by FB_AlarmManager. Completion is a status,
@@ -3108,7 +3137,7 @@ BEGIN
     // to ensure the spindle has physically stopped before the mandrel lock releases.
     // bMandrelRetractPending is NOT cleared by bDoHardReset — it must stay TRUE until the timer fires.
     #tonMandrelRetractWait(IN := #bMandrelRetractPending, PT := "DB_MachineConfig".SpindleStopSafeTime);
-    // One-shot retract pulses:
+    // MandrelLock one-shot retract pulse (still ValveType=1, 5/2 spring return):
     // ValveType=1 + Mode=0 keeps Sol_A=TRUE in State 3 even after Cmd_Extend=FALSE.
     // A one-scan Cmd_Retract=TRUE pulse forces the FB to State 2 (Sol_A=FALSE) → spring retracts.
     // ITEM-32: promote deferred retract to immediate pulse once safety timer has elapsed.
@@ -3119,8 +3148,26 @@ BEGIN
     END_IF;
     "DB_Cylinder_MandrelLock".Cmd_Retract  := #bMandrelRetractPulse;
     #bMandrelRetractPulse := FALSE;  // Self-clearing: active for exactly one scan
-    "DB_Cylinder_SheetHolder".Cmd_Retract  := #bSheetHolderRetractPulse;
-    #bSheetHolderRetractPulse := FALSE;  // Self-clearing: active for exactly one scan
+
+    // SheetHolder retract hold (ValveType=2, 5/3 blocked centre — NOT a pulse):
+    // There is no spring on this cylinder any more. Sol_B has to stay energised for the
+    // whole stroke; a one-scan pulse would drive Sol_B for a single scan and the blocked
+    // centre would then lock the piston mid-stroke with the sheet still held.
+    //
+    // Deterministic clear path (Reset-Path Rule checkpoint 1-4):
+    //   - Cleared here the moment the cylinder FB reports State 4 (AT RETRACT). Mode 0
+    //     reaches State 4 unconditionally after DB_Cylinder_SheetHolder.Timeout_Retract,
+    //     so the latch cannot hang. State 4 keeps Sol_B energised by itself
+    //     (09_Sensors_Actuators.scl State-4 output branch, Mode 0 + ValveType<>1), so
+    //     dropping the latch here does NOT release the cylinder.
+    //   - Cleared again in STATE_SHEET_WAIT Ph1 before Cmd_Extend is commanded.
+    // It is deliberately NOT cleared in STATE_STOPPED / STATE_ERROR: those states are
+    // reached while the retract may still be in progress, and the latch commands the
+    // SAFE direction. Clearing it there would abandon the piston mid-stroke.
+    IF "DB_Cylinder_SheetHolder".State = 4 THEN
+        #bSheetHolderRetractHold := FALSE;
+    END_IF;
+    "DB_Cylinder_SheetHolder".Cmd_Retract  := #bSheetHolderRetractHold;
     // Drive ready timeout: counts while in STARTING and drives not yet ready; auto-resets on exit
     #tonDriveReady(IN := (#State = STATE_STARTING) AND NOT (#fbPowerX.Status AND #fbPowerZ.Status), PT := "DB_MachineConfig".Timeout_DriveReady);
     // Spindle decel wait: blocks RunCmd from going TRUE until VFD ramp-down completes
@@ -3275,7 +3322,7 @@ BEGIN
     // after any Cmd_Reset, and after an error acknowledge it stayed TRUE for as long as the
     // machine sat in STOPPED or MANUAL -- i.e. exactly when the operator uses the manual
     // page. FB_RecipeHandler is called every scan and its `IF #Reset THEN` block is level-
-    // triggered, so it re-cleared BackSupport Cmd_Extend / SolB_Cmd41 / SolAtmo_Cmd every
+    // triggered, so it re-cleared BackSupport Cmd_Extend / Cmd_Retract / SolAtmo_Cmd every
     // scan, wiping the manual CMD=40/CMD=41 buttons and the MDI (both write earlier in the
     // scan, in the STATE_MANUAL branch). Nothing ever reached the OB1 output assignment.
     //
@@ -3284,6 +3331,58 @@ BEGIN
     // survive to a scan where one ran. fbRecipeHandler is now called every scan
     // unconditionally, so it always consumes the flag immediately.
     #bResetRecipe := FALSE;
+
+    // =========================================================================
+    // END-OF-RECIPE BACKSUPPORT RETRACT  (operator spec 2026-08-07)
+    // =========================================================================
+    // "When a recipe is finished, fail or successful, de-energise Sol_A, Sol_B and
+    //  SolAtmo -- retract with Sol_B for 2 s, then turn off -- so every next recipe
+    //  can start clean."
+    //
+    // Deliberately placed AFTER the #fbRecipeHandler call above: the handler's
+    // level-triggered `IF #Reset THEN` block also writes BackSupport commands, so
+    // FB_Process must be the LAST writer of Cmd_Retract or the two would fight
+    // within a single scan.
+    //
+    // EDGE, not level: STOPPED / ERROR / COMPLETE all run every scan while the
+    // machine sits idle, so a level trigger would restart the retract forever.
+    // bBSTerminalPrev is seeded TRUE by the hard-reset block, so power-up (which
+    // begins in STOPPED) does not fire an unexpected retract.
+    #bBSTerminalNow := (#State = STATE_STOPPED) OR (#State = STATE_ERROR) OR (#State = 100);
+
+    IF #bBSTerminalNow AND NOT #bBSTerminalPrev THEN
+        #bBSEndRetract := TRUE;               // entered a terminal state this scan
+    END_IF;
+    IF NOT #bBSTerminalNow THEN
+        IF #bBSEndRetract THEN
+            // Left a terminal state part-way through the retract window (Start pressed, or
+            // MANUAL entered). Drop Cmd_Retract together with the latch: nothing else in
+            // this FB clears it, and the MANUAL route never raises bResetRecipe, so without
+            // this the cylinder would be held retracting for the whole manual session.
+            "DB_Cylinder_BackSupport".Cmd_Retract := FALSE;
+        END_IF;
+        #bBSEndRetract := FALSE;
+    END_IF;
+    #bBSTerminalPrev := #bBSTerminalNow;
+
+    #tonBSEndRetract(IN := #bBSEndRetract,
+                     PT := "DB_MachineConfig".CylBackSupport_EndRetractTime);
+
+    IF #bBSEndRetract THEN
+        "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;   // atmosphere off for the whole sequence
+        IF #tonBSEndRetract.Q THEN
+            // Retract time elapsed: release Cmd_Retract. FB State 2 -> State 0
+            // (09:617-619); Sol_A and Sol_B both drop and the 5/3 blocked centre
+            // holds the piston where it stopped. This is the "all coils off" state.
+            "DB_Cylinder_BackSupport".Cmd_Retract := FALSE;
+            #bBSEndRetract := FALSE;
+        ELSE
+            // FB State 3 (or 0) -> State 2: Sol_A off, Sol_B on (09:828-830).
+            // Cmd_Extend must go first -- State 1 ignores Cmd_Retract while it is held.
+            "DB_Cylinder_BackSupport".Cmd_Extend  := FALSE;
+            "DB_Cylinder_BackSupport".Cmd_Retract := TRUE;
+        END_IF;
+    END_IF;
 
     // Homing -- sequential pattern: STATE_HOMING (startup) and STATE_STOP_GOHOME (post-stop)
     // both use homeSeqState + bHomeXExec/bHomeZExec.

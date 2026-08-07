@@ -1,7 +1,30 @@
 # FB_Process State Machine Reference
 
 **Source file:** `Program/06_MainProcess.scl`
-**Last updated:** 2026-08-06 — **Load-memory recipes PARTIALLY verified on the machine**: program 1
+**Last updated:** 2026-08-07 — **BackSupport coil sequence rewritten (closes ITEM-41).** Branch
+`fix/backsupport-coil-sequence`, not compiled, not commissioned. `CMD=41 P1` no longer switches
+`Sol_B` on — it was never meant to. `P2` now retracts properly by latching `Cmd_Retract` (FB State
+3 → 2, dropping `Sol_A` and raising `Sol_B` in one scan) and `P3` releases it (State 2 → 0, all
+coils off). `SolB_Cmd41` and its `OR` into `%Q12.1` are **deleted**, so both-coils-energised is
+unreachable. **New behaviour in the terminal states:** entering STOPPED (0), ERROR (999) or
+COMPLETE (100) now fires an **edge-triggered end-of-recipe retract** — `bBSEndRetract` +
+`tonBSEndRetract` hold `Sol_B` for `DB_MachineConfig.CylBackSupport_EndRetractTime` (T#2S), then
+every coil drops, so the next recipe always starts from a known state. This is **new motion at
+fault time** and needs sign-off on the first commissioning run. Also `Timeout_Extend` T#1S500MS →
+T#3S (the old value was shorter than the real ~2 s stroke) and `Timeout_Retract` T#10S → T#24H
+(State 4 latches `Sol_B` — same dead end as State 3). See TODO.md ITEM-41 § Resolution and
+`RESET_AUDIT.md` § BackSupport coil sequence.
+
+**Previously, 2026-08-07:** — **SheetHolder converted 5/2 spring return → 5/3 blocked centre**
+(`DB_Cylinder_SheetHolder.ValveType` 1→2, `Sol_B` now driven on `%Q12.3` from OB1). Because the
+cylinder no longer has a spring, the one-scan `bSheetHolderRetractPulse` was replaced by a held
+latch **`bSheetHolderRetractHold`** — a single-scan pulse would leave the piston locked mid-stroke
+by the blocked centre. The latch clears when the cylinder FB reaches State 4 (AT RETRACT) and on
+STATE_SHEET_WAIT Ph1. **Fail-safe change requiring sign-off:** the SheetHolder no longer
+spring-retracts on power loss or E-Stop — it freezes in place. Not yet compiled or commissioned.
+See STATE 14 below and `Wiring_Diagram.md`.
+
+**Previously, 2026-08-06:** — **Load-memory recipes PARTIALLY verified on the machine**: program 1
 copied (loader Done, ErrorCode=0) and its start ran — movement observed before a plant-air loss cut
 the test. No full cycle yet; programs 2..10 untested (see TODO.md ITEM-44). Two field faults fixed
 first: (1) the CAM export carried `S7_Optimized_Access := 'TRUE'` — `READ_DBL` requires a
@@ -76,7 +99,7 @@ HOMING (15): X → Z → Tool
   -- All axes homed, bRequireHoming cleared -->
 POST_HOME_CLR (16): park move to SheetLoadPos at RapidVelocity
   -- Parked -->
-SHEET_WAIT (14): Ph1 SheetHolder extends + prompt → Ph2 MandrelLock clamps T#5S → Ph3 SheetHolder retracts T#5S
+SHEET_WAIT (14): Ph1 SheetHolder extends + prompt → Ph2 MandrelLock clamps T#5S → Ph3 SheetHolder retracts (held Sol_B)
   -- Sheet confirmed, MandrelLock clamped, SheetHolder clear -->
 LOCK_EXTEND_WAIT (17): ToolHeadLock extends (T#1S pre-delay + sensor confirm)
   -- AtSetpoint confirmed -->
@@ -139,7 +162,7 @@ Triggered by Cmd_Reset (operator) or first PLC scan after power-up:
 - bResetRecipe → TRUE (resets FB_RecipeHandler to IDLE)
 - bSheetWaitPhase2/3 → FALSE
 - bMandrelRetractPulse → TRUE (one-shot: releases MandrelLock)
-- bSheetHolderRetractPulse → TRUE (one-shot: releases SheetHolder)
+- bSheetHolderRetractHold → TRUE (held: releases SheetHolder — 5/3 blocked centre, see State 14)
 - bWaitingSpindleStop → FALSE (cancels any pending spindle-stop wait)
 
 ### Cmd_Pause
@@ -199,7 +222,7 @@ Cmd_Stop vetoes RunCmd directly — spindle decelerates immediately when Stop is
 | `tonLockWait` | Hardcoded in FB_Process | T#5S | STATE_LOCK_RETRACT_WAIT: time-based wait for ToolHeadLock spring return (no retract sensor) |
 | `tonLockPreDelay` | Hardcoded in FB_Process | T#1S | STATE_LOCK_EXTEND_WAIT: brief delay before energising ToolHeadLock solenoid |
 | `tonMandrelWait` | Hardcoded in FB_Process | T#5S | STATE_SHEET_WAIT phase 2: open-loop wait for MandrelLock full stroke |
-| `tonSheetHolderRetract` | Hardcoded in FB_Process | T#5S | STATE_SHEET_WAIT phase 3: open-loop wait for SheetHolder to fully retract |
+| `tonSheetHolderRetract` | `DB_MachineConfig.CylSheetHolder_RetractTime` | T#0.5S | STATE_SHEET_WAIT phase 3: open-loop wait before advancing to LOCK_EXTEND_WAIT. Does **not** bound the retract itself — `bSheetHolderRetractHold` does that (5/3 blocked centre) |
 | `tonDriveReady` | Hardcoded in FB_Process | T#3S | STATE_STARTING: timeout if drives do not report ready |
 | `tonHomingTimeout` | Hardcoded in FB_Process | T#120S | STATE_HOMING, STATE_STOP_GOHOME: combined timeout for all three axes |
 | `AlwaysHomeOnAutoStart` | `DB_MachineConfig` | **FALSE** | STATE_STARTING: TRUE = home on every auto start (legacy). FALSE = fast cycle mode. HMI-editable. **Never overrides `bRequireHoming`.** |
@@ -619,7 +642,18 @@ SHEET_WAIT. Renamed in intent 2026-08-03: it used to move only far enough to cle
 
 **Purpose:** Operator inserts the metal sheet blank and confirms placement. Three sequential phases within this one state.
 
+> **SheetHolder valve type (changed 2026-08-07):** this cylinder is now a **5/3 blocked centre**
+> (`ValveType=2`, `%Q12.2` extend / `%Q12.3` retract), not the 5/2 spring return it used to be.
+> There is no spring, so the retract command must be **held** for the whole stroke —
+> `bSheetHolderRetractHold`, not the old one-scan `bSheetHolderRetractPulse`. A one-scan pulse
+> would energise `Sol_B` for a single scan and the blocked centre would lock the piston
+> mid-stroke with the sheet still held. The latch is cleared when the cylinder FB reports
+> **State 4 (AT RETRACT)**, which `PositioningMode=0` reaches after `Timeout_Retract` (T#1S).
+> State 4 keeps `Sol_B` energised on its own, so the coil stays powered while the machine is
+> idle — that is the designed Mode 0 + 5/3 behavior, shared with BackSupport.
+
 **Phase 1 — Sheet insertion prompt** (`NOT bSheetWaitPhase2 AND NOT bSheetWaitPhase3`):
+- `bSheetHolderRetractHold = FALSE` — drop any retract hold left from the previous cycle
 - `SheetHolder.Cmd_Extend = TRUE` — extends to hold the form on the mandrel
 - HMI `HasWarning = TRUE`
 - HMI `WarningText = "Insert sheet, then press both start buttons"`
@@ -629,19 +663,22 @@ SHEET_WAIT. Renamed in intent 2026-08-03: it used to move only far enough to cle
 **Phase 2 — MandrelLock clamping** (`bSheetWaitPhase2 = TRUE`):
 - `MandrelLock.Cmd_Extend = TRUE` (held by STATE_STOPPED not being active)
 - `tonMandrelWait` T#5S runs (open-loop — no mandrel sensor yet)
-- On timer Q: `SheetHolder.Cmd_Extend = FALSE`, pulses `bSheetHolderRetractPulse = TRUE` (one-shot retract), sets `bSheetWaitPhase3 = TRUE`
+- On timer Q: `SheetHolder.Cmd_Extend = FALSE`, sets `bSheetHolderRetractHold = TRUE` (held retract), sets `bSheetWaitPhase3 = TRUE`
 
 **Phase 3 — SheetHolder retract** (`bSheetWaitPhase3 = TRUE`):
-- `tonSheetHolderRetract` T#5S runs (open-loop — time for SheetHolder to fully retract)
+- `tonSheetHolderRetract` runs (open-loop — `DB_MachineConfig.CylSheetHolder_RetractTime`, **T#0.5S** from FC_LoadConfig)
 - On timer Q → **17** LOCK_EXTEND_WAIT
+- Note the two timers are independent: this one decides when the state advances, while
+  `bSheetHolderRetractHold` keeps `Sol_B` energised until the cylinder FB reaches State 4.
+  The retract therefore continues even after the state machine has moved on.
 
 **Transitions:**
 
 | Condition | Next State |
 |-----------|-----------|
-| Phase 3 timer (T#5S) done | **17** LOCK_EXTEND_WAIT |
+| Phase 3 timer (`CylSheetHolder_RetractTime`) done | **17** LOCK_EXTEND_WAIT |
 
-> If operator presses Stop during Phase 1 or 2: STOPPING state issues `bSheetHolderRetractPulse` to release SheetHolder and resets `bSheetWaitPhase2/3`.
+> If operator presses Stop during Phase 1 or 2: STOPPING state sets `bSheetHolderRetractHold` to release SheetHolder and resets `bSheetWaitPhase2/3`.
 
 ---
 
@@ -748,7 +785,7 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 - Condition: `NOT fbRecipeHandler.Busy AND NOT bWaitingSpindleStop`
 - Action:
   - `bSpindleStop = TRUE` (formal stop flag, supplements the RunCmd veto)
-  - `bSheetHolderRetractPulse = TRUE` (one-shot: retracts SheetHolder if it was extended during SHEET_WAIT phases 1/2)
+  - `bSheetHolderRetractHold = TRUE` (held: retracts SheetHolder if it was extended during SHEET_WAIT phases 1/2)
   - `bSheetWaitPhase2 = FALSE`, `bSheetWaitPhase3 = FALSE` (abort any pending sheet-wait phases)
   - `bWaitingSpindleStop = TRUE` (enables phase 2)
   - `bStopMoveX = TRUE` — **starts X axis moving to `parkTargetX` immediately** (MC_MoveAbsolute at RapidVelocity)
@@ -958,9 +995,9 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 
 | Button | `savedLineIndex` after | Effect |
 |--------|----------------------|--------|
-| **AckError** (`ackEdge`) | Kept — warm restart available on next Start | Clears Error, `bPauseActive = FALSE`, `bResetRecipe = TRUE`, pulses MandrelLock + SheetHolder retract, clears alarm → **0** STOPPED |
+| **AckError** (`ackEdge`) | Kept — warm restart available on next Start | Clears Error, `bPauseActive = FALSE`, `bResetRecipe = TRUE`, pulses MandrelLock retract + holds SheetHolder retract, clears alarm → **0** STOPPED |
 | **Continue** (`continueEdge`) | Kept — recipe will resume from saved line on next Start | Same as AckError |
-| **Restart** (`restartEdge`) | Cleared (`savedLineIndex = -1`) — full restart from line 0 | Clears Error, `bPauseActive = FALSE`, `bResetRecipe = TRUE`, `ResumeLine = -1`, pulses MandrelLock + SheetHolder retract, clears alarm → **0** STOPPED |
+| **Restart** (`restartEdge`) | Cleared (`savedLineIndex = -1`) — full restart from line 0 | Clears Error, `bPauseActive = FALSE`, `bResetRecipe = TRUE`, `ResumeLine = -1`, pulses MandrelLock retract + holds SheetHolder retract, clears alarm → **0** STOPPED |
 
 > **Restart from ERROR**: There is also a pre-CASE handler for `restartEdge` that clears state directly to STOPPED without waiting for the CASE 999 block.
 

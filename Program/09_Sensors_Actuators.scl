@@ -440,10 +440,13 @@ VERSION : 3.0
         calculatedPulse : Time;             // Mode 2: zone-selected pulse duration
         tSettle         : TON;              // Mode 2: post-pulse settle timer (State 7)
         inSettling      : Bool;             // Mode 2: TRUE = waiting for piston to stop
-        // CMD=41 atmosphere override (BackSupport only; unused/FALSE on all other cylinders)
-        // Written by FB_RecipeHandler; consumed as OR override in OB1 output assignment.
-        SolB_Cmd41      : Bool := FALSE;    // CMD=41 Param=1: hold Sol_B ON independently of state machine
-        SolAtmo_Cmd     : Bool := FALSE;    // CMD=41 Param=1: ON / Param=2: OFF
+        // CMD=41 atmosphere valve (BackSupport only; unused/FALSE on all other cylinders).
+        // Written by FB_RecipeHandler / FB_Process; mapped straight to %Q12.7 in OB1.
+        // NOTE: the companion field SolB_Cmd41 was DELETED 2026-08-07. It forced Sol_B on
+        // behind the state machine's back and was the mechanism behind ITEM-41 (both coils
+        // energised at once). Retract is now commanded properly via Cmd_Retract -> State 2.
+        // Do not re-add an override on either solenoid output.
+        SolAtmo_Cmd     : Bool := FALSE;    // CMD=41 Param=1: ON / Param=2 and P3: OFF
     END_VAR
     VAR_TEMP
         effectiveTarget : Real;             // TargetPos clamped to MinPos/MaxPos
