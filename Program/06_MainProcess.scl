@@ -1678,7 +1678,7 @@ BEGIN
         13:  "DB_HMI".StatusMsg := 'Clearing PNP zone...';               "DB_HMI".StatusMsg_ES := 'Liberando zona PNP...';
         14:  "DB_HMI".StatusMsg := 'Waiting for sheet...';               "DB_HMI".StatusMsg_ES := 'Esperando lamina...';
         15:  "DB_HMI".StatusMsg := 'Homing...';                          "DB_HMI".StatusMsg_ES := 'Referenciando...';
-        16:  "DB_HMI".StatusMsg := 'Post-home clearance...';             "DB_HMI".StatusMsg_ES := 'Despejando zona PNP...';
+        16:  "DB_HMI".StatusMsg := 'Sheet-load park move...';            "DB_HMI".StatusMsg_ES := 'Moviendo a posicion de carga...';
         17:  "DB_HMI".StatusMsg := 'Lock engaging...';                   "DB_HMI".StatusMsg_ES := 'Bloqueando cabezal...';
         18:  "DB_HMI".StatusMsg := 'Stopping...';                        "DB_HMI".StatusMsg_ES := 'Deteniendo...';
         29:  "DB_HMI".StatusMsg := 'Lock releasing...';                  "DB_HMI".StatusMsg_ES := 'Liberando bloqueo...';

@@ -72,7 +72,7 @@ Do not skip this step. Leaving these files out of sync causes future agents to m
 | 18 | STOPPING | Halt recipe; X and Z park at `SheetLoadPos_X/Z` simultaneously (MC_MoveAbsolute, parallel — was hardcoded 0,0 before 2026-08-03); MandrelLock releases after spindle timer AND both axes done → LOCK_RETRACT_WAIT → STOPPED |
 | 19 | STOP_GOHOME | Home X → Z → Tool — legacy, no longer reached on normal stop path |
 | 20 | RUNNING | Recipe executing |
-| 21 | STOP_GOTOZERO | Move to zero post-stop |
+| 21 | STOP_GOTOZERO | Move to zero post-stop — legacy, never assigned; unreachable |
 | 22 | PNP_HALT | PNP zone — halt active, reverse jog only |
 | 25 | PAUSED | Feed hold: axes retract clear of tool AND spindle stops. On Continue, spindle spins back up (DB_MachineConfig.SpindleResumeSpeedupTime, default T#5S) while axes hold at retract point, then axes return → RUNNING |
 | 29 | LOCK_RETRACT_WAIT | ToolHeadLock releasing (T#3S wait) before → TOOL_CHANGE or STOPPED |
