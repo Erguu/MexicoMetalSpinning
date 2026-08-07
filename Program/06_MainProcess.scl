@@ -3348,6 +3348,11 @@ BEGIN
     // machine sits idle, so a level trigger would restart the retract forever.
     // bBSTerminalPrev is seeded TRUE by the hard-reset block, so power-up (which
     // begins in STOPPED) does not fire an unexpected retract.
+    //
+    // MANUAL(5) -> STOPPED(0) also fires this, because MANUAL is not a terminal
+    // state. That is NOT a bug -- operator confirmed 2026-08-07 that retracting on
+    // the way out of manual is wanted. A `#prevState <> STATE_MANUAL` guard was
+    // offered and declined. Do not add one.
     #bBSTerminalNow := (#State = STATE_STOPPED) OR (#State = STATE_ERROR) OR (#State = 100);
 
     IF #bBSTerminalNow AND NOT #bBSTerminalPrev THEN

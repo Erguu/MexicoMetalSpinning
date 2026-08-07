@@ -515,6 +515,9 @@ Additional:
 - **Edge-triggered, and the edge memory is seeded.** `bBSTerminalPrev := TRUE` in the hard reset.
   Without it, power-up (which begins in STOPPED, a terminal state) would fire a retract nobody asked
   for. Same seeding pattern as the CMD=41 button edges.
+- **MANUAL(5) → STOPPED(0) fires the retract too**, because MANUAL is not a terminal state.
+  **Intentional** — operator confirmed 2026-08-07 that retracting on the way out of manual is wanted.
+  A `#prevState <> STATE_MANUAL` guard was offered and declined; do not add one.
 - **Leaving a terminal state mid-window clears `Cmd_Retract` explicitly.** Start pressed, or MANUAL
   entered, inside the 2 s retract: the latch drops *and* `Cmd_Retract := FALSE` is written. The MANUAL
   route never raises `bResetRecipe`, so relying on checkpoint 2 alone would have left the cylinder held
