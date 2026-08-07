@@ -1198,3 +1198,63 @@ Cost: two new FB instances (watch the S7-1214C work-memory budget — see
 - `HomeVelocity` likewise: state 13 (via `clrVelocity`) plus FB_ManualMode's own `fbClearX/Z`
   are its only users. It has never had any effect on the `MC_Home` seek speed, which comes from
   the Technology Object and cannot be set from the PLC.
+
+---
+
+## ITEM-46 — SheetHolder retract coil stays energised forever at idle
+
+**Found:** 2026-08-07 (operator observation) | **Status: OPEN — deferred by the operator, do not fix yet**
+
+### What happens
+
+Any path that releases the sheet holder sets `bSheetHolderRetractHold`, which drives
+`Cmd_Retract` (`06_MainProcess.scl:3170`). The cylinder FB retracts (State 2, `Sol_B` on), and after
+`Timeout_Retract` (**`T#1S`**) lands in **State 4 — where Mode 0 + `ValveType<>1` holds `Sol_B := TRUE`
+indefinitely** (`09_Sensors_Actuators.scl:851-854`). State 4 is left only on `Cmd_Extend` /
+`Cmd_ExtendFull`.
+
+So from the first retract after power-up — which happens automatically, `bDoHardReset` sets the latch
+at `06:1807` — **`%Q12.3` is energised continuously for as long as the machine sits idle.**
+
+The existing comment at `06:3160-3162` already states this outright: *"State 4 keeps Sol_B energised by
+itself ... so dropping the latch here does NOT release the cylinder."* It was written as an
+explanation, not flagged as a problem.
+
+### Why it is a problem
+
+The valve is a **5/3 blocked centre**. Once the piston is at the retract end, the blocked centre holds
+it there with **no coil power at all**. Holding `Sol_B` on buys nothing and costs:
+
+- a solenoid coil dissipating heat 24/7 while the machine is idle or off-shift
+- coil and valve life spent on a hold the valve does mechanically for free
+- inconsistency with how the same situation now reads elsewhere in the code
+
+Not a safety issue — the coil is driving the safe direction.
+
+### What the operator asked for
+
+> "It can retract for 1 second and then leave it de-energised."
+
+### How to do it — the pattern already exists
+
+This is the **same dead-end** as the BackSupport State 3 latch closed by ITEM-41, and the fix built for
+that is directly reusable (`06_MainProcess.scl`, END-OF-RECIPE BACKSUPPORT RETRACT block):
+
+1. `DB_Cylinder_SheetHolder.Timeout_Retract` **`T#1S` → `T#24H`**, so the FB stays in **State 2** while
+   `Cmd_Retract` is held and never falls into the State 4 trap.
+2. Replace the `IF State = 4 THEN bSheetHolderRetractHold := FALSE` release at `06:3167-3169` with a
+   **TON**: hold `Cmd_Retract` for a new `DB_MachineConfig.CylSheetHolder_RetractHoldTime` (T#1S),
+   then drop the latch. State 2 → State 0 on `NOT Cmd_Retract` (`09:617-619`) → **both coils off**,
+   blocked centre holds the piston retracted.
+3. Reset-Path Rule: new TON needs `IN := FALSE` on hard reset; the latch is already covered.
+
+**Careful — the State 4 release is currently load-bearing.** `bSheetHolderRetractHold` is deliberately
+NOT cleared in STOPPED / ERROR (`06:3164-3166`) because those states are reached mid-retract and the
+latch drives the safe direction. A timer-based release must preserve that: the timer has to be what
+ends the hold, not a state test, or a stop during retract will abandon the piston mid-stroke.
+
+### Prerequisite
+
+The SheetHolder 5/2 → 5/3 conversion itself is **not yet separately commissioned** (merged 2026-08-07
+in `6da3708`). Commission that first — this item is a refinement on top of it, and tuning the 1 s hold
+needs the real stroke time anyway.
