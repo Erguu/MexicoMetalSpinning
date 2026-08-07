@@ -8,8 +8,10 @@
 // FB_RecipeLoader - Copy the selected recipe from LOAD memory into work memory
 // DOC:
 //  purpose: DB_RecipeProgram1..10 live in load memory (UNLINKED) and cannot be
-//           read by the program directly. This FB copies the selected one, whole
-//           (Header + Lines in ONE READ_DBL call), into "DB_SelectedRecipe".
+//           read by the program directly. This FB copies the selected one into
+//           "DB_SelectedRecipe" using TWO sequential READ_DBL sub-reference
+//           transfers -- .Header first, then .Lines. Never the whole-DB form;
+//           see "TWO TRANSFERS, NOT ONE" below for what that cost on the machine.
 //           Runs once per cycle start, in STATE_RECIPE_LOAD(11), before the
 //           pre-scan -- the machine is stationary and nothing else is pending.
 //  inputs:  Execute (rising edge), ProgramNo (1..10), Reset (level)

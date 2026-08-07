@@ -397,8 +397,9 @@ exists to catch. All four checkpoints verified:
 
 Additional:
 - **`REQ` is never latched independently.** It is recomputed every scan as
-  `(state = ST_REQ) OR (state = ST_WAIT)`. There is no code path that can hold it TRUE without the
-  state machine being in one of those two states.
+  `(state = ST_REQ_HDR) OR (state = ST_WAIT_HDR) OR (state = ST_REQ_LINES) OR (state = ST_WAIT_LINES)`
+  — the four in-flight states of the two-phase transfer. There is no code path that can hold it TRUE
+  without the state machine being in one of those four states.
 - **New TON:** `tonWatch` in `FB_RecipeLoader`, `IN := reqActive`. It stops automatically whenever the
   state machine leaves any REQ/WAIT state — including state 35 between the two transfers, which also
   gives phase 2 a full fresh timeout — so no stale `ET` can carry into the next run.

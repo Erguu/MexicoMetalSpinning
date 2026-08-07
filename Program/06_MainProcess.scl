@@ -1756,10 +1756,12 @@ BEGIN
         "DB_HMI".ResumeLine := -1;
         #prevSafetyError := FALSE;
         #bResetRecipe                := TRUE;
-        #bRecipeLoadExec             := FALSE;  // drop READ_DBL REQ; fbRecipeLoader.Reset is
-                                                // driven from bDoHardReset at its call site,
-                                                // which also clears LoadedProgram -> forces a
-                                                // fresh copy before the next cycle
+        #bRecipeLoadExec             := FALSE;  // drop READ_DBL REQ. fbRecipeLoader.Reset is driven
+                                                // by bResetRecipe (set TRUE just above) at its call
+                                                // site -- NOT by bDoHardReset, which is cleared at
+                                                // the end of this block and would never be seen
+                                                // there. That Reset also clears LoadedProgram ->
+                                                // forces a fresh copy before the next cycle
         #bSheetWaitPhase2            := FALSE;
         #bSheetWaitPhase3            := FALSE;
         IF NOT "DB_MachineConfig".Bypass_MandrelLock THEN
