@@ -236,7 +236,7 @@ BEGIN
     //
     // Cylinder map:
     //   CylDiag[1] = DB_BackSupport  (full stroke, PositioningMode=0; ruler HW removed) -- SelectedCylinder=1
-    //   CylDiag[2] = DB_SheetHolder  (no sensor, PositioningMode=0, ValveType=1) -- SelectedCylinder=2
+    //   CylDiag[2] = DB_SheetHolder  (no sensor, PositioningMode=0, ValveType=2) -- SelectedCylinder=2
     //   CylDiag[3] = DB_ToolHeadLock (magnetic sensor, PositioningMode=1) -- SelectedCylinder=3
     //   CylDiag[4] = DB_MandrelLock  (no sensor, PositioningMode=0) -- SelectedCylinder=4
     // =========================================================================
@@ -253,11 +253,14 @@ BEGIN
         RulerValue     := "DB_Cylinder_LinearRuler_BackSupport".Value,
         RulerValid     := "DB_Cylinder_LinearRuler_BackSupport".Valid
     );
+    // Sol_A / Sol_B come STRAIGHT from the cylinder FB, which is internally mutually
+    // exclusive -- no state drives both. Do NOT re-introduce an OR-override on either
+    // output: the removed "OR SolB_Cmd41" on Sol_B is exactly what made both coils
+    // energise together (ITEM-41). CMD=41 P2 now retracts by latching Cmd_Retract, so
+    // the FB's own State 2 drives Sol_B and drops Sol_A in the same scan.
     "Output_Cyl_Backsupport_SolA" := "DB_Cylinder_BackSupport".Sol_A;
-    // Sol_B: normal FB output OR CMD=41 Param=1 override (holds retract solenoid independently)
-    "Output_Cyl_Backsupport_SolB" := "DB_Cylinder_BackSupport".Sol_B
-                                     OR "DB_Cylinder_BackSupport".SolB_Cmd41;
-    // Atmosphere valve: energised by CMD=41 Param=1, de-energised by Param=2 or process stop
+    "Output_Cyl_Backsupport_SolB" := "DB_Cylinder_BackSupport".Sol_B;
+    // Atmosphere valve: energised by CMD=41 Param=1, de-energised by Param=2/P3 or process stop
     "Output_Cyl_Backsupport_SolAtmosphere" := "DB_Cylinder_BackSupport".SolAtmo_Cmd;
     "DB_Diagnostic".CylDiag[1].State   := "DB_Cylinder_BackSupport".State;
     "DB_Diagnostic".CylDiag[1].Pos     := "DB_Cylinder_LinearRuler_BackSupport".Value;
@@ -266,11 +269,16 @@ BEGIN
     "DB_Diagnostic".CylDiag[1].Error   := "DB_Cylinder_BackSupport".Error;
     "DB_Diagnostic".CylDiag[1].ErrorID := "DB_Cylinder_BackSupport".ErrorID;
 
-    // ── SheetHolder (CylDiag[2]) -- no sensor, PositioningMode=0, ValveType=1 ──
+    // ── SheetHolder (CylDiag[2]) -- no sensor, PositioningMode=0, ValveType=2 ──
+    // 5/3 blocked centre: Sol_A extends, Sol_B retracts, both off = mechanically locked.
+    // FB_CylinderControl drives Sol_A/Sol_B from a single exclusive CASE, so the two coils
+    // can never be energised together. Unlike BackSupport there is no CMD=41 OR-override
+    // on either output here -- do not add one (see ITEM-41 in docs/TODO.md).
     "DB_Cylinder_SheetHolder"(
         SafetyOK := "Safety_Estop" OR "DB_HMI".Bypass_EStop
     );
     "Output_Cyl_SheetHolder_SolA" := "DB_Cylinder_SheetHolder".Sol_A;
+    "Output_Cyl_SheetHolder_SolB" := "DB_Cylinder_SheetHolder".Sol_B;
     "DB_Diagnostic".CylDiag[2].State   := "DB_Cylinder_SheetHolder".State;
     "DB_Diagnostic".CylDiag[2].Pos     := 0.0;
     "DB_Diagnostic".CylDiag[2].Sol_A   := "DB_Cylinder_SheetHolder".Sol_A;

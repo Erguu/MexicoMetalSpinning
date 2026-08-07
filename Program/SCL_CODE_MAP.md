@@ -57,7 +57,7 @@ X    : Real  — Target X position (mm)
 Z    : Real  — Target Z position (mm)
 F    : Int   — Feed rate (mm/min), 0 = rapid
 CMD  : Byte  — Command type: 0=G0, 1=G1, 10=Tool, 20=SpindleOn, 21=SpindleOff, 30=Dwell, 40=CylGoto, 41=Atmo, 99=End
-Param: Byte  — CMD=10: tool code | CMD=20: RPM/10 | CMD=30: time×100ms | CMD=40: BackSupport pos (×Cmd40_Gain mm) | CMD=41: 1=Sol_B+SolAtmo ON, 2=SolAtmo OFF, 3=release both
+Param: Byte  — CMD=10: tool code | CMD=20: RPM/10 | CMD=30: time×100ms | CMD=40: ignored (Mode 0 timed full stroke) | CMD=41: 1=Atmo ON (Sol_A stays), 2=retract (Sol_A off, Sol_B on), 3=release (all coils off)
 ```
 
 > **Note (UDT_*.scl files):** `UDT_RecipeLine.scl`, `UDT_RecipeHeader.scl`, `UDT_AlarmEntry.scl`
@@ -123,7 +123,7 @@ The schema of all DBs in the project is defined here. All HMI tag connections ar
 |----|---------------------|------------------|
 | `DB_fbSpindle` | `FB_SpindleControl` | `"DB_fbSpindle"(...)` |
 | `DB_Cylinder_BackSupport` | `FB_CylinderControl` | `"DB_Cylinder_BackSupport"(...)` |
-| `DB_Cylinder_SheetHolder` | `FB_CylinderControl` | `"DB_Cylinder_SheetHolder"(...)` |
+| `DB_Cylinder_SheetHolder` | `FB_CylinderControl` | `"DB_Cylinder_SheetHolder"(...)` — ValveType=2 (5/3 BC) since 2026-08-07 |
 | `DB_Cylinder_ToolHeadLock` | `FB_CylinderControl` | `"DB_Cylinder_ToolHeadLock"(...)` |
 | `DB_Cylinder_MandrelLock` | `FB_CylinderControl` | `"DB_Cylinder_MandrelLock"(...)` |
 | `DB_Cylinder_Sen_BackSupport_Setpt` | `FB_DigitalSensor` | `"DB_Cylinder_Sen_BackSupport_Setpt"(RawInput:=...)` |
@@ -500,16 +500,40 @@ S7-1200: 0V=0, 10V=27648 | 4-20mA: Raw_Min=5530, Raw_Max=27648
 - `ValveType=1` (5/2 Spring Return) — spring retracts if Cmd_Extend is not held
 - `ValveType=3` (5/3 Exhaust Center) — dangerous for metal spinning, do not use
 
-**BackSupport atmosphere override (CMD=41, DB_Cylinder_BackSupport only):**
-Two extra VAR fields are stored in the BackSupport instance DB:
-- `SolB_Cmd41` — held TRUE by CMD=41 Param=1; OR-combined with FB's Sol_B in OB1 to keep Sol_B ON independently of the state machine
-- `SolAtmo_Cmd` — set TRUE by CMD=41 Param=1; cleared by Param=2 or process stop; drives `Output_Cyl_Backsupport_SolAtmosphere`
-Both are cleared by RESET, STOPPED, COMPLETE, and ERROR states.
+**BackSupport coil sequence (CMD=40 / CMD=41) — rewritten 2026-08-07, closes ITEM-41:**
+The authoritative coil table lives in the `DB_Cylinder_BackSupport` header in `02_DataBlocks.scl`.
+
+| Event | `%Q12.0` Sol_A | `%Q12.1` Sol_B | `%Q12.7` Atmo | Written by |
+|-------|----------------|----------------|---------------|------------|
+| `CMD=40` | ON (held, FB State 3) | off | off | `Cmd_Extend` |
+| `CMD=41 P1` | ON (stays) | off | ON | `SolAtmo_Cmd := TRUE` |
+| `CMD=41 P2` | off | ON | off | `Cmd_Retract := TRUE` → FB State 2 |
+| `CMD=41 P3` | off | off | off | `Cmd_Retract := FALSE` → FB State 0 |
+| Recipe end (any) | off | ON 2 s → off | off | `bBSEndRetract` in FB_Process |
+
+- One extra VAR field remains in the instance DB: `SolAtmo_Cmd` → `Output_Cyl_Backsupport_SolAtmosphere`.
+- **`SolB_Cmd41` was DELETED**, along with its `OR` into `%Q12.1`. It drove Sol_B behind the state
+  machine's back and was the ITEM-41 mechanism. `Sol_A`/`Sol_B` now come straight from the FB, which is
+  internally mutually exclusive — **never re-add an override on either output.**
+- `Cmd_Retract` is a **latched** command (nothing else writes it for this cylinder). Cleared by RESET,
+  hard reset, `CMD=41 P3`, the end-retract timeout, and on leaving a terminal state mid-retract.
+- `Timeout_Retract := T#24H` is deliberate — State 4 latches `Sol_B` with no exit but `Cmd_Extend`.
+- End-of-recipe retract: edge-triggered on entry to STOPPED / ERROR / COMPLETE, holds `Sol_B` for
+  `DB_MachineConfig.CylBackSupport_EndRetractTime` (T#2S), then drops every coil.
 
 **MandrelLock one-shot retract (PositioningMode=0, ValveType=1):**
 Mode=0 FB stays in State 3 (Sol_A=TRUE) even after Cmd_Extend=FALSE. FB_Process pulses
 `Cmd_Retract=TRUE` for exactly one scan (`bMandrelRetractPulse` flag) when STOPPING or COMPLETE,
 forcing the FB into State 2 (Sol_A=FALSE → spring retracts). The pulse self-clears on the next scan.
+
+**SheetHolder held retract (PositioningMode=0, ValveType=2) — changed 2026-08-07:**
+This cylinder was a 5/2 spring return and used the same one-scan pulse. It is now a **5/3 blocked
+centre** with `Sol_B` wired to `%Q12.3`, so there is no spring to finish the stroke — the pulse
+pattern would energise `Sol_B` for one scan and the blocked centre would lock the piston mid-stroke.
+FB_Process therefore **holds** `Cmd_Retract` via `bSheetHolderRetractHold` until the FB reports
+State 4 (AT RETRACT), reached after `Timeout_Retract` (T#1S). Mode 0 + `ValveType<>1` keeps `Sol_B`
+energised in both State 2 and State 4, so the retract coil stays powered while the machine is idle —
+same as BackSupport. **Do not** copy the MandrelLock pulse pattern onto any 5/3 cylinder.
 
 ---
 

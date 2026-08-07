@@ -422,6 +422,9 @@ BEGIN
     "DB_MachineConfig".CylSheetHolder_RetractTime  := T#0.5S;
     "DB_MachineConfig".CylToolHeadLock_PreDelay    := T#0.5S;
     "DB_MachineConfig".CylToolHeadLock_RetractTime := T#2S;
+    // End-of-recipe BackSupport retract: Sol_B held this long, then all coils drop.
+    // Operator-measured retract stroke ~2s. Raise if the cylinder is not fully back.
+    "DB_MachineConfig".CylBackSupport_EndRetractTime := T#2S;
     // Process timeouts
     "DB_MachineConfig".Timeout_DriveReady     := T#3S;
     "DB_MachineConfig".Timeout_Homing         := T#120S;

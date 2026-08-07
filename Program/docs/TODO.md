@@ -785,7 +785,61 @@ empty when the operator went to check details.
 
 ## ITEM-41 — SAFETY: BackSupport 5/3 valve can have both solenoids energised simultaneously
 
-**Found:** 2026-07-30 (code review while adding CMD=41 Param=3) | **Status: OPEN — awaiting decision**
+**Found:** 2026-07-30 | **Status: ✓ FIXED 2026-08-07 on branch `fix/backsupport-coil-sequence`
+— NOT COMPILED, NOT COMMISSIONED**
+
+### § Resolution 2026-08-07 — operator supplied the intended sequence
+
+Everything below this section is the investigation history and is kept for the reasoning. The
+answer came from the operator, not from the code: **`Sol_B` was never supposed to be energised at
+`CMD=41 P1` at all.** The intended coil sequence is
+
+| Event | `%Q12.0` Sol_A | `%Q12.1` Sol_B | `%Q12.7` Atmo |
+|-------|----------------|----------------|---------------|
+| `CMD=40` | ON (held) | off | off |
+| `CMD=41 P1` | ON (stays) | off | ON (held) |
+| `CMD=41 P2` | **off** | **ON** (retract) | **off** |
+| `CMD=41 P3` | off | **off** | off |
+| Recipe end (any outcome) | off | ON 2 s → off | off |
+
+**Why the machine ran for months anyway — and why it then stopped.** Two defects cancelled each
+other. P1 switched `Sol_B` on early, and `Sol_B` is exactly the coil P2 needs; `Sol_A` was never
+released (State 3 dead end), so P2 retracted *only because `Sol_B` out-muscled the still-live
+`Sol_A`*. That is a pressure/force race, not a design. When the balance tipped — air pressure,
+hose routing, seal wear — the cylinder stopped retracting. This finally explains the
+"worked for months, now doesn't" regression that no code change accounted for.
+
+**The fix (5 SCL files):**
+- `CMD=41 P1` writes `SolAtmo_Cmd` only. `Sol_A` deliberately stays ON.
+- `CMD=41 P2` writes `SolAtmo_Cmd := FALSE` + **`Cmd_Retract := TRUE`** → FB State 3 → 2, which
+  drops `Sol_A` and raises `Sol_B` in the same scan. The FB does the interlocking, not an override.
+- `CMD=41 P3` writes `Cmd_Retract := FALSE` → State 2 → 0, both coils off.
+- **`SolB_Cmd41` and its `OR` into `%Q12.1` are DELETED.** Both-coils-on is now unreachable by any
+  input combination — no output mask needed.
+- New end-of-recipe retract in FB_Process (`bBSEndRetract` + `tonBSEndRetract`, edge-triggered on
+  entry to STOPPED / ERROR / COMPLETE) drives `Sol_B` for
+  `DB_MachineConfig.CylBackSupport_EndRetractTime` (T#2S) then drops every coil.
+- `Timeout_Retract` T#10S → **T#24H** (State 4 latches `Sol_B` — same dead end as State 3).
+- `Timeout_Extend` T#1S500MS → **T#3S**: the old value was *shorter than the measured ~2 s stroke*,
+  so state 71 advanced mid-travel and `CMD=41 P1` fired into a still-moving cylinder. Separate live
+  bug, found while specifying this fix.
+
+**Options (i)–(iv) below are all superseded.** So is the 2026-08-01 "better option" (reversing the
+`PositioningMode`/`ValveType` precedence in State 3): the operator's spec **requires** `Sol_A` held
+through CMD=40 and P1, so dropping both coils in State 3 would break the machine. Do not revive it.
+
+Reset-path verification: `Program/docs/RESET_AUDIT.md` § BackSupport coil sequence.
+Field test card: `Human_TODO_Backsupport.md`.
+
+**Still open:** compile in TIA, then commission. Two behaviours to watch on the first run —
+(a) `CMD=41 P2` must fully retract now that it no longer fights `Sol_A`, and (b) the end-of-recipe
+retract fires on *every* termination including faults, which is new motion at fault time.
+
+---
+
+### Investigation history (superseded — kept for reasoning)
+
+**Status when written: OPEN — awaiting decision**
 **Revised 2026-08-01 — read "§ Revision 2026-08-01" at the bottom FIRST. The causal claim in
 "Effect" and "Confirmed on the machine 2026-07-31" below is retracted; the source-level facts stand.**
 
