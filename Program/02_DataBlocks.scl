@@ -182,14 +182,31 @@ NON_RETAIN
         // These values are NOT overwritten by FC_LoadConfig.
         // Can be changed from HMI Setup screen; preserved on PLC restart.
         // =====================================================================
-        SoftLimit_MinX : Real := -10.0;     // X minimum (home=0)
+        SoftLimit_MinX : Real := -30.0;     // X minimum (home=0)
         SoftLimit_MaxX : Real := 500.0;   // X maximum travel (mm)
-        SoftLimit_MinZ : Real := -10.0;  // Z minimum (negative = mandrel front / clearance)
+        SoftLimit_MinZ : Real := -50.0;  // Z minimum (negative = mandrel front / clearance)
         SoftLimit_MaxZ : Real := 500.0;   // Z maximum (forming depth)
 
         // HMI-EDITABLE: Safe Positions (mm)
         SafePos_X : Real := 0.0;         // "Go Safe" X target
         SafePos_Z : Real := 0.0;        // "Go Safe" Z target (clearance zone)
+
+        // HMI-EDITABLE: Sheet-Load Park Position (mm)
+        // The single position the machine parks at whenever it is waiting for the
+        // operator to load a sheet. Reached at the end of every program (STATE_COMPLETE
+        // is not used -- the park move is the STOPPING/POST_HOME_CLR path), after every
+        // homing cycle, and after a Stop. STATE_STARTING compares the live axis position
+        // against it to decide whether the homing seek can be skipped (fast cycle mode).
+        //
+        // SAFETY: this is where the operator reaches in to insert a sheet and where the
+        // MandrelLock clamps. Set it only to a position where the tool head does not
+        // obstruct loading. Commission conservatively (near 0,0) and walk it in.
+        // Targets are clamped to SoftLimit_Min/Max before any move is issued.
+        //
+        // Deliberately NOT written by FC_LoadConfig, so OB100 does not fight the HMI.
+        SheetLoadPos_X : Real := 200.0;    // Sheet-load park X target (mm)
+        SheetLoadPos_Z : Real := 170.0;    // Sheet-load park Z target (mm)
+        SheetLoadTol   : Real := 2.0;    // +/- window counted as "at the park position" (mm)
 
         // HMI-EDITABLE: Pause Retract (mm / mm/s)
         // On Pause, X and Z jog by these signed offsets to pull the tool clear
@@ -206,7 +223,13 @@ NON_RETAIN
         HomeOffset_Z : Real := 0.0;       // Z set value after homing
         HomeVelocity : Real := 10.0;      // Homing clearance velocity (mm/s)
         PostHome_Clearance : Real := 10.0; // Distance to clear PNP zone after homing (mm)
-        AlwaysHomeOnAutoStart : Bool := TRUE; // TRUE = home all axes on every auto start (recommended)
+        // HMI-EDITABLE: fast cycle mode master switch.
+        //   TRUE  = home all axes on every auto start (legacy behaviour)
+        //   FALSE = skip the reference seek when the reference is trusted AND the axes
+        //           are parked at SheetLoadPos (see FB_Process STATE_STARTING)
+        // This switch can only ever skip homing in the NORMAL case. It never overrides
+        // FB_Process bRequireHoming -- an E-Stop, a fault or a power-up always re-homes.
+        AlwaysHomeOnAutoStart : Bool := FALSE;
 
         // ⚠️ UNUSED: The following two parameters are not read anywhere in PLC code.
         // Recipe handler takes its own feedrate from the recipe line.
@@ -473,7 +496,11 @@ NON_RETAIN
         Axis_Z_Enabled : Bool;
         Axis_X_Homed : Bool;
         Axis_Z_Homed : Bool;
-        
+        // FB_Process bRequireHoming: TRUE = reference suspect, next auto start WILL home
+        // regardless of AlwaysHomeOnAutoStart. Useful on the HMI to explain to the
+        // operator why a cycle homed when fast cycle mode is enabled.
+        Require_Homing : Bool;
+
         // =========================================================
         // ERROR CONTEXT
         // =========================================================

@@ -43,7 +43,8 @@ Priority: **HIGH** — contains the hard reset block, all actuator command write
       - All motion-FB execute flags cleared (bHomeXExec, bStopMoveX, etc.)
       - All actuator Cmd_Extend flags driven FALSE
       - All CMD=41 override flags (SolB_Cmd41, SolAtmo_Cmd) driven FALSE
-      - bSheetWaitPhase2 not left TRUE (would skip sheet prompt on next run)
+      - bSheetWaitPhase2 / bSheetWaitPhase3 not left TRUE (would skip sheet prompt on next run)
+      - bRequireHoming must NOT be cleared here — safe default is TRUE (force homing)
 - [ ] `STATE_ERROR (999)`: every scan while faulted.
       - Same actuator overrides cleared
       - bStartSeq = FALSE (recipe handler not fed a start)
@@ -60,6 +61,38 @@ Priority: **HIGH** — contains the hard reset block, all actuator command write
 - [ ] HMI fields: HasWarning / WarningText cleared on STATE_SHEET_WAIT phase 1 exit and on HARD RESET.
 - [ ] Cmd_Reset edge: verify that `#fbInputs.Cmd_Reset` triggers bDoHardReset and that this
       path reaches STATE_STOPPED cleanly regardless of current state.
+
+**Findings — 2026-08-03 (sheet-load park / fast cycle mode):**
+
+New FB_Process VARs: `bRequireHoming`, `bRefTrusted`, `clrTargetX`, `clrTargetZ`, `clrVelocity`,
+`parkTargetX`, `parkTargetZ`. New DB fields `DB_MachineConfig.SheetLoadPos_X/_Z/SheetLoadTol`,
+new diagnostic `DB_Diagnostic.Require_Homing`. Checked against all four checkpoints:
+
+- [x] **Hard reset** — `bRequireHoming := TRUE` added to the `bDoHardReset` block. This is the
+      *safe* default (force a homing cycle), not a clear-to-zero: never set it FALSE here.
+      The other new VARs need no reset — `bRefTrusted` and `parkTargetX/Z` are recomputed from
+      scratch every scan before use, and `clrTargetX/Z` + `clrVelocity` are written by every
+      transition that arms `bHomeClrX/Z` (and are only read while those flags are TRUE).
+- [x] **Recipe reset** (`05_RecipeHandler.scl` `IF #Reset`) — unaffected. No CMD handler writes
+      any of the new flags; no new cylinder command was introduced.
+- [x] **STATE_STOPPED (0)** — already clears `bHomeClrX/Z` every scan, which is what disarms the
+      park-move FBs. `bRequireHoming` is deliberately **not** cleared here: STOPPED is reached
+      after an error acknowledge, and clearing it there would let a post-fault cycle skip homing.
+- [x] **STATE_ERROR (999)** — the `bRequireHoming` latch block runs after the state CASE and sets
+      the flag TRUE whenever `State = STATE_ERROR` or E-Stop is active, so a fault is always
+      followed by a re-home. No clear path required.
+- [x] **New TON timers** — none added.
+- [x] **New HasWarning / WarningText writes** — none added.
+- [x] **New physical outputs** — none. No new cylinder, so `FB_CylinderControl` state -1 is unaffected.
+- [x] **GAP FIXED (pre-existing, latent):** the `Cmd_Stop` handler did not drop `bHomeClrX/Z`,
+      `bHomeXExec/ZExec/ToolExec` or `homeSeqState` before switching to STATE_STOPPING. A Stop
+      pressed during states 13/15/16 therefore left `fbMoveX/Z_HomeClr` or `fbHomeX/Z/Tool`
+      executing while `fbMoveX/Z_Stop` was also commanded — two MC_ blocks driving one axis.
+      Only reachable mid-homing before this change; state 16 is now on the normal cycle path.
+      All five flags are now cleared in the `Cmd_Stop` handler.
+- [x] **Soft-limit clamp:** `SheetLoadPos_X/Z` is operator-entered on the HMI, so `parkTargetX/Z`
+      and `clrTargetX/Z` are clamped to `SoftLimit_Min/Max` before reaching any MC_MoveAbsolute,
+      and `clrVelocity` is guarded against 0.0.
 
 **Findings — 2026-05-17:**
 

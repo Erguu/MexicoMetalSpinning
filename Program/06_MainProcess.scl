@@ -1148,6 +1148,19 @@ VERSION : 4.0
         prevTOFaultZ       : Bool;  // Edge detection: Z axis TO fault
         prevTOFaultTool    : Bool;  // Edge detection: Tool axis TO fault
         prevTOFaultSpindle : Bool;  // Edge detection: Spindle TO fault
+        // --- Sheet-load park / fast cycle mode ---
+        bRequireHoming : Bool := TRUE;  // Axis reference is suspect -> next auto start MUST home.
+                                        // Latched TRUE by E-Stop, STATE_ERROR and hard reset;
+                                        // cleared ONLY where a homing sequence completes.
+                                        // Start value TRUE so a fresh download/power-up homes.
+        bRefTrusted    : Bool;  // Recomputed in STATE_STARTING: all axes homed AND NOT bRequireHoming
+        clrTargetX     : Real;  // Target for fbMoveX_HomeClr -- PNP escape (state 13) or SheetLoadPos (state 16)
+        clrTargetZ     : Real;  // Target for fbMoveZ_HomeClr -- PNP escape (state 13) or SheetLoadPos (state 16)
+        clrVelocity    : Real;  // Velocity for the above. HomeVelocity for the slow PNP escape (13),
+                                // RapidVelocity for the park move (16) -- the park can be a long
+                                // travel and must not crawl at the 5 mm/s homing clearance speed.
+        parkTargetX    : Real;  // Clamped SheetLoadPos_X used by the stop/park move (fbMoveX_Stop)
+        parkTargetZ    : Real;  // Clamped SheetLoadPos_Z used by the stop/park move (fbMoveZ_Stop)
         bJogBlockPlus      : Bool;  // Manual soft-limit jog gate: block jog+ (recomputed every scan)
         bJogBlockMinus     : Bool;  // Manual soft-limit jog gate: block jog- (recomputed every scan)
         prevManualError : Bool;  // Edge detection: manual mode error
@@ -1179,7 +1192,7 @@ VERSION : 4.0
         // ToolHeadLock timers
         tonLockWait : TON;      // Fallback timeout for states 17 and 29 (T#3S)
         tonLockPreDelay : TON;  // Pre-delay before commanding extend in state 17 (T#1S)
-        // TRUE = LOCK_RETRACT_WAIT exits to STATE_STOPPED (axes already at zero from STOPPING)
+        // TRUE = LOCK_RETRACT_WAIT exits to STATE_STOPPED (axes already parked at SheetLoadPos by STOPPING)
         // FALSE = exits to STATE_TOOL_CHANGE
         bLockAfterHoming : Bool;
         // Sheet wait (STATE_SHEET_WAIT = 14)
@@ -1591,6 +1604,16 @@ BEGIN
         // STOP: controlled stop without generating an error + return to safe position
         #bPauseActive := FALSE;
         #bStartSeq := FALSE;
+        // Drop every other axis-motion trigger before handing the axes to the STOPPING
+        // park move. Without this, a Stop pressed during a clearance/park move (13/16) or
+        // during the homing sequence (15) leaves fbMoveX/Z_HomeClr or fbHomeX/Z/Tool
+        // executing while fbMoveX/Z_Stop is also commanded -- two MC_ function blocks
+        // fighting for the same axis. Latent before the sheet-load park change; state 16
+        // is now on the normal cycle path (every reposition), so it is reachable in
+        // routine operation rather than only mid-homing.
+        #bHomeClrX := FALSE; #bHomeClrZ := FALSE;
+        #bHomeXExec := FALSE; #bHomeZExec := FALSE; #bHomeToolExec := FALSE;
+        #homeSeqState := 0;
         // If running, go to special STOP sequence; otherwise go directly to STOPPED
         IF (#State >= STATE_STARTING AND #State < STATE_ERROR AND #State <> 100) OR (#State = STATE_PAUSED) THEN
             #State := STATE_STOPPING;
@@ -1779,8 +1802,32 @@ BEGIN
         #prevBtnCmd41Release         := "DB_Manual".Btn_Cmd41_Release;
         #prevBtnCmd41AtmoOff         := "DB_Manual".Btn_Cmd41_AtmoOff;
         #prevBtnCmd41AtmoOn          := "DB_Manual".Btn_Cmd41_AtmoOn;
+        // Reference validity: a hard reset can be pressed from any state, including one
+        // where an axis was mid-motion and got halted (bHaltAllAxes above). Treat the
+        // reference as suspect -- the next auto start homes, whatever fast cycle mode says.
+        #bRequireHoming              := TRUE;
         #bDoHardReset                := FALSE;
     END_IF;
+
+    // =========================================================================
+    // SHEET-LOAD PARK TARGET -- soft-limit clamped, single source of truth
+    // =========================================================================
+    // SheetLoadPos_X/Z are commissioning values typed on the HMI, so clamp them to the
+    // configured soft limits before they can reach an MC_MoveAbsolute -- a mistyped value
+    // must not be able to drive an axis into a limit.
+    //
+    // Computed BEFORE the state machine so the "am I already parked?" comparison in
+    // STATE_STARTING and the move target it hands to STATE_POST_HOME_CLR / STATE_STOPPING
+    // are the same number in the same scan. Comparing against the raw config value while
+    // moving to the clamped one would make an out-of-range SheetLoadPos re-issue a
+    // pointless park move on every cycle.
+    // =========================================================================
+    #parkTargetX := MIN(IN1 := MAX(IN1 := "DB_MachineConfig".SheetLoadPos_X,
+                                   IN2 := "DB_MachineConfig".SoftLimit_MinX),
+                        IN2 := "DB_MachineConfig".SoftLimit_MaxX);
+    #parkTargetZ := MIN(IN1 := MAX(IN1 := "DB_MachineConfig".SheetLoadPos_Z,
+                                   IN2 := "DB_MachineConfig".SoftLimit_MinZ),
+                        IN2 := "DB_MachineConfig".SoftLimit_MaxZ);
 
     // =========================================================================
     // MAIN STATE MACHINE
@@ -2230,23 +2277,60 @@ BEGIN
             // Physical contactor close + drive boot can take up to several hundred ms.
             // tonDriveReady is called unconditionally near the timer section (auto-resets on exit).
             IF #fbPowerX.Status AND #fbPowerZ.Status THEN
-                // Drives ready -- proceed to homing or running
-                IF NOT #Axis_X.StatusBits.HomingDone OR NOT #Axis_Z.StatusBits.HomingDone
-                   OR (NOT #Axis_Tool.StatusBits.HomingDone AND NOT "DB_MachineConfig".Bypass_ToolAxis)
-                   OR "DB_MachineConfig".AlwaysHomeOnAutoStart THEN
-                    // If in PNP zone, clear it first
+                // Drives ready -- three-way decision: home, reposition, or load the sheet.
+                //
+                // The axis reference is TRUSTED only when every required axis reports
+                // HomingDone AND nothing has invalidated it since the last completed
+                // homing cycle (bRequireHoming: E-Stop, STATE_ERROR, hard reset, power-up).
+                // StatusBits.HomingDone alone is not enough -- whether the TO clears it
+                // when MC_Power drops is encoder-type dependent, and an open-loop axis can
+                // lose steps during an E-Stop while still reporting HomingDone=TRUE.
+                #bRefTrusted := #Axis_X.StatusBits.HomingDone
+                                AND #Axis_Z.StatusBits.HomingDone
+                                AND (#Axis_Tool.StatusBits.HomingDone
+                                     OR "DB_MachineConfig".Bypass_ToolAxis)
+                                AND NOT #bRequireHoming;
+
+                IF NOT #bRefTrusted OR "DB_MachineConfig".AlwaysHomeOnAutoStart THEN
+                    // (1) Reference suspect, or the operator forced homing on every cycle.
+                    // Full reference seek. NEVER command an absolute move here -- the
+                    // coordinate system cannot be trusted until MC_Home completes.
+                    // If in PNP zone, clear it first (target = legacy PNP escape position).
                     #bHomeClrX := #HW_PNP_X_Min AND NOT #Axis_X.StatusBits.HomingDone;
                     #bHomeClrZ := #HW_PNP_Z_Min AND NOT #Axis_Z.StatusBits.HomingDone;
                     IF #bHomeClrX OR #bHomeClrZ THEN
+                        #clrTargetX  := "DB_MachineConfig".HomeOffset_X + "DB_MachineConfig".PostHome_Clearance;
+                        #clrTargetZ  := "DB_MachineConfig".HomeOffset_Z + "DB_MachineConfig".PostHome_Clearance;
+                        #clrVelocity := "DB_MachineConfig".HomeVelocity;  // slow: escaping a PNP sensor un-homed
                         #State := STATE_PRE_HOME_CLR;
                     ELSE
                         #homeSeqState := 1;
                         #bHomeXExec := TRUE; #bHomeZExec := FALSE;
                         #State := STATE_HOMING;
                     END_IF;
+                ELSIF ABS(#Axis_X.ActualPosition - #parkTargetX) > "DB_MachineConfig".SheetLoadTol
+                   OR ABS(#Axis_Z.ActualPosition - #parkTargetZ) > "DB_MachineConfig".SheetLoadTol THEN
+                    // (2) Reference trusted but the axes are parked somewhere else -- e.g.
+                    // the operator jogged in MANUAL between parts, or the last run was
+                    // aborted. Reposition to the sheet-load park instead of paying for a
+                    // full homing cycle. Safe: the reference is valid, the move is a normal
+                    // absolute move, and the target is clamped to the soft limits.
+                    // STATE_POST_HOME_CLR already does "move X+Z to target, then SHEET_WAIT".
+                    #bHomeClrX   := TRUE; #bHomeClrZ := TRUE;
+                    #clrTargetX  := #parkTargetX;
+                    #clrTargetZ  := #parkTargetZ;
+                    #clrVelocity := "DB_MachineConfig".RapidVelocity;  // can be a long travel -- not the 5 mm/s clearance speed
+                    #State       := STATE_POST_HOME_CLR;
                 ELSE
-                    // Axes already homed: engage lock before entering RUNNING
-                    #State := STATE_LOCK_EXTEND_WAIT;
+                    // (3) Reference trusted AND already parked at the sheet-load position:
+                    // no motion needed -- straight to sheet insertion. This is the fast
+                    // path that removes the homing seek from every cycle after the first.
+                    // NOTE: goes to SHEET_WAIT, never straight to LOCK_EXTEND_WAIT -- the
+                    // operator must still load a sheet and the MandrelLock must still clamp
+                    // (both were released at the end of the previous cycle).
+                    #bSheetWaitPhase2 := FALSE;
+                    #bSheetWaitPhase3 := FALSE;
+                    #State := STATE_SHEET_WAIT;
                 END_IF;
             ELSIF #tonDriveReady.Q THEN
                 // Timeout: drives did not become ready within 3s
@@ -2293,10 +2377,16 @@ BEGIN
                         #homeSeqState := 3;
                         #bHomeToolExec := TRUE;
                     ELSE
-                        // Tool axis bypassed -- go to post-homing clearance
+                        // Tool axis bypassed -- go to post-homing park move.
+                        // Target is the sheet-load park, not HomeOffset + PostHome_Clearance:
+                        // the machine parks at ONE position for sheet loading on every path.
                         #homeSeqState := 0;
                         #bHomeClrX := TRUE; #bHomeClrZ := TRUE;
+                        #clrTargetX  := #parkTargetX;
+                        #clrTargetZ  := #parkTargetZ;
+                        #clrVelocity := "DB_MachineConfig".RapidVelocity;
                         #CurrentTool := 1;  // Tool axis homed to slot 1 position
+                        #bRequireHoming := FALSE;  // Reference re-established -- trust it again
                         #State := STATE_POST_HOME_CLR;
                     END_IF;
                 ELSIF #fbHomeZ.Error THEN
@@ -2315,9 +2405,15 @@ BEGIN
                 IF #fbHomeTool.Done THEN
                     #bHomeToolExec := FALSE;
                     #homeSeqState := 0;
-                    // Tool done -- proceed to post-homing clearance for X and Z
+                    // Tool done -- proceed to the post-homing park move for X and Z.
+                    // Target is the sheet-load park, not HomeOffset + PostHome_Clearance:
+                    // the machine parks at ONE position for sheet loading on every path.
                     #bHomeClrX := TRUE; #bHomeClrZ := TRUE;
+                    #clrTargetX  := #parkTargetX;
+                    #clrTargetZ  := #parkTargetZ;
+                    #clrVelocity := "DB_MachineConfig".RapidVelocity;
                     #CurrentTool := 1;  // Tool axis homed to slot 1 position
+                    #bRequireHoming := FALSE;  // Reference re-established -- trust it again
                     #State := STATE_POST_HOME_CLR;
                 ELSIF #fbHomeTool.Error THEN
                     #bHomeToolExec := FALSE;
@@ -2370,22 +2466,27 @@ BEGIN
 
         // -----------------------------------------------------------------
         // === STATE_POST_HOME_CLR (16) ===
+        // Move X and Z to #clrTargetX/Z, then hand over to SHEET_WAIT.
+        // Two entry paths, same behaviour -- both target the sheet-load park:
+        //   • from STATE_HOMING       -- after a completed reference seek
+        //   • from STATE_STARTING (2) -- reference trusted but axes parked elsewhere
         // -----------------------------------------------------------------
-        16: // POST_HOME_CLR -- Move away from PNP zone after homing
+        16: // POST_HOME_CLR -- Move X and Z to the sheet-load park position
             #StatusID := 2;
             IF (NOT #bHomeClrX OR #fbMoveX_HomeClr.Done) AND (NOT #bHomeClrZ OR #fbMoveZ_HomeClr.Done) THEN
                 #bHomeClrX := FALSE; #bHomeClrZ := FALSE;
-                // Homing done: wait for sheet insertion before engaging ToolHeadLock
+                // Parked: wait for sheet insertion before engaging ToolHeadLock
                 #bSheetWaitPhase2 := FALSE;  // Always start in phase 1 (show prompt)
+                #bSheetWaitPhase3 := FALSE;  // Phase 3 must not survive from an aborted cycle
                 #State := STATE_SHEET_WAIT;
             ELSIF (#bHomeClrX AND #fbMoveX_HomeClr.Error) OR (#bHomeClrZ AND #fbMoveZ_HomeClr.Error) THEN
                 #bHomeClrX := FALSE; #bHomeClrZ := FALSE;
                 // Single-writer: queue path keeps the clearance-move context in the displayed text
                 "FC_ReportError"(Code := 16#0001,
-                                 Details := 'Post-home clearance move failed - axis could not leave PNP zone',
+                                 Details := 'Park move failed - axis could not reach sheet-load position',
                                  Source := 'Process');
-                "DB_HMI".ErrorDetail    := 'Axis could not move from PNP zone after homing - check drive';
-                "DB_HMI".ErrorDetail_ES := 'Eje no pudo salir de zona PNP despues del referenciado - revisar variador';
+                "DB_HMI".ErrorDetail    := 'Axis could not reach sheet-load position - check drive/SheetLoadPos';
+                "DB_HMI".ErrorDetail_ES := 'Eje no pudo alcanzar posicion de carga - revisar variador/SheetLoadPos';
                 #State := STATE_ERROR;
             END_IF;
 
@@ -2536,12 +2637,12 @@ BEGIN
             // Cmd_Extend=FALSE here (state not RUNNING/PAUSED/LOCK_EXTEND_WAIT); spring retracts.
             // No sensor yet: proceed after timeout regardless.
             // bLockAfterHoming selects exit:
-            //   TRUE  = coming from STOPPING → go to STATE_STOPPED (axes already at zero from STOPPING)
+            //   TRUE  = coming from STOPPING → go to STATE_STOPPED (axes already parked at SheetLoadPos)
             //   FALSE = coming from RUNNING (tool change) → go to STATE_TOOL_CHANGE
             #StatusID := 29;
             IF #tonLockWait.Q THEN
                 IF #bLockAfterHoming THEN
-                    #State := STATE_STOPPED;  // Axes already at zero from STOPPING; no homing needed
+                    #State := STATE_STOPPED;  // Axes already parked at SheetLoadPos by STOPPING; no homing needed
                 ELSE
                     #State := STATE_TOOL_CHANGE;
                 END_IF;
@@ -2551,8 +2652,11 @@ BEGIN
         // === STATE_STOPPING (18) ===
         // -----------------------------------------------------------------
         18: // STOPPING - Stop program without generating an error.
-            // Phase 1: recipe executor halts → command spindle stop → start axis return to zero.
-            // Axes move X=0 then Z=0 (MC_MoveAbsolute, rapid) in parallel with spindle decel wait.
+            // Phase 1: recipe executor halts → command spindle stop → start axis park move.
+            // Axes move to SheetLoadPos_X/Z (MC_MoveAbsolute, rapid, both simultaneously) in
+            // parallel with the spindle decel wait. Target is the sheet-load park, not 0,0:
+            // an abort leaves the machine in the same place a normal cycle end does, so the
+            // next Start can take the fast path instead of paying for a homing cycle.
             // Phase 2: release MandrelLock once BOTH spindle timer elapsed AND axes done → LOCK_RETRACT_WAIT → STOPPED.
             #StatusID := 18;
             #Running := FALSE;
@@ -2596,11 +2700,12 @@ BEGIN
                 END_IF;
                 #bWaitingSpindleStop := TRUE;   // Enable phase 2 (proportional spindle decel wait)
                 // fbMoveX/Z_Stop called at bottom of FB with Execute := bStopMoveX/Z,
-                // position 0.0 at RapidVelocity. Both axes start simultaneously.
-                #bStopMoveX          := TRUE;   // Start X return immediately (parallel with spindle decel and Z)
-                #bStopMoveZ          := TRUE;   // Start Z return simultaneously with X
+                // target parkTargetX/Z (= clamped SheetLoadPos) at RapidVelocity.
+                // Both axes start simultaneously.
+                #bStopMoveX          := TRUE;   // Start X park move immediately (parallel with spindle decel and Z)
+                #bStopMoveZ          := TRUE;   // Start Z park move simultaneously with X
             END_IF;
-            // Phase 2: release MandrelLock once proportional spindle decel timer has elapsed AND axes are at zero.
+            // Phase 2: release MandrelLock once proportional spindle decel timer has elapsed AND axes are parked.
             // Bypass_MandrelLock: no cylinder on this variant — skip decel wait, go directly to LOCK_RETRACT_WAIT.
             // No physical encoder -- ActualSpeed is a TO estimate only. tonSpindleStopWait is sole release condition.
             IF #bWaitingSpindleStop AND NOT #bStopMoveX AND NOT #bStopMoveZ
@@ -2954,7 +3059,28 @@ BEGIN
             #State := STATE_RECIPE_LOAD; // Reset from COMPLETE re-loads then pre-scans (drives stay on)
         END_IF;
     END_IF;
-    
+
+    // =========================================================================
+    // REFERENCE-VALIDITY LATCH (bRequireHoming)
+    // =========================================================================
+    // Forces a full homing cycle on the next auto start after anything that can
+    // invalidate the axis reference. This is the ONLY guarantee that an E-Stop is
+    // always followed by a re-home: DB_MachineConfig.AlwaysHomeOnAutoStart is an
+    // operator convenience switch and must never be able to suppress this.
+    //
+    // Why not rely on Axis_*.StatusBits.HomingDone alone: whether the TO clears it
+    // when MC_Power drops is encoder-type dependent, and an open-loop axis can lose
+    // steps while the drive is dead yet still report HomingDone=TRUE on power-up.
+    //
+    // Placed AFTER the state machine so a STATE_ERROR transition made earlier in this
+    // same scan is caught immediately rather than one scan late.
+    // Cleared ONLY where a homing sequence actually completes (STATE_HOMING, both the
+    // tool-axis and Bypass_ToolAxis exits). Hard reset sets it TRUE.
+    IF NOT (#EStop_OK OR "DB_HMI".Bypass_EStop) OR #State = STATE_ERROR THEN
+        #bRequireHoming := TRUE;
+    END_IF;
+    "DB_Diagnostic".Require_Homing := #bRequireHoming;  // HMI/diagnostic visibility
+
     // =========================================================================
     // CYCLE TIMER - runs during RUNNING and PAUSED
     // =========================================================================
@@ -3196,18 +3322,35 @@ BEGIN
     #fbToolChanger(Execute := #bToolExecute, ToolNumber := #activeToolReq,
                    Axis_Tool := #Axis_Tool);
 
-    // Motion FBs for moving to position 0 after stop
-    #fbMoveX_Stop(Execute := #bStopMoveX, Position := 0.0, Velocity := "DB_MachineConfig".RapidVelocity, Axis := #Axis_X);
-    #fbMoveZ_Stop(Execute := #bStopMoveZ, Position := 0.0, Velocity := "DB_MachineConfig".RapidVelocity, Axis := #Axis_Z);
-    // Homing clearance moves -- pre (clear PNP zone) and post (move away after homing)
-    // Target: HomeOffset + PostHome_Clearance (outside PNP sensor range)
+    // Belt-and-braces clamp for the clearance/park move target. parkTargetX/Z are already
+    // clamped (computed before the state machine); this also covers the STATE_PRE_HOME_CLR
+    // target, which is derived from HomeOffset + PostHome_Clearance.
+    #clrTargetX  := MIN(IN1 := MAX(IN1 := #clrTargetX,
+                                   IN2 := "DB_MachineConfig".SoftLimit_MinX),
+                        IN2 := "DB_MachineConfig".SoftLimit_MaxX);
+    #clrTargetZ  := MIN(IN1 := MAX(IN1 := #clrTargetZ,
+                                   IN2 := "DB_MachineConfig".SoftLimit_MinZ),
+                        IN2 := "DB_MachineConfig".SoftLimit_MaxZ);
+    // Defensive: every path that sets bHomeClrX/Z also sets clrVelocity in the same scan,
+    // but a zero velocity would fail MC_MoveAbsolute rather than move slowly. Never pass 0.
+    IF #clrVelocity <= 0.0 THEN
+        #clrVelocity := "DB_MachineConfig".RapidVelocity;
+    END_IF;
+
+    // Stop/park move -- STATE_STOPPING sends both axes to the sheet-load park position
+    // (was hardcoded 0.0 before the sheet-load park change).
+    #fbMoveX_Stop(Execute := #bStopMoveX, Position := #parkTargetX, Velocity := "DB_MachineConfig".RapidVelocity, Axis := #Axis_X);
+    #fbMoveZ_Stop(Execute := #bStopMoveZ, Position := #parkTargetZ, Velocity := "DB_MachineConfig".RapidVelocity, Axis := #Axis_Z);
+    // Clearance / park moves. Target comes from #clrTargetX/Z, set by the caller state:
+    //   STATE_PRE_HOME_CLR  (13) -- HomeOffset + PostHome_Clearance (PNP escape before homing)
+    //   STATE_POST_HOME_CLR (16) -- SheetLoadPos (park for sheet loading)
     #fbMoveX_HomeClr(Execute  := #bHomeClrX,
-                     Position := "DB_MachineConfig".HomeOffset_X + "DB_MachineConfig".PostHome_Clearance,
-                     Velocity := "DB_MachineConfig".HomeVelocity,
+                     Position := #clrTargetX,
+                     Velocity := #clrVelocity,
                      Axis     := #Axis_X);
     #fbMoveZ_HomeClr(Execute  := #bHomeClrZ,
-                     Position := "DB_MachineConfig".HomeOffset_Z + "DB_MachineConfig".PostHome_Clearance,
-                     Velocity := "DB_MachineConfig".HomeVelocity,
+                     Position := #clrTargetZ,
+                     Velocity := #clrVelocity,
                      Axis     := #Axis_Z);
     
     // Manual mode - sync aliases first

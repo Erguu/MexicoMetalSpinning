@@ -15,6 +15,8 @@ added so neither failure can ever be silent again: the loader **poisons** `DB_Se
 
 **Previously, 2026-08-04:** **New STATE_RECIPE_LOAD(11).** Recipes moved to load memory: `DB_RecipeProgram1..10` are `UNLINKED` (load memory only, zero work memory) and `FB_RecipeLoader` copies the selected one whole into `DB_SelectedRecipe` with `READ_DBL` before the pre-scan. Every path that went straight to PRE_SCAN(12) now goes to RECIPE_LOAD(11) first. Both five-way `CASE` blocks over `DB_RecipeProgram1..5` are gone — the handler and pre-scan bind unconditionally to `DB_SelectedRecipe`. New error `16#0312`. The `LineCount` guard now matches the array (1..1000), closing the out-of-range read. See `LOADMEM_COPY_ON_SELECT.md`.
 
+**Previously, 2026-08-03:** — **Sheet-load park / fast cycle mode.** Homing no longer runs on every auto start. `SheetLoadPos_X/Z` (HMI-editable, soft-limit clamped) is now the single position the machine parks at for sheet loading: it is the target of STATE_POST_HOME_CLR (16) and STATE_STOPPING (18), and the reference for the STATE_STARTING (10) three-way decision — **home** (reference not trusted) / **park move** (trusted but parked elsewhere) / **straight to SHEET_WAIT** (trusted and already parked). New `bRequireHoming` latch forces homing after E-Stop, ERROR, hard reset and power-up and can never be overridden by `AlwaysHomeOnAutoStart` (now default FALSE). The already-homed branch used to jump to LOCK_EXTEND_WAIT (17), skipping SHEET_WAIT entirely — no sheet prompt, no two-hand confirm, MandrelLock never re-clamped; every path now goes through SHEET_WAIT. `Cmd_Stop` handler now drops `bHomeClrX/Z` and the homing execute flags before the park move (two MC_ blocks could otherwise fight for one axis). CAM post-processors can drop the trailing `G0 X0 Z0`.
+
 **Previously, 2026-07-31:** **Bug fix 3:** MDI `CMD=40` now mirrors the recipe sequence (`FB_RecipeHandler` states 70/71) — `Cmd_Extend` held every scan, auto-released at `AtSetpoint` or on cylinder `Error` (`MDI_Status = 4`). It previously held `Cmd_Extend` until `Param=0`, leaving `Sol_A` latched; a following CMD=41 Param=1 then added `Sol_B` and both coils of the 5/3 valve were driven at once (ITEM-41) — valves click, cylinder stalls. **Bug fix 2 (same symptom, wider):** `bResetRecipe` was only cleared in STATE_PRE_SCAN, so after power-up / any `Cmd_Reset` / any error acknowledge it stayed TRUE while the machine sat in STOPPED or MANUAL. FB_RecipeHandler is called every scan and its `IF #Reset THEN` block is level-triggered, so it re-cleared `BackSupport.Cmd_Extend` / `SolB_Cmd41` / `SolAtmo_Cmd` every scan — killing the manual CMD=40 **and** CMD=41 buttons and the MDI. Now self-cleared right after the `fbRecipeHandler` call (guarded on `activeProgram` 1..5). **Bug fix 1:** MDI `CMD=40` never moved the valve. The STATE_MANUAL button line `BackSupport.Cmd_Extend := Btn_Cmd40_Extend` runs every scan and overwrote the MDI's write on the following scan, so the cylinder FB saw a 1-scan pulse (Mode 0: state 0 → 1 → 0, `Sol_A` up for one scan). MDI CMD=40 now sets a new FB var `bMDI_Cmd40Extend` and the button line reads `Btn_Cmd40_Extend OR bMDI_Cmd40Extend`; the latch is cleared in `bDoHardReset`, STATE_STOPPED, STATE_ERROR and on manual exit. CMD=41 was unaffected (those flags are written only inside the button `IF` chain).
 
 **Previously:** 2026-07-30 — Manual MDI added to STATE_MANUAL (5): `DB_Manual.MDI_Cmd` + `MDI_Param` executed on the rising edge of `Btn_MDI_Execute` (new FB var `prevMDIExec`, cleared in `bDoHardReset` and on manual exit); result in `MDI_Status`/`MDI_StatusText`/`_ES`. Accepts CMD=40 (Param 1/0 = extend/release) and CMD=41 (Param 1/2/3); motion commands rejected by design. Same session — Manual CMD=40 / CMD=41 buttons added to STATE_MANUAL (5): `DB_Manual.Btn_Cmd40_Extend` / `Btn_Cmd41_AtmoOn` / `Btn_Cmd41_AtmoOff` / `Btn_Cmd41_Release` write the same BackSupport flags as the matching recipe lines, and are written only in that state. `BackSupport.Cmd_Extend` is now also cleared in STATE_STOPPED (0) and STATE_ERROR (999). Recipe side gained CMD=41 Param=3 (release both overrides).
@@ -37,18 +39,18 @@ added so neither failure can ever be silent again: the loader **poisons** `DB_Se
 |-----|--------------------|--------------------------------------|-----------------------------------------|------------------------------------------------------------|
 | 0   | STOPPED            | "Stopped"                            | Any reset/stop path, power-up           | 5 (MANUAL), 11 (RECIPE_LOAD)                               |
 | 5   | MANUAL             | "Manual Mode"                        | STOPPED                                 | 0 (STOPPED), 11 (RECIPE_LOAD)                              |
-| 10  | STARTING           | "Starting..."                        | PRE_SCAN                                | 13 (PRE_HOME_CLR), 15 (HOMING), 17 (LOCK_EXTEND_WAIT), 999|
+| 10  | STARTING           | "Starting..."                        | PRE_SCAN                                | 13 (PRE_HOME_CLR), 15 (HOMING), 16 (POST_HOME_CLR), 14 (SHEET_WAIT), 999 |
 | 11  | RECIPE_LOAD        | "Loading recipe..."                  | STOPPED, MANUAL, COMPLETE               | 12 (PRE_SCAN), 999 (ERROR)                                 |
 | 12  | PRE_SCAN           | "Pre-scanning..."                    | RECIPE_LOAD                             | 10 (STARTING), 999 (ERROR)                                 |
 | 13  | PRE_HOME_CLR       | "Clearing PNP zone..."               | STARTING                                | 15 (HOMING), 999 (ERROR)                                   |
-| 14  | SHEET_WAIT         | "Waiting for sheet..."               | POST_HOME_CLR                           | 17 (LOCK_EXTEND_WAIT)                                      |
+| 14  | SHEET_WAIT         | "Waiting for sheet..."               | POST_HOME_CLR, STARTING (fast path)     | 17 (LOCK_EXTEND_WAIT)                                      |
 | 15  | HOMING             | "Homing..."                          | PRE_HOME_CLR, STARTING                  | 16 (POST_HOME_CLR), 999 (ERROR)                            |
-| 16  | POST_HOME_CLR      | "Post-home clearance..."             | HOMING                                  | 14 (SHEET_WAIT), 999 (ERROR)                               |
-| 17  | LOCK_EXTEND_WAIT   | "Lock engaging..."                   | SHEET_WAIT, TOOL_WAIT, STARTING         | 20 (RUNNING), 999 (ERROR)                                  |
+| 16  | POST_HOME_CLR      | "Sheet-load park move..."            | HOMING, STARTING (reposition)           | 14 (SHEET_WAIT), 999 (ERROR)                               |
+| 17  | LOCK_EXTEND_WAIT   | "Lock engaging..."                   | SHEET_WAIT, TOOL_WAIT                   | 20 (RUNNING), 999 (ERROR)                                  |
 | 18  | STOPPING           | "Stopping..."                        | Any auto state (Cmd_Stop)               | 29 (LOCK_RETRACT_WAIT)                                     |
 | 19  | STOP_GOHOME        | "Homing (post-stop)..."              | (legacy — no longer reached on normal stop) | 0 (STOPPED), 999 (ERROR)                              |
 | 20  | RUNNING            | "Running"                            | LOCK_EXTEND_WAIT                        | 25 (PAUSED), 29 (LOCK_RETRACT_WAIT), 100 (COMPLETE), 999  |
-| 21  | STOP_GOTOZERO      | "Returning to zero..."               | Alternate stop path (not main flow)     | 0 (STOPPED), 999 (ERROR)                                   |
+| 21  | STOP_GOTOZERO      | "Returning to zero..."               | (legacy — never assigned; unreachable)  | 0 (STOPPED), 999 (ERROR)                                   |
 | 22  | PNP_HALT           | "PNP Halt - jog to escape..."        | Any auto state on PNP zone trigger      | 0 (STOPPED)                                                |
 | 25  | PAUSED             | "Paused"                             | RUNNING                                 | 20 (RUNNING)                                               |
 | 29  | LOCK_RETRACT_WAIT  | "Lock releasing..."                  | STOPPING, RUNNING (tool change)         | 0 (STOPPED) or 30 (TOOL_CHANGE)                            |
@@ -69,11 +71,11 @@ RECIPE_LOAD (11): READ_DBL copy, load memory -> DB_SelectedRecipe
 PRE_SCAN (12)
   -- Recipe valid -->
 STARTING (10)
-  -- Drives ready, not homed, not in PNP zone -->
+  -- Drives ready, reference NOT trusted, not in PNP zone -->
 HOMING (15): X → Z → Tool
-  -- All axes homed -->
-POST_HOME_CLR (16)
-  -- Clearance done -->
+  -- All axes homed, bRequireHoming cleared -->
+POST_HOME_CLR (16): park move to SheetLoadPos at RapidVelocity
+  -- Parked -->
 SHEET_WAIT (14): Ph1 SheetHolder extends + prompt → Ph2 MandrelLock clamps T#5S → Ph3 SheetHolder retracts T#5S
   -- Sheet confirmed, MandrelLock clamped, SheetHolder clear -->
 LOCK_EXTEND_WAIT (17): ToolHeadLock extends (T#1S pre-delay + sensor confirm)
@@ -84,6 +86,32 @@ COMPLETE (100): MandrelLock releases, spindle stops
   -- Cmd_Start (next part) -->
 PRE_SCAN (12) ...
 ```
+
+### Fast cycle (every part after the first) — 2026-08-03
+
+With `AlwaysHomeOnAutoStart = FALSE` and the reference still trusted, the homing seek drops out
+of the loop entirely:
+
+```
+COMPLETE (100)
+  -- Cmd_Start -->
+PRE_SCAN (12)
+  -- Recipe valid -->
+STARTING (10)
+  -- Drives ready, bRefTrusted, axes already within SheetLoadTol of parkTarget -->
+SHEET_WAIT (14)        <-- no homing, no motion at all
+  -- Sheet confirmed -->
+LOCK_EXTEND_WAIT (17) --> RUNNING (20) --> COMPLETE (100)
+```
+
+If the axes are *not* at the park position (operator jogged in MANUAL, or the last cycle was
+aborted), STARTING inserts a single park move through POST_HOME_CLR (16) instead of a full
+homing cycle. If the reference is *not* trusted (E-Stop, fault, power-up, hard reset), it homes —
+that branch is never skippable, see `bRequireHoming` below.
+
+**Where the CAM post-processor fits:** the recipe no longer needs a final `G0 X0 Z0`. The PLC
+parks the axes itself, at `SheetLoadPos` rather than all the way back to 0,0 — a shorter move,
+and one that overlaps the spindle decel / MandrelLock release the operator is already waiting on.
 
 ---
 
@@ -174,13 +202,51 @@ Cmd_Stop vetoes RunCmd directly — spindle decelerates immediately when Stop is
 | `tonSheetHolderRetract` | Hardcoded in FB_Process | T#5S | STATE_SHEET_WAIT phase 3: open-loop wait for SheetHolder to fully retract |
 | `tonDriveReady` | Hardcoded in FB_Process | T#3S | STATE_STARTING: timeout if drives do not report ready |
 | `tonHomingTimeout` | Hardcoded in FB_Process | T#120S | STATE_HOMING, STATE_STOP_GOHOME: combined timeout for all three axes |
-| `AlwaysHomeOnAutoStart` | `DB_MachineConfig` | FALSE | STATE_STARTING: forces homing even if axes are already homed |
+| `AlwaysHomeOnAutoStart` | `DB_MachineConfig` | **FALSE** | STATE_STARTING: TRUE = home on every auto start (legacy). FALSE = fast cycle mode. HMI-editable. **Never overrides `bRequireHoming`.** |
+| `SheetLoadPos_X` / `_Z` | `DB_MachineConfig` | 0.0 / 0.0 | The one position the machine parks at for sheet loading. Target of STATE_POST_HOME_CLR and STATE_STOPPING; reference for the STATE_STARTING skip check. HMI-editable, clamped to soft limits. |
+| `SheetLoadTol` | `DB_MachineConfig` | 2.0 mm | STATE_STARTING: +/- window counted as "already parked". Outside it → park move; never a silent skip. |
 | `Bypass_ToolAxis` | `DB_MachineConfig` | FALSE | Skips tool axis homing and tool changes throughout |
 | `Bypass_ToolHeadLock` | `DB_HMI` | FALSE | STATE_LOCK_EXTEND_WAIT (17): skips ToolHeadLock sensor wait — advances straight to RUNNING, never raises `0x0012` |
 
 > **Note on SpindleDecelTime vs tonSpindleStopWait:**
 > `SpindleDecelTime` (configurable, default T#2S) guards speed *changes* mid-run — it delays the next SpindleOn command after a SpindleOff so the VFD ramp finishes.
 > `tonSpindleStopWait` (hardcoded T#10S) guards the *stop sequence* — it is the sole release condition in STOPPING for retracting the MandrelLock. There is no physical encoder on the spindle axis, so `ActualSpeed` is an unreliable TO estimate and is not used. The 10-second timer is the only trigger.
+
+---
+
+## Reference-Validity Latch (`bRequireHoming`) — added 2026-08-03
+
+**Purpose:** guarantee that anything which can invalidate the axis coordinate system is followed
+by a real homing cycle, independently of `AlwaysHomeOnAutoStart` and independently of what the
+Technology Object reports.
+
+**Why it exists.** With fast cycle mode the machine skips the reference seek, so something has to
+decide when the reference can still be believed. `Axis_*.StatusBits.HomingDone` is not sufficient
+on its own for two reasons:
+
+1. Whether the TO clears `HomingDone` when `MC_Power` drops is **encoder-type dependent** — not
+   guaranteed for this hardware, and not verified on the machine at the time of writing.
+2. An open-loop axis can lose steps while the drive is dead and still report `HomingDone = TRUE`
+   afterwards. Skipping homing there would run the next part on a silently wrong reference.
+
+**Set TRUE by** (evaluated every scan, *after* the state CASE so a same-scan `STATE_ERROR`
+transition is caught immediately):
+
+| Trigger | Where |
+|---------|-------|
+| E-Stop active (`NOT EStop_OK AND NOT Bypass_EStop`) | latch block after the CASE |
+| `State = STATE_ERROR` | latch block after the CASE |
+| Hard reset (`bDoHardReset`) | hard-reset block |
+| Power-up / download | VAR start value is `TRUE` |
+
+**Cleared ONLY** where a homing sequence actually completes — the two STATE_HOMING exits that also
+set `CurrentTool := 1` (tool-axis done, and the `Bypass_ToolAxis` path). Nothing else may clear it.
+
+**Exposed as** `DB_Diagnostic.Require_Homing` so the HMI can explain to the operator why a cycle
+homed while fast cycle mode was enabled.
+
+> Precedence is one-way: `AlwaysHomeOnAutoStart` can only ever cause *more* homing than the
+> position check would. It can never suppress a required re-home.
 
 ---
 
@@ -426,14 +492,44 @@ latch.
 
 **Transitions:**
 
+**Three-way decision (2026-08-03 — sheet-load park / fast cycle mode):**
+
+STARTING first computes `bRefTrusted` — whether the axis coordinate system can be believed:
+
+```
+bRefTrusted := Axis_X.HomingDone AND Axis_Z.HomingDone
+               AND (Axis_Tool.HomingDone OR Bypass_ToolAxis)
+               AND NOT bRequireHoming
+```
+
+`bRequireHoming` is the reference-validity latch (see the section below). `StatusBits.HomingDone`
+alone is deliberately **not** trusted: whether the TO clears it when `MC_Power` drops is
+encoder-type dependent, and an open-loop axis can lose steps during an E-Stop while still
+reporting `HomingDone = TRUE`.
+
 | Condition | Next State |
 |-----------|-----------|
-| Drives ready AND (axes not homed OR `AlwaysHomeOnAutoStart`) AND X or Z in PNP zone | **13** PRE_HOME_CLR |
-| Drives ready AND (axes not homed OR `AlwaysHomeOnAutoStart`) AND not in PNP zone | **15** HOMING (`homeSeqState = 1`) |
-| Drives ready AND all axes already homed AND NOT `AlwaysHomeOnAutoStart` | **17** LOCK_EXTEND_WAIT |
+| Drives ready AND (`NOT bRefTrusted` OR `AlwaysHomeOnAutoStart`) AND X or Z in PNP zone | **13** PRE_HOME_CLR (target = `HomeOffset + PostHome_Clearance`, `HomeVelocity`) |
+| Drives ready AND (`NOT bRefTrusted` OR `AlwaysHomeOnAutoStart`) AND not in PNP zone | **15** HOMING (`homeSeqState = 1`) |
+| Drives ready AND `bRefTrusted` AND axes further than `SheetLoadTol` from `parkTarget` | **16** POST_HOME_CLR (target = `parkTarget`, `RapidVelocity`) — reposition, no homing |
+| Drives ready AND `bRefTrusted` AND axes already at `parkTarget` | **14** SHEET_WAIT — fast path, no motion at all |
 | `tonDriveReady` 3 s timeout (drives did not report ready) | **999** ERROR (`0x000C` — "Drive ready timeout") |
 
+> **Never** goes straight to **17** LOCK_EXTEND_WAIT any more. The pre-2026-08-03 code did
+> exactly that on the already-homed branch, which skipped SHEET_WAIT entirely — no insert-sheet
+> prompt, no two-hand confirm, and the MandrelLock (released at the end of the previous cycle)
+> never re-clamped. Every path now passes through SHEET_WAIT.
+
+> The `Cmd_Start` press that entered STARTING cannot also satisfy the SHEET_WAIT two-hand
+> confirm: `FB_InputManager` emits `Cmd_Start` as a one-shot rising edge, so a held button
+> produces nothing on later scans. This matters more than it used to — the fast path reaches
+> SHEET_WAIT in a few scans instead of after a multi-second homing sequence.
+
 > PNP zone check at STARTING: `bHomeClrX := HW_PNP_X_Min AND NOT Axis_X.HomingDone`; `bHomeClrZ := HW_PNP_Z_Min AND NOT Axis_Z.HomingDone`.
+
+> `parkTargetX/Z` = `SheetLoadPos_X/Z` clamped to `SoftLimit_Min/Max`, computed once per scan
+> *before* the state CASE so the "am I already parked?" comparison and the move target are the
+> same number in the same scan.
 
 ---
 
@@ -486,18 +582,36 @@ latch.
 
 ## STATE 16 — POST_HOME_CLR
 
-**Purpose:** Move axes away from the PNP zone after homing, so the tool is not trapped near proximity sensors when the machining sequence begins.
+**Purpose:** Move X and Z to the **sheet-load park position** (`parkTargetX/Z`), then hand over to
+SHEET_WAIT. Renamed in intent 2026-08-03: it used to move only far enough to clear the PNP zone
+(`HomeOffset + PostHome_Clearance`, which was configured to 0.0 anyway), and is now the single
+"go park for sheet loading" move used by every path.
+
+**Two entry paths, identical behaviour:**
+
+| From | Why | Target | Velocity |
+|------|-----|--------|----------|
+| **15** HOMING | Reference seek completed | `parkTarget` | `RapidVelocity` |
+| **10** STARTING | Reference trusted, but axes parked elsewhere (operator jogged in MANUAL, or an aborted cycle) | `parkTarget` | `RapidVelocity` |
 
 **Runs every scan while in this state:**
-- `fbMoveX_HomeClr.Execute := bHomeClrX`
-- `fbMoveZ_HomeClr.Execute := bHomeClrZ`
+- `fbMoveX_HomeClr.Execute := bHomeClrX`, `Position := clrTargetX`, `Velocity := clrVelocity`
+- `fbMoveZ_HomeClr.Execute := bHomeClrZ`, `Position := clrTargetZ`, `Velocity := clrVelocity`
 
 **Transitions:**
 
 | Condition | Next State |
 |-----------|-----------|
-| Both clearance moves done | Resets `bSheetWaitPhase2 = FALSE` (ensures phase 1 on entry) → **14** SHEET_WAIT |
-| Any clearance move error | **999** ERROR (`0x0001` — "Post-home clearance move failed") |
+| Both park moves done | Resets `bSheetWaitPhase2 = FALSE` and `bSheetWaitPhase3 = FALSE` (ensures phase 1 on entry) → **14** SHEET_WAIT |
+| Any park move error | **999** ERROR (`0x0001` — "Park move failed - axis could not reach sheet-load position") |
+
+> `clrVelocity` exists because this state and STATE 13 need different speeds. STATE 13 escapes a
+> PNP sensor on an un-homed axis and must crawl at `HomeVelocity` (5 mm/s); the park move here can
+> be a long travel (e.g. X 200 → 0) and would take ~40 s at that speed, so it uses `RapidVelocity`.
+
+> No stale-`Done` hazard: `FB_Axis_AbsPos` clears its `doneLatch` on the Execute rising edge, and
+> the FB call sits *below* the state CASE — so the edge always lands in the same scan as the
+> transition, one scan before this state first evaluates `Done`.
 
 ---
 
@@ -621,11 +735,14 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 
 ## STATE 18 — STOPPING
 
-**Purpose:** Controlled stop on operator request. Starts axes returning to zero immediately while the spindle decelerates. MandrelLock is not released until both the spindle timer has elapsed AND axes are at zero — releasing while the sheet is still spinning could throw it at the operator.
+**Purpose:** Controlled stop on operator request. Starts axes parking at the **sheet-load position** immediately while the spindle decelerates. MandrelLock is not released until both the spindle timer has elapsed AND both axes have arrived — releasing while the sheet is still spinning could throw it at the operator.
+
+> **Changed 2026-08-03:** the park target was hardcoded `0.0` before the sheet-load park change; it is now `parkTargetX/Z` (= `SheetLoadPos_X/Z` clamped to the soft limits). An abort therefore leaves the machine exactly where a normal cycle end does, so the next Start can take the STARTING fast path instead of paying for a homing cycle. Safe by construction: `SheetLoadPos` is where an operator reaches in to load a sheet, so if it is not safe to park there it is not valid as `SheetLoadPos` at all.
 
 **Entry trigger:** `Cmd_Stop` received while `State >= 10 AND State < 999 AND State != 100` (or PAUSED).
 - `Cmd_Stop` is also passed directly to `fbRecipeHandler.Stop` → recipe handler halts axes internally
 - Spindle `RunCmd` drops immediately (Cmd_Stop is ANDed into the RunCmd veto)
+- The `Cmd_Stop` handler now also clears `bHomeClrX/Z`, `bHomeXExec/ZExec/ToolExec` and `homeSeqState` **before** handing the axes to the park move. Without this, a Stop pressed during states 13/15/16 left `fbMoveX/Z_HomeClr` or `fbHomeX/Z/Tool` executing while `fbMoveX/Z_Stop` was also commanded — two MC_ blocks fighting for one axis. Latent before 2026-08-03; state 16 is now on the normal cycle path, so it became reachable in routine operation.
 
 **Phase 1 — Wait for recipe executor to finish, then start parallel axis return:**
 - Condition: `NOT fbRecipeHandler.Busy AND NOT bWaitingSpindleStop`
@@ -634,16 +751,16 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
   - `bSheetHolderRetractPulse = TRUE` (one-shot: retracts SheetHolder if it was extended during SHEET_WAIT phases 1/2)
   - `bSheetWaitPhase2 = FALSE`, `bSheetWaitPhase3 = FALSE` (abort any pending sheet-wait phases)
   - `bWaitingSpindleStop = TRUE` (enables phase 2)
-  - `bStopMoveX = TRUE` — **starts X axis moving to position 0 immediately** (MC_MoveAbsolute at RapidVelocity)
-  - `bStopMoveZ = TRUE` — **starts Z axis moving to position 0 simultaneously with X**
+  - `bStopMoveX = TRUE` — **starts X axis moving to `parkTargetX` immediately** (MC_MoveAbsolute at RapidVelocity)
+  - `bStopMoveZ = TRUE` — **starts Z axis moving to `parkTargetZ` simultaneously with X**
 
-**Axis return — X and Z simultaneously (runs in parallel with spindle decel timer):**
+**Axis park move — X and Z simultaneously (runs in parallel with spindle decel timer):**
 - `bStopMoveX` and `bStopMoveZ` are set together in Phase 1 — both axes move at the same time
 - When `fbMoveX_Stop.Done OR .Error` → `bStopMoveX = FALSE` (independent of Z)
 - When `fbMoveZ_Stop.Done OR .Error` → `bStopMoveZ = FALSE` (independent of X)
 - Phase 2 release condition waits for BOTH flags to be FALSE (`NOT bStopMoveX AND NOT bStopMoveZ`)
 
-**Phase 2 — Release MandrelLock once spindle timer elapsed AND axes at zero:**
+**Phase 2 — Release MandrelLock once spindle timer elapsed AND axes parked:**
 - Condition: `bWaitingSpindleStop AND NOT bStopMoveX AND NOT bStopMoveZ AND (Bypass_MandrelLock OR tonSpindleStopWait.Q)`
 - `tonSpindleStopWait` (proportional to captured RPM, max = `SpindleStopSafeTime`) is the **sole spindle release condition** — no speed check
   - No physical encoder on spindle. `ActualSpeed` is an unreliable TO estimate and is not used.
@@ -658,7 +775,7 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 
 | Condition | Next State |
 |-----------|-----------|
-| Spindle timer elapsed AND axes at zero | **29** LOCK_RETRACT_WAIT |
+| Spindle timer elapsed AND axes parked at `parkTarget` | **29** LOCK_RETRACT_WAIT |
 
 ---
 
