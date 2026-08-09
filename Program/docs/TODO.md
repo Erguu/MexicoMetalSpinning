@@ -1203,7 +1203,9 @@ Cost: two new FB instances (watch the S7-1214C work-memory budget — see
 
 ## ITEM-46 — SheetHolder retract coil stays energised forever at idle
 
-**Found:** 2026-08-07 (operator observation) | **Status: OPEN — deferred by the operator, do not fix yet**
+**Found:** 2026-08-07 (operator observation) | **Status: RESOLVED 2026-08-09** — branch
+`fix/cylinder-idle-and-drive-power`. **Not compiled, not commissioned.** Resolution at the end of
+this item; the analysis below is the original write-up and is still accurate.
 
 ### What happens
 
@@ -1258,3 +1260,183 @@ ends the hold, not a state test, or a stop during retract will abandon the pisto
 The SheetHolder 5/2 → 5/3 conversion itself is **not yet separately commissioned** (merged 2026-08-07
 in `6da3708`). Commission that first — this item is a refinement on top of it, and tuning the 1 s hold
 needs the real stroke time anyway.
+
+### Resolution — 2026-08-09, branch `fix/cylinder-idle-and-drive-power`
+
+Implemented as recommended above, with one deviation: the operator chose to **reuse
+`DB_MachineConfig.CylSheetHolder_RetractTime`** (T#0.5S) rather than add a new
+`CylSheetHolder_RetractHoldTime`. That value now does two jobs — it advances STATE_SHEET_WAIT Ph3
+**and** bounds the coil — so it must be ≥ the real retract stroke time. **Tune it on the machine**
+(`00_Configuration.scl` §10); if the holder is not fully clear when the tool head engages, raise it.
+
+| Change | Where |
+|--------|-------|
+| `Timeout_Retract` T#1S → **T#24H** (FB stays in State 2, never reaches the State-4 `Sol_B` dead end) | `02_DataBlocks.scl` `DB_Cylinder_SheetHolder` |
+| New `tonSheetHolderHold : TON` releases `bSheetHolderRetractHold`; replaces the `IF State = 4` release | `06_MainProcess.scl` bottom block |
+| Timer gated on E-Stop OK — the coils are dead in FB State -1, so an E-Stop must pause the window, not burn it | same |
+| `Cmd_Extend` given a single writer: `(State = STATE_SHEET_WAIT) AND NOT bSheetWaitPhase3` | same block; removed from SHEET_WAIT Ph1/Ph2/bypass, STOPPED, ERROR |
+
+The `Cmd_Extend` single writer was not part of the original ITEM-46 plan — it fixes a **separate
+operator-reported bug found in the same session** (see ITEM-47 below), but it belongs in the same
+block because the two commands must be reasoned about together on a valve with no spring.
+
+**Careful, still true:** the release is time-based *on purpose*. STOPPED and ERROR are reached
+mid-retract and the latch drives the safe direction, so it must never become a state test again.
+
+---
+
+## ITEM-47 — SheetHolder re-extends ~1 s after Stop during sheet loading
+
+**Found:** 2026-08-09 (operator observation) | **Status: RESOLVED 2026-08-09**, same branch. Not
+compiled, not commissioned.
+
+### What happened
+
+Press Stop while the machine is in STATE_SHEET_WAIT Ph1/Ph2: the holder retracts as expected and
+then **extends again about a second later**.
+
+`STATE_SHEET_WAIT` Ph1 latched `SheetHolder.Cmd_Extend := TRUE`, and the only places that cleared it
+were the STOPPED (0) and ERROR (999) CASE blocks. The stop path is
+STOPPING(18) → LOCK_RETRACT_WAIT(29, T#3S) → STOPPED(0), so `Cmd_Extend` stayed TRUE for several
+seconds while STOPPING also set `bSheetHolderRetractHold`. In `FB_CylinderControl` that is:
+
+1. State 3/1 → **State 2** (retracting, `Sol_B` on) — the retract the operator sees.
+2. `Timeout_Retract` (**T#1S** at the time) expires → Mode 0 → **State 4**.
+3. State 4 sees `Cmd_Extend` still TRUE → `extendFull := TRUE`, **State 1** — extends back out.
+
+The 1 s delay in the report is exactly `Timeout_Retract`. Left alone it oscillates: 5 s extend
+(`Timeout_Extend`) → State 3 → retract → State 4 → extend …
+
+### Fix
+
+`Cmd_Extend` now has one writer at the bottom of FB_Process,
+`(State = STATE_SHEET_WAIT) AND NOT bSheetWaitPhase3`, so leaving state 14 by *any* path — Stop,
+error, reset, normal Ph3 advance — drops it in the same scan. No state latches it any more. The
+ITEM-46 change (`Timeout_Retract := T#24H`) independently removes step 2, so State 4 is unreachable
+for this cylinder; either fix alone would have stopped the re-extend, and both are wanted.
+
+**Do not** re-introduce a `Cmd_Extend` write inside a state block for this cylinder.
+
+---
+
+## ITEM-48 — BackSupport end-of-recipe retract never fired on the stop path
+
+**Found:** 2026-08-09 (operator observation: "in some states like stop, back support can stay in a
+wrong position") | **Status: RESOLVED 2026-08-09**, same branch. Not compiled, not commissioned.
+
+### What happened
+
+The ITEM-41 end-of-recipe retract is edge-triggered on entry to a terminal state
+(`bBSTerminalNow := State = STOPPED OR ERROR OR COMPLETE`, block at the bottom of FB_Process). It
+worked for ERROR and COMPLETE and was **dead for STOPPED** — the normal stop path.
+
+The STATE_STOPPED CASE block ran, every scan while idle:
+
+```
+"DB_Cylinder_BackSupport".Cmd_Retract := FALSE;
+#bBSEndRetract := FALSE;
+#tonBSEndRetract(IN := FALSE, ...);
+#bBSTerminalPrev := TRUE;      // <-- kills the rising edge
+```
+
+The CASE runs before the end-retract block in the same scan, so on the first scan in STOPPED the
+edge memory was already forced TRUE and `bBSEndRetract` was never set. On a 5/3 blocked centre that
+means the cylinder simply stayed frozen wherever the recipe left it, which is what the operator saw.
+
+The comment in the end-retract block always claimed the seeding lived in the hard-reset block. It
+did not — it had been written into the STOPPED CASE instead, where it also ran on every idle scan.
+
+### Fix
+
+- Moved `Cmd_Retract := FALSE` + `bBSEndRetract := FALSE` + `tonBSEndRetract(IN := FALSE)` +
+  `bBSTerminalPrev := TRUE` into the **`bDoHardReset`** block. Power-up still cannot fire an
+  unwanted retract (the hard reset runs with State already STOPPED, so no edge).
+- STATE_STOPPED now clears `Cmd_Retract` **only while `bBSEndRetract = FALSE`** — Reset-Path Rule
+  checkpoint 3 is still satisfied, without cancelling the window on the scan it opens.
+- `tonBSEndRetract` gated on E-Stop OK, same reasoning as `tonSheetHolderHold`: `FB_CylinderControl`
+  forces State -1 and drops every coil while `SafetyOK` is FALSE, so an E-Stop during the window
+  would run the timer out with the piston never moving.
+
+**Watch on commissioning:** the BackSupport now performs a 2 s retract every time the machine
+reaches STOPPED — including MANUAL → STOPPED, which was explicitly confirmed as wanted on
+2026-08-07. This is motion that did not previously happen on the stop path.
+
+**Deliberately unchanged:** there is still **no** BackSupport retract at power-up (the hard reset
+seeds the edge memory TRUE). After a mid-cycle power loss the cylinder stays frozen where it was
+until the first recipe termination. Changing that means moving a cylinder before the operator has
+asked for anything — raise it as a separate decision if the frozen position is a problem in practice.
+
+---
+
+## ITEM-49 — Drive contactors cut on every visit to STOPPED (root cause of "sometimes it homes")
+
+**Found:** 2026-08-09 (operator: "when AlwaysHomeOnAutoStart is FALSE it should only home at power
+up, but sometimes it homes anyway") | **Status: RESOLVED 2026-08-09**, same branch. Not compiled,
+not commissioned.
+
+### What happened
+
+`FC_ContactorControl` (`08_Main_OB1.scl`) gated every contactor and enable output on
+
+```
+modePermit := "DB_HMI".MachineState > 0;
+```
+
+STATE_STOPPED is 0, so **physical drive power was cut every time the machine went idle** — after
+every Stop, every Reset, and at power-up. Meanwhile `MC_Power.Enable` stays TRUE in STOPPED
+(`bDrivesEnable := (EStop_OK OR Bypass_EStop) AND State <> STATE_ERROR`). Two consequences, both
+of which invalidate the axis reference that fast cycle mode depends on:
+
+- an axis commanded enabled against a dead drive can fault the TO, and the TO clears
+  `StatusBits.HomingDone` — `bRefTrusted` then fails at the next Start and STATE_STARTING homes;
+- a de-energised stepper has no holding torque and can be back-driven, so even when `HomingDone`
+  survives the position may not — the silent-drift case, which is worse than an extra homing cycle.
+
+"Sometimes" is exactly what a TO fault that depends on timing and drive model looks like.
+
+### Fix
+
+`modePermit := TRUE` — the mode interlock is retired. E-Stop (`drivePermit`) still drops every
+contactor and enable, and STATE_ERROR was already allowed so the operator can jog off a limit.
+
+**Consequences to check on commissioning:**
+
+- The drives are energised whenever the machine is idle after the first auto start. Motor and drive
+  heat at idle goes up; holding torque is now present at the sheet-load position.
+- The **spindle** contactor is on the same permit, so the VFD also stays powered while idle. That
+  matches the 2026-05-07 decision to keep the spindle drive powered between runs.
+- Nothing is energised before the first auto start: `DB_HMI.Btn_Contactor_*` / `Btn_Enable_*` are
+  FALSE from power-up until STATE_STARTING sets them, and MANUAL keeps them under HMI control.
+
+### Not fixed, by design
+
+Pressing **Reset** sets `bRequireHoming := TRUE` in the hard-reset block, so the next auto start
+always homes regardless of `AlwaysHomeOnAutoStart`. If the operator habitually presses Reset before
+Start, they will still see a homing cycle. That latch is the safety backstop for "a reset can be
+pressed from any state, including mid-motion" — leave it alone unless the operator asks, and then
+change it deliberately, not as a side effect.
+
+---
+
+## ITEM-50 — HMI-set sheet-load park position lost on every power cycle
+
+**Found:** 2026-08-09 (operator) | **Status: RESOLVED IN SOURCE 2026-08-09**, same branch —
+**but it is not complete until the Retain boxes are ticked in TIA Portal.**
+
+`DB_MachineConfig` was declared `NON_RETAIN`, so a restart re-initialised it from the start values in
+load memory. `SheetLoadPos_X/_Z` and `SheetLoadTol` are deliberately **not** written by
+`FC_LoadConfig` (so OB100 does not fight the HMI), which meant the operator's park position silently
+reverted to the DB start values (200.0 / 170.0) on every power cycle.
+
+`NON_RETAIN` is removed from the block. Source import **cannot** set per-tag retentivity — it only
+makes the checkbox available.
+
+**Manual TIA step, must be redone and verified after every re-import of `02_DataBlocks.scl`:**
+tick **Retain** on `SheetLoadPos_X`, `SheetLoadPos_Z`, `SheetLoadTol`. Worth ticking at the same
+time, same problem: `SoftLimit_MinX/MaxX/MinZ/MaxZ`, `SafePos_X/Z`, `PauseRetract_X/Z/Vel`,
+`HomeOffset_X/Z`. Do **not** tick anything `FC_LoadConfig` writes — the whole FIXED section, plus
+`HomeVelocity`, `PostHome_Clearance` and `AlwaysHomeOnAutoStart` — OB100 overwrites those on every
+restart, so Retain there only consumes retentive memory.
+
+Changing retentivity forces a full re-initialisation of the DB on the next download: **the park
+position must be re-entered on the HMI once after that download.**

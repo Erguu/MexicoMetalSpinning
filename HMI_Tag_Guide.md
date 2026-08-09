@@ -420,6 +420,18 @@ With fast cycle mode ON (`AlwaysHomeOnAutoStart = FALSE`), the homing seek runs 
 cycle after power-up and after any fault — every later cycle goes straight to the sheet prompt.
 CAM post-processors can drop the trailing `G0 X0 Z0`; the PLC parks the axes itself.
 
+> **If the machine homes when you did not expect it to,** check these three in order:
+> 1. **Did the operator press Reset?** A hard reset always sets `bRequireHoming` — by design, a
+>    reset can be pressed mid-motion so the reference is treated as suspect. `DB_Diagnostic.Require_Homing`
+>    shows the latch.
+> 2. **Was there an E-Stop or a fault since the last cycle?** Same latch, same reason.
+> 3. **Are the axes actually at `SheetLoadPos` ± `SheetLoadTol`?** Outside the window the PLC does a
+>    park move (state 16), not a homing cycle — that is normal and much faster.
+>
+> Until 2026-08-09 there was a fourth cause with no operator-visible trigger: `FC_ContactorControl`
+> cut drive power on every visit to STOPPED, which could clear the axis `HomingDone` status. Fixed —
+> the drives now stay powered while the machine is idle.
+
 > ⚠️ **`SheetLoadPos` is safety-relevant.** This is where an operator reaches in to insert a sheet
 > and where the MandrelLock clamps. Set it only to a position where the tool head does not
 > obstruct loading. Commission conservatively (near 0,0) and walk it in while watching cycles.
@@ -427,8 +439,8 @@ CAM post-processors can drop the trailing `G0 X0 Z0`; the PLC parks the axes its
 
 | HMI Object | PLC Address | Type | Factory Default | Description |
 |------------|-------------|------|-----------------|-------------|
-| **Sheet Load X** | `DB_MachineConfig.SheetLoadPos_X` | Real | 0.0 | Park X target for sheet loading (mm) |
-| **Sheet Load Z** | `DB_MachineConfig.SheetLoadPos_Z` | Real | 0.0 | Park Z target for sheet loading (mm) |
+| **Sheet Load X** | `DB_MachineConfig.SheetLoadPos_X` | Real | 200.0 | Park X target for sheet loading (mm) |
+| **Sheet Load Z** | `DB_MachineConfig.SheetLoadPos_Z` | Real | 170.0 | Park Z target for sheet loading (mm) |
 | **Sheet Load Tol** | `DB_MachineConfig.SheetLoadTol` | Real | 2.0 | ± window counted as "already parked" (mm). Outside it, the PLC issues a park move — it never silently skips |
 | **Fast Cycle Mode** | `DB_MachineConfig.AlwaysHomeOnAutoStart` | Bool | FALSE | **Inverted meaning:** TRUE = home every cycle (legacy). FALSE = skip homing when safe. Show as a "Home every cycle" checkbox, or invert it in the HMI |
 
@@ -437,10 +449,19 @@ CAM post-processors can drop the trailing `G0 X0 Z0`; the PLC parks the axes its
 > The read-only lamp for that condition is `DB_Diagnostic.Require_Homing`, listed under
 > **AXIS STATUS** with the other `DB_Diagnostic` tags.
 
-> **Persistence:** `DB_MachineConfig` is not retentive, so values typed on the HMI revert to their
-> start values on a power cycle (true of every HMI-editable field in this DB). Mark the DB as
-> Retain in TIA if these must survive a restart. Benign in practice for the mode switch: after a
-> power cycle the axes are un-homed anyway, so the first run always homes.
+> **Persistence (changed 2026-08-09):** `DB_MachineConfig` used to carry `NON_RETAIN`, so every
+> HMI-editable field in it reverted to its start value on a power cycle — the sheet-load park
+> position typed by the operator was silently lost and the machine came back parking at 200.0 /
+> 170.0. The keyword is now removed, **but the DB is not automatically retentive**: tick **Retain**
+> on `SheetLoadPos_X`, `SheetLoadPos_Z` and `SheetLoadTol` in the TIA DB editor. An SCL source
+> import cannot set per-tag retentivity, so **re-check those boxes after every import of
+> `02_DataBlocks.scl`**. Changing retentivity re-initialises the DB on the next download — re-enter
+> the park position on the HMI once afterwards.
+>
+> Do **not** tick Retain on `AlwaysHomeOnAutoStart` (or `HomeVelocity` / `PostHome_Clearance`):
+> `FC_LoadConfig` rewrites those on every OB100, so Retain there has no effect. The mode switch
+> therefore still returns to FALSE (fast cycle mode on) after a power cycle, which is the intended
+> default.
 
 ### Pause Retract (mm / mm/s)
 

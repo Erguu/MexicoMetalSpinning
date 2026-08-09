@@ -171,16 +171,42 @@ END_DATA_BLOCK
 
 // -----------------------------------------------------------------------------
 // DB_MachineConfig - Machine configuration parameters
+//
+// RETENTIVITY (changed 2026-08-09) -- NON_RETAIN was REMOVED from this block.
+//
+// Why: the commissioning values the operator types on the HMI and that FC_LoadConfig
+// deliberately does NOT rewrite -- SheetLoadPos_X, SheetLoadPos_Z, SheetLoadTol -- were
+// lost on every power cycle. A non-retentive DB is re-initialised from its start values
+// in load memory on restart, so the machine came back parking at 200.0 / 170.0 no matter
+// what was set on the HMI.
+//
+// MANUAL STEP REQUIRED IN TIA PORTAL AFTER IMPORTING THIS SOURCE:
+//   Open DB_MachineConfig and tick "Retain" on -- at minimum --
+//       SheetLoadPos_X, SheetLoadPos_Z, SheetLoadTol
+//   The other operator-owned values have the same problem and are worth ticking too:
+//       SoftLimit_MinX/MaxX/MinZ/MaxZ, SafePos_X/Z, PauseRetract_X/Z/Vel,
+//       HomeOffset_X/Z
+//   Source import cannot set per-tag retentivity; removing NON_RETAIN only makes the
+//   checkbox available. VERIFY the checkboxes after every re-import of this file.
+//
+//   Do NOT tick Retain on anything FC_LoadConfig writes -- OB100 overwrites it on every
+//   restart, so Retain has no effect there and only consumes retentive memory. That is
+//   the whole "FIXED" section below, plus these four from the HMI-editable group:
+//       HomeVelocity, PostHome_Clearance, AlwaysHomeOnAutoStart, and DB_Manual.HomingMode
+//
+// NOTE: changing retentivity forces a full re-initialisation of this DB on the next
+// download (values return to the start values below). Re-enter the park position on the
+// HMI once after that download.
 // -----------------------------------------------------------------------------
 DATA_BLOCK "DB_MachineConfig"
 { S7_Optimized_Access := 'TRUE' }
-VERSION : 0.2
-NON_RETAIN
+VERSION : 0.3
     VAR
         // =====================================================================
         // HMI-EDITABLE: Machine Physical Limits (mm)
         // These values are NOT overwritten by FC_LoadConfig.
-        // Can be changed from HMI Setup screen; preserved on PLC restart.
+        // Can be changed from HMI Setup screen. They survive a PLC restart ONLY if the
+        // tag is marked Retain in the TIA DB editor -- see the block header.
         // =====================================================================
         SoftLimit_MinX : Real := -30.0;     // X minimum (home=0)
         SoftLimit_MaxX : Real := 500.0;   // X maximum travel (mm)
@@ -204,6 +230,8 @@ NON_RETAIN
         // Targets are clamped to SoftLimit_Min/Max before any move is issued.
         //
         // Deliberately NOT written by FC_LoadConfig, so OB100 does not fight the HMI.
+        // MUST be marked Retain in the TIA DB editor -- see the block header. Without the
+        // Retain tick these three revert to the start values below on every power cycle.
         SheetLoadPos_X : Real := 200.0;    // Sheet-load park X target (mm)
         SheetLoadPos_Z : Real := 170.0;    // Sheet-load park Z target (mm)
         SheetLoadTol   : Real := 2.0;    // +/- window counted as "at the park position" (mm)
@@ -913,23 +941,29 @@ END_DATA_BLOCK
 // With the old 5/2 the spring did the work, so a one-scan Cmd_Retract pulse was
 // enough to kick the FB out of State 3. A one-scan pulse on a blocked centre
 // energises Sol_B for a single scan and leaves the piston locked mid-stroke.
-// FB_Process therefore holds Cmd_Retract via #bSheetHolderRetractHold until the
-// FB reports State 4 (AT RETRACT). See 06_MainProcess.scl "SheetHolder retract hold".
+// FB_Process therefore holds Cmd_Retract via #bSheetHolderRetractHold for exactly
+// DB_MachineConfig.CylSheetHolder_RetractTime, then drops it so BOTH coils
+// de-energise and the blocked centre holds the piston at the retract end.
+// See 06_MainProcess.scl "SHEETHOLDER COMMANDS -- single writer for BOTH directions".
 // -----------------------------------------------------------------------------
 DATA_BLOCK "DB_Cylinder_SheetHolder"
 { S7_Optimized_Access := 'TRUE' }
-VERSION : 0.2
+VERSION : 0.3
 NON_RETAIN
 "FB_CylinderControl"
 BEGIN
     ValveType       := 2;       // 5/3 blocked centre -- twin solenoid, active retract on Sol_B
     PositioningMode := 0;       // No sensor -- full stroke, timeout = done, no error
     Timeout_Extend  := T#5S;
-    // State 2 (RETRACTING, Sol_B=TRUE) → State 4 (AT RETRACT, Sol_B still TRUE) handoff.
-    // Mode 0 + 5/3 keeps Sol_B energised in BOTH states, so this value does not change
-    // what the coil does -- it only decides when FB_Process may drop the retract hold.
-    // Set to a comfortable margin over the real stroke time; not safety-critical.
-    Timeout_Retract := T#1S;
+    // T#24H is DELIBERATE (ITEM-46) -- do NOT set this to a real stroke time.
+    // State 4 (AT RETRACT) is a dead end for Mode 0 + ValveType<>1: it holds Sol_B
+    // energised for ever and is left only on a new extend command, so the retract coil
+    // stayed powered the whole time the machine sat idle. With this timeout the FB
+    // simply stays in State 2 (RETRACTING, Sol_B=TRUE) for as long as Cmd_Retract is
+    // held, and FB_Process's own timer ends the stroke: dropping Cmd_Retract takes the
+    // FB to State 0 and both coils go off. The retract duration is therefore owned by
+    // DB_MachineConfig.CylSheetHolder_RetractTime, not by this value.
+    Timeout_Retract := T#24H;
 END_DATA_BLOCK
 
 // =============================================================================

@@ -239,8 +239,10 @@ BEGIN
     // Fast cycle mode. FALSE = skip the reference seek when the axis reference is
     // trusted AND the axes are parked at SheetLoadPos (FB_Process STATE_STARTING).
     // Written FALSE here so OB100 does not fight an operator toggling it on the HMI --
-    // the value the operator sets survives until the next power cycle. (DB_MachineConfig
-    // is not retentive: mark it Retain in TIA if the setting must survive a restart.)
+    // the value the operator sets survives until the next power cycle. NOTE: NON_RETAIN was
+    // removed from DB_MachineConfig on 2026-08-09; tick Retain on this tag in the TIA DB
+    // editor if the operator's choice must also survive a power cycle. This OB100 write
+    // would still overwrite it at every startup -- delete the line below as well if so.
     // NEVER overrides FB_Process bRequireHoming: E-Stop / fault / power-up always re-home.
     "DB_MachineConfig".AlwaysHomeOnAutoStart := FALSE;
 
@@ -419,6 +421,11 @@ BEGIN
     // =========================================================================
     // Cylinder stroke waits
     "DB_MachineConfig".CylMandrelLock_ClampTime    := T#0.5S;
+    // SheetHolder retract: since ITEM-46 this value does two jobs at once -- it advances
+    // STATE_SHEET_WAIT Ph3 AND it is how long Sol_B is energised before both coils drop
+    // and the 5/3 blocked centre holds the piston. It must therefore be >= the real
+    // retract stroke time, or the cylinder will be left parked mid-stroke. Raise it here
+    // if the holder is not fully clear when the tool head engages.
     "DB_MachineConfig".CylSheetHolder_RetractTime  := T#0.5S;
     "DB_MachineConfig".CylToolHeadLock_PreDelay    := T#0.5S;
     "DB_MachineConfig".CylToolHeadLock_RetractTime := T#2S;

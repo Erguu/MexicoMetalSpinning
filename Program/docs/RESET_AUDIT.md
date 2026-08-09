@@ -535,3 +535,94 @@ Additional:
 - **Physical outputs:** `%Q12.0` and `%Q12.1` are now assigned straight from the FB, which is internally
   mutually exclusive. The `OR SolB_Cmd41` override on `%Q12.1` is gone, so both-coils-energised is no
   longer reachable by any input combination.
+
+---
+
+## Findings — 2026-08-09 (idle-state cylinder + drive-power fixes)
+
+Branch `fix/cylinder-idle-and-drive-power`. Covers ITEM-46 through ITEM-50 in `TODO.md`.
+**Not compiled, not commissioned.**
+
+### `tonSheetHolderHold` — new TON in FB_Process (SheetHolder retract window)
+
+- [x] **Checkpoint 1 — hard reset.** No explicit reset needed and none added, by construction:
+      `IN := bSheetHolderRetractHold AND (EStop_OK OR Bypass_EStop)`. The hard reset sets that latch
+      TRUE, which re-arms the window from ET=0; every path that clears the latch drops `IN` and
+      resets ET on the same scan. There is no way for the timer to hold stale ET while the latch is
+      FALSE. (The Reset-Path Rule asks for `IN := FALSE` on reset; a timer whose `IN` *is* the
+      controlled latch satisfies the intent — do not add a second, contradictory driver.)
+- [x] **Checkpoint 2 — recipe reset.** `FB_RecipeHandler` writes no SheetHolder field. Unchanged.
+- [x] **Checkpoints 3 & 4 — STATE_STOPPED / STATE_ERROR.** The latch is still deliberately **not**
+      cleared in either state (both are reached mid-retract and the latch drives the safe
+      direction). What changed is that the release no longer depends on the cylinder FB reaching
+      State 4 — the timer ends the window in **every** state, so the clear path is now
+      state-independent rather than state-dependent. Strictly stronger than before.
+- [x] **The latch can no longer hang.** Previously the release depended on FB State 4, which is
+      reachable only while `SafetyOK` is TRUE; now it is a timer the FB cannot influence.
+- [x] **E-Stop gating is not a hang risk.** With `SafetyOK = FALSE` the cylinder FB is in State -1
+      with both coils off, so the window is paused with the output already in the de-energised
+      state. It resumes when E-Stop is released. Worst case the latch outlives the E-Stop by
+      `CylSheetHolder_RetractTime` — driving the safe direction.
+
+### `SheetHolder.Cmd_Extend` — single writer
+
+- [x] Written unconditionally every scan, outside the CASE:
+      `(State = STATE_SHEET_WAIT) AND NOT bSheetWaitPhase3`. Removed from STATE_SHEET_WAIT Ph1 /
+      Ph2 / bypass branch, STATE_STOPPED and STATE_ERROR.
+- [x] **Checkpoints 1–4 all satisfied by construction.** Every reset path leaves `State` at
+      STOPPED (0) or drives it out of 14, so the command is FALSE on the next scan without any
+      state block having to remember to clear it. This replaces four scattered clears — and one
+      *missing* clear (the STOPPING path) that was the ITEM-47 bug.
+- [x] No conflict with manual mode: `FC_CylinderDispatch` drives `Cmd_ExtendFull` /
+      `Cmd_RetractFull` / `Cmd_GotoPos` for the selected cylinder, never `Cmd_Extend`.
+      `FB_RecipeHandler` writes no SheetHolder field.
+
+### BackSupport end-retract reset relocated
+
+- [x] **Checkpoint 1 — hard reset.** `Cmd_Retract := FALSE`, `bBSEndRetract := FALSE`,
+      `tonBSEndRetract(IN := FALSE)` and the `bBSTerminalPrev := TRUE` seeding now live in the
+      `bDoHardReset` block. This is where the end-retract block's own comments always said they
+      were; they had in fact been written into the STATE_STOPPED CASE, where they ran every idle
+      scan and destroyed the STOPPED rising edge (ITEM-48).
+- [x] **Checkpoint 3 — STATE_STOPPED** still clears `Cmd_Retract`, now gated on
+      `NOT bBSEndRetract`. The actuator command is therefore still driven FALSE every scan while
+      idle *except* during the 2 s window that STOPPED itself opens.
+- [x] **Checkpoint 4 — STATE_ERROR** unchanged: it never touched `Cmd_Retract` (the end-retract
+      block owns it) and still does not.
+- [x] `tonBSEndRetract` gated on E-Stop OK for the same reason as `tonSheetHolderHold`.
+- [ ] **OPEN — commissioning.** The BackSupport now performs a 2 s retract every time the machine
+      reaches STOPPED. On the stop path this is **new motion that did not previously happen**.
+      Confirm it is safe from every state a Stop can be pressed in.
+- [ ] **Known gap, deliberate:** no BackSupport retract at power-up (edge memory seeded TRUE), so
+      after a mid-cycle power loss the cylinder stays frozen until the first recipe termination.
+      Unchanged from 2026-08-07; flagged, not fixed.
+
+### `FC_ContactorControl` mode interlock retired
+
+- [x] Supersedes the stale checklist line above ("FC_ContactorControl blocks them when
+      MachineState=0"). Contactors and enables are now gated on E-Stop only. STATE_ERROR was
+      already permitted; STATE_STOPPED now is too.
+- [x] **No latched-output risk.** The outputs are still assigned every scan from
+      `DB_HMI.Btn_Contactor_*` / `Btn_Enable_*` AND `drivePermit`. E-Stop drops all of them in the
+      same scan, which is the only safety-relevant clear path this FC ever had.
+- [x] **Nothing is energised before the operator asks.** `Btn_Contactor_*` / `Btn_Enable_*` are
+      FALSE from power-up (DB_HMI is NON_RETAIN) until STATE_STARTING sets them; MANUAL keeps them
+      under HMI control.
+- [ ] **OPEN — commissioning.** Drives (and the spindle VFD) are now energised while the machine
+      sits idle. Check motor/drive temperature over a shift and confirm the operator is content
+      with holding torque present at the sheet-load position.
+
+### `DB_MachineConfig` retentivity
+
+- [ ] **OPEN — manual TIA step, not verifiable from source.** `NON_RETAIN` removed so
+      `SheetLoadPos_X/_Z/SheetLoadTol` can be marked Retain in the DB editor. Source import cannot
+      set per-tag retentivity. **Re-verify the checkboxes after every re-import of
+      `02_DataBlocks.scl`** — a silent revert to non-retentive reintroduces ITEM-50 with no
+      code change to notice.
+- [x] No reset-path impact: nothing in the reset paths writes these tags, and `FC_LoadConfig`
+      deliberately does not either.
+- [ ] **OPEN — first download.** Changing retentivity re-initialises the whole DB. The park
+      position must be re-entered on the HMI once after that download.
+
+**Result: PASS on all four checkpoints** (open items are commissioning checks and one manual TIA
+step, not reset-path defects)

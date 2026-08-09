@@ -318,8 +318,11 @@ STATE 12   PRE_SCAN             → Applies the active recipe's CAM-authored Hea
                                    (ToolCode_List/ToolCount/angles) into DB_ToolConfig+DB_MachineConfig,
                                    rejects with 0x0311 if Header.ProvidesToolConfig=FALSE, then FB_RecipePreScan runs
 STATE 13   PRE_HOME_CLR         → Clearance move out of PNP zone before homing
-STATE 14   SHEET_WAIT           → Sheet insertion: Phase 1 shows HMI warning, waits Cmd_Start (both buttons);
-                                   Phase 2 extends MandrelLock T#5S open-loop, then → LOCK_EXTEND_WAIT
+STATE 14   SHEET_WAIT           → Sheet insertion: Phase 1 SheetHolder extends + HMI warning, waits Cmd_Start
+                                   (both buttons); Phase 2 extends MandrelLock T#5S open-loop; Phase 3
+                                   SheetHolder retracts (timed hold, both coils then off) → LOCK_EXTEND_WAIT.
+                                   SheetHolder Cmd_Extend is TRUE only in Ph1/Ph2 -- single writer at the
+                                   bottom of FB_Process, so leaving this state always releases it
 STATE 15   HOMING               → Reference seek (X → Z → Tool)
 STATE 16   POST_HOME_CLR        → Park move to SheetLoadPos_X/Z at RapidVelocity → exits to SHEET_WAIT.
                                      Entered from HOMING (after reference seek) and from STARTING
@@ -340,6 +343,14 @@ STATE 999  ERROR                → Error, wait for AckError or Reset; clears CM
 ```
 
 **Fast cycle mode (2026-08-03):** `AlwaysHomeOnAutoStart` (DB_MachineConfig, default FALSE, HMI-editable) lets STATE_STARTING skip the homing seek when the reference is trusted. `SheetLoadPos_X/Z` is the single sheet-load park position — target of states 16 and 18, and the reference for the skip check (`SheetLoadTol`, ±2 mm). The `bRequireHoming` latch (set by E-Stop, STATE_ERROR, hard reset, power-up; cleared only where homing completes; mirrored to `DB_Diagnostic.Require_Homing`) always wins over the switch, so an E-Stop is always followed by a re-home even if the TO leaves `StatusBits.HomingDone` TRUE. Targets are clamped to the soft limits before reaching MC_MoveAbsolute.
+
+**2026-08-09:** two things that used to defeat the skip in normal operation are fixed. (1) The
+`FC_ContactorControl` mode interlock cut drive power in STOPPED and could clear `HomingDone` —
+retired, see that section. (2) `SheetLoadPos_X/Z` were lost on every power cycle (`DB_MachineConfig`
+was `NON_RETAIN`), so the machine came back parking at the DB start values; the keyword is removed
+so the tags can be marked **Retain** in the TIA DB editor — **a manual tick, required after every
+source re-import**. Note the remaining by-design cost: pressing **Reset** sets `bRequireHoming`, so
+the next auto start always homes.
 
 **Tool change skip:** In STATE_RUNNING, if `ToolReqNumber = CurrentTool`, the request is cleared immediately — no lock retract, no turret rotation, no lock re-extend. `CurrentTool` is set to 1 when homing completes (tool axis homes to slot 1), so a recipe starting with `CMD=10 Tool=1` is always a no-op after homing.
 
@@ -455,8 +466,18 @@ When `DB_ToolConfig.AutoCalcAngles = TRUE`, calculates equally spaced tool angle
 ```
 
 #### `FC_ContactorControl`
-No contactor/enable output is active without E-Stop OK + no error condition.
-Drive power sequence: Contactor ON → Enable ON → MC_Power.Enable = TRUE.
+No contactor/enable output is active without E-Stop OK. **E-Stop is the only thing that drops
+them** — machine state does not. Drive power sequence: Contactor ON → Enable ON → MC_Power.Enable
+= TRUE.
+
+**Mode interlock retired 2026-08-09.** It was `modePermit := DB_HMI.MachineState > 0`, which cut
+contactor and enable power on every visit to STATE_STOPPED(0) — after every Stop, every Reset and
+at power-up — while `MC_Power.Enable` stayed TRUE (`bDrivesEnable` only drops on E-Stop or
+STATE_ERROR). Commanding an axis enabled with its drive physically dead can fault the TO and clear
+`StatusBits.HomingDone`, and a de-energised stepper can be back-driven; either makes the reference
+worthless. That is why the machine "sometimes" re-homed on auto start with
+`AlwaysHomeOnAutoStart = FALSE`. Contactors now stay closed while idle (spindle contactor
+included). STATE_ERROR was already allowed, so the operator could jog off a limit switch.
 
 #### `DB_fbEStop` and `fbProcess`
 Instance DBs for the two large FBs called inside OB1.
@@ -526,14 +547,26 @@ Mode=0 FB stays in State 3 (Sol_A=TRUE) even after Cmd_Extend=FALSE. FB_Process 
 `Cmd_Retract=TRUE` for exactly one scan (`bMandrelRetractPulse` flag) when STOPPING or COMPLETE,
 forcing the FB into State 2 (Sol_A=FALSE → spring retracts). The pulse self-clears on the next scan.
 
-**SheetHolder held retract (PositioningMode=0, ValveType=2) — changed 2026-08-07:**
+**SheetHolder timed retract + single-writer extend (PositioningMode=0, ValveType=2) — 2026-08-09:**
 This cylinder was a 5/2 spring return and used the same one-scan pulse. It is now a **5/3 blocked
 centre** with `Sol_B` wired to `%Q12.3`, so there is no spring to finish the stroke — the pulse
 pattern would energise `Sol_B` for one scan and the blocked centre would lock the piston mid-stroke.
-FB_Process therefore **holds** `Cmd_Retract` via `bSheetHolderRetractHold` until the FB reports
-State 4 (AT RETRACT), reached after `Timeout_Retract` (T#1S). Mode 0 + `ValveType<>1` keeps `Sol_B`
-energised in both State 2 and State 4, so the retract coil stays powered while the machine is idle —
-same as BackSupport. **Do not** copy the MandrelLock pulse pattern onto any 5/3 cylinder.
+**Do not** copy the MandrelLock pulse pattern onto any 5/3 cylinder.
+
+Both commands are owned by one block at the bottom of FB_Process,
+`SHEETHOLDER COMMANDS -- single writer for BOTH directions`:
+
+- `Cmd_Extend := (State = STATE_SHEET_WAIT) AND NOT bSheetWaitPhase3` — no state latches it. Before
+  this, Ph1 latched it and only STOPPED/ERROR cleared it, so a Stop during sheet loading left it
+  TRUE through STOPPING(18)/LOCK_RETRACT_WAIT(29) and the holder extended again ~1 s into the stop.
+- `Cmd_Retract := bSheetHolderRetractHold`, released by `tonSheetHolderHold`
+  (PT = `DB_MachineConfig.CylSheetHolder_RetractTime`), gated on E-Stop OK. `Timeout_Retract` is
+  **T#24H** so the FB stays in State 2 for the whole hold; dropping the latch takes it to State 0
+  and **both coils go off** (blocked centre holds the piston). State 4 — which latches `Sol_B` on
+  for ever in Mode 0 + `ValveType<>1`, and used to keep `%Q12.3` powered through the entire idle
+  period — is unreachable for this cylinder now. That closes ITEM-46.
+- **`CylSheetHolder_RetractTime` now bounds the physical stroke**, not just the Ph3 state advance.
+  It must be ≥ the real retract time or the piston is left parked mid-stroke.
 
 ---
 
