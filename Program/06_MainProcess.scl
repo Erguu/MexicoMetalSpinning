@@ -1308,6 +1308,11 @@ BEGIN
     IF NOT #bInitDone THEN
         #bDoHardReset := TRUE;
         #bHaltAllAxes := TRUE;   // ITEM-31: abort any MC_Home the TO may auto-resume on power-up
+        // Power-up ALWAYS requires homing. Set explicitly here rather than relying on the
+        // hard-reset block: that block now decides from the pre-reset #State, which is 0
+        // (STOPPED) on the first scan and would therefore skip the latch. The VAR default is
+        // also TRUE, but only because the instance DB is NON_RETAIN -- do not depend on that.
+        #bRequireHoming := TRUE;
         #bInitDone    := TRUE;
     END_IF;
 
@@ -1789,6 +1794,29 @@ BEGIN
     // Motion-FB execute flags (bHomeXExec, bStopMoveX, etc.) are cleared by the
     // STATE_STOPPED CASE block which runs on this same scan right after this block.
     IF #bDoHardReset THEN
+        // Reference validity -- evaluated FIRST, while #State still holds the state the
+        // operator pressed Reset in (the assignment below overwrites it).
+        //
+        // This used to be an unconditional #bRequireHoming := TRUE at the bottom of the block,
+        // which made every Reset cost a full homing cycle on the next auto start. Operators
+        // press Reset out of habit, often several times, from an idle machine — where nothing
+        // has happened that could invalidate the reference. Now only a reset pressed from a
+        // state where an axis could have been moving arms the latch, because #bHaltAllAxes
+        // above aborts whatever was in progress.
+        //
+        // WHITELIST, not blacklist: anything not listed counts as "could have been moving", so
+        // a state added later fails safe. The three listed states are motionless by definition:
+        //   STOPPED (0)  — idle
+        //   MANUAL  (5)  — jogging is tracked by the TO, and STATE_STARTING already handles
+        //                  "trusted but parked elsewhere" with a park move. An MC_Home aborted
+        //                  mid-seek in manual clears StatusBits.HomingDone by itself, and
+        //                  bRefTrusted checks that separately
+        //   COMPLETE(100)— program finished, axes parked
+        // This NEVER clears the latch — only ever sets it — so a homing requirement raised
+        // earlier by an E-Stop, a fault or loss of drive power survives any number of resets.
+        IF NOT (#State = STATE_STOPPED OR #State = STATE_MANUAL OR #State = 100) THEN
+            #bRequireHoming := TRUE;
+        END_IF;
         #bHaltAllAxes    := TRUE;   // ITEM-31: abort any in-progress MC_Home before clearing state
         #State           := STATE_STOPPED;
         #Error           := FALSE;
@@ -1837,10 +1865,8 @@ BEGIN
         #prevBtnCmd41Release         := "DB_Manual".Btn_Cmd41_Release;
         #prevBtnCmd41AtmoOff         := "DB_Manual".Btn_Cmd41_AtmoOff;
         #prevBtnCmd41AtmoOn          := "DB_Manual".Btn_Cmd41_AtmoOn;
-        // Reference validity: a hard reset can be pressed from any state, including one
-        // where an axis was mid-motion and got halted (bHaltAllAxes above). Treat the
-        // reference as suspect -- the next auto start homes, whatever fast cycle mode says.
-        #bRequireHoming              := TRUE;
+        // Reference validity is decided at the TOP of this block (it needs the pre-reset
+        // #State). Do not re-add an unconditional #bRequireHoming := TRUE here.
         #bDoHardReset                := FALSE;
     END_IF;
 
@@ -2096,14 +2122,25 @@ BEGIN
             #prevBtnCmd41AtmoOn  := "DB_Manual".Btn_Cmd41_AtmoOn;
 
             IF NOT "DB_Manual".ManualModeActive THEN
-                // Clear manual contactor flags before returning to STOPPED
-                // so stale HMI button states cannot activate outputs in STATE_STOPPED.
-                "DB_HMI".Btn_Contactor_X       := FALSE;
-                "DB_HMI".Btn_Contactor_Z       := FALSE;
-                "DB_HMI".Btn_Contactor_Tool    := FALSE;
-                "DB_HMI".Btn_Contactor_Spindle := FALSE;
-                "DB_HMI".Btn_Enable_X          := FALSE;
-                "DB_HMI".Btn_Enable_Z          := FALSE;
+                // Contactor / enable flags are NOT cleared here any more (2026-08-09).
+                //
+                // They used to be, "so stale HMI button states cannot activate outputs in
+                // STATE_STOPPED" — which only made sense while FC_ContactorControl blocked every
+                // output in STOPPED anyway (modePermit, retired with ITEM-49). With that gone,
+                // clearing them here physically de-energised the drives on every exit from manual
+                // mode, so the axes lost holding torque and their reference every time the
+                // operator looked at the manual page. That is one of the "sometimes it homes"
+                // paths, and it defeats fast cycle mode after any manual visit.
+                //
+                // Leaving them as the operator set them is the point: the drives stay powered if
+                // they were powered, and if the operator deliberately switched drive power OFF to
+                // move an axis by hand, the flags stay FALSE and the reference-validity latch at
+                // the bottom of this FB sees it and demands a homing cycle. Either way the
+                // behaviour is deterministic. STATE_STARTING forces all of them TRUE on the next
+                // auto start regardless.
+                //
+                // Safety is unchanged: E-Stop (drivePermit in FC_ContactorControl) still drops
+                // every contactor and enable output, and nothing here can command motion.
                 // Clear MDI result so a stale message does not greet the operator
                 // the next time the manual page is opened.
                 "DB_Manual".MDI_Status         := 0;
@@ -3128,10 +3165,33 @@ BEGIN
     // Placed AFTER the state machine so a STATE_ERROR transition made earlier in this
     // same scan is caught immediately rather than one scan late.
     // Cleared ONLY where a homing sequence actually completes (STATE_HOMING, both the
-    // tool-axis and Bypass_ToolAxis exits). Hard reset sets it TRUE.
+    // tool-axis and Bypass_ToolAxis exits). Power-up sets it TRUE (bInitDone block); a reset
+    // sets it only when pressed from a state where an axis could have been moving.
     IF NOT (#EStop_OK OR "DB_HMI".Bypass_EStop) OR #State = STATE_ERROR THEN
         #bRequireHoming := TRUE;
     END_IF;
+
+    // Drive power removed = reference lost. Level-triggered, so the latch stays TRUE for as
+    // long as the drives are down and is only released by a completed homing cycle afterwards.
+    //
+    // This is the honest detector for the case StatusBits.HomingDone cannot see: these motors
+    // are open-loop, so with the contactor open the axis can be pushed by hand or back-driven
+    // by gravity while the TO happily keeps reporting the last commanded position. It is also
+    // what makes it safe for a Reset pressed in MANUAL to skip homing -- if the operator turned
+    // drive power off to move something by hand, this catches it regardless of the state.
+    //
+    // Covers X and Z only: there is no Btn_Enable_Tool, and Btn_Contactor_Tool is deliberately
+    // FALSE whenever Bypass_ToolAxis is set, which would latch this permanently. The tool axis
+    // is covered by its own StatusBits.HomingDone term in bRefTrusted.
+    //
+    // Power-up consequence (intended): DB_HMI is NON_RETAIN, so these are FALSE until the first
+    // STATE_STARTING asserts them -- the latch is held TRUE until the machine has been started
+    // once and homed, which is exactly the required power-up behaviour.
+    IF NOT ("DB_HMI".Btn_Contactor_X AND "DB_HMI".Btn_Enable_X)
+       OR NOT ("DB_HMI".Btn_Contactor_Z AND "DB_HMI".Btn_Enable_Z) THEN
+        #bRequireHoming := TRUE;
+    END_IF;
+
     "DB_Diagnostic".Require_Homing := #bRequireHoming;  // HMI/diagnostic visibility
 
     // =========================================================================

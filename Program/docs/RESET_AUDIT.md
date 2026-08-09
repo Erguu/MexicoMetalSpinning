@@ -626,3 +626,38 @@ Branch `fix/cylinder-idle-and-drive-power`. Covers ITEM-46 through ITEM-50 in `T
 
 **Result: PASS on all four checkpoints** (open items are commissioning checks and one manual TIA
 step, not reset-path defects)
+
+### `bRequireHoming` — reset path narrowed (ITEM-51, 2026-08-09)
+
+The Reset button no longer arms the homing requirement unconditionally. This is a **relaxation of a
+reset-path behaviour**, so it gets its own checkpoint pass.
+
+- [x] **Checkpoint 1 — hard reset.** `bDoHardReset` now sets `bRequireHoming` only when the
+      pre-reset `#State` is not STOPPED(0) / MANUAL(5) / COMPLETE(100). The test is evaluated at
+      the **top** of the block because `#State := STATE_STOPPED` three lines later would otherwise
+      make every reset look idle. **The block only ever sets the latch — it contains no path that
+      clears it** — so a requirement raised earlier by E-Stop, fault or drive-power loss survives
+      any number of resets. That is the property to preserve if this block is ever edited again.
+- [x] **Whitelist, not blacklist.** A state added later is not in the list and therefore demands
+      homing. Fails safe by construction.
+- [x] **Power-up still requires homing.** Now set explicitly in the `bInitDone` first-scan block
+      (previously it arrived via the unconditional hard-reset assignment, which the state test
+      would now skip — State is 0 on the first scan). Belt and braces: the VAR start value is
+      `TRUE` and the instance DB is NON_RETAIN.
+- [x] **Compensating trigger added.** The latch now also arms on
+      `NOT (Btn_Contactor_X AND Btn_Enable_X)` or the Z pair — loss of drive power, level
+      triggered. This covers the one thing `StatusBits.HomingDone` cannot: an open-loop axis moved
+      by hand while its contactor is open. X/Z only (no `Btn_Enable_Tool`; `Btn_Contactor_Tool` is
+      FALSE under `Bypass_ToolAxis` and would latch permanently).
+- [x] **STATE_MANUAL exit no longer clears `Btn_Contactor_*` / `Btn_Enable_*`.** With ITEM-49's
+      `modePermit` retired, that clear had lost its justification and was de-energising the drives
+      on every manual visit. Removing it is what makes whitelisting MANUAL meaningful. Checkpoint 3
+      is unaffected: these are not actuator commands and cannot produce motion; E-Stop still drops
+      the outputs through `drivePermit`, and STATE_STARTING forces them TRUE on the next auto start.
+- [x] **No new TON, no new latch, no new DB field, no new HMI tag.** `DB_Diagnostic.Require_Homing`
+      already mirrors the latch for the operator.
+- [ ] **OPEN — commissioning.** Confirm on the machine that a Reset from idle followed by Start
+      takes the fast path (no homing seek), and that each of E-Stop / fault / drive-power-off /
+      power-up still forces one. `DB_Diagnostic.Require_Homing` is the tag to watch.
+
+**Result: PASS on all four checkpoints** (1 open commissioning check)

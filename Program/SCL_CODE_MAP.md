@@ -342,15 +342,19 @@ STATE 100  COMPLETE             → Program completed; triggers MandrelLock retr
 STATE 999  ERROR                → Error, wait for AckError or Reset; clears CMD=41 flags
 ```
 
-**Fast cycle mode (2026-08-03):** `AlwaysHomeOnAutoStart` (DB_MachineConfig, default FALSE, HMI-editable) lets STATE_STARTING skip the homing seek when the reference is trusted. `SheetLoadPos_X/Z` is the single sheet-load park position — target of states 16 and 18, and the reference for the skip check (`SheetLoadTol`, ±2 mm). The `bRequireHoming` latch (set by E-Stop, STATE_ERROR, hard reset, power-up; cleared only where homing completes; mirrored to `DB_Diagnostic.Require_Homing`) always wins over the switch, so an E-Stop is always followed by a re-home even if the TO leaves `StatusBits.HomingDone` TRUE. Targets are clamped to the soft limits before reaching MC_MoveAbsolute.
+**Fast cycle mode (2026-08-03):** `AlwaysHomeOnAutoStart` (DB_MachineConfig, default FALSE, HMI-editable) lets STATE_STARTING skip the homing seek when the reference is trusted. `SheetLoadPos_X/Z` is the single sheet-load park position — target of states 16 and 18, and the reference for the skip check (`SheetLoadTol`, ±2 mm). The `bRequireHoming` latch (set by E-Stop, STATE_ERROR, **loss of drive power**, power-up, and a hard reset from a state other than STOPPED/MANUAL/COMPLETE; cleared only where homing completes; mirrored to `DB_Diagnostic.Require_Homing`) always wins over the switch, so an E-Stop is always followed by a re-home even if the TO leaves `StatusBits.HomingDone` TRUE. Targets are clamped to the soft limits before reaching MC_MoveAbsolute.
 
 **2026-08-09:** two things that used to defeat the skip in normal operation are fixed. (1) The
 `FC_ContactorControl` mode interlock cut drive power in STOPPED and could clear `HomingDone` —
 retired, see that section. (2) `SheetLoadPos_X/Z` were lost on every power cycle (`DB_MachineConfig`
 was `NON_RETAIN`), so the machine came back parking at the DB start values; the keyword is removed
 so the tags can be marked **Retain** in the TIA DB editor — **a manual tick, required after every
-source re-import**. Note the remaining by-design cost: pressing **Reset** sets `bRequireHoming`, so
-the next auto start always homes.
+source re-import**. (3) Two more paths that de-energised the drives while idle are gone: the
+contactor/enable clear on **exit from MANUAL**, and the unconditional `bRequireHoming := TRUE` on
+**Reset** — that latch is now set only when the reset came from a state other than STOPPED(0) /
+MANUAL(5) / COMPLETE(100), and it gained a direct **drive-power** trigger
+(`NOT (Btn_Contactor_X AND Btn_Enable_X)`, same for Z) so cutting drive power still forces a
+re-home. Spamming Reset on an idle machine no longer costs a homing cycle.
 
 **Tool change skip:** In STATE_RUNNING, if `ToolReqNumber = CurrentTool`, the request is cleared immediately — no lock retract, no turret rotation, no lock re-extend. `CurrentTool` is set to 1 when homing completes (tool axis homes to slot 1), so a recipe starting with `CMD=10 Tool=1` is always a no-op after homing.
 

@@ -33,6 +33,16 @@
    "sometimes" re-homed on auto start with `AlwaysHomeOnAutoStart = FALSE`. E-Stop still drops
    every contactor and enable. Note this also keeps the **spindle** contactor closed while idle.
 
+5. **Reset no longer always demands a homing cycle (ITEM-51).** `bDoHardReset` set `bRequireHoming`
+   unconditionally, so an operator pressing Reset out of habit on an idle machine paid for a full
+   homing seek on the next start. It is now set only when the reset was pressed from a state other
+   than STOPPED(0) / MANUAL(5) / COMPLETE(100) — a whitelist, so any state added later fails safe —
+   and it is still only ever *set* there, never cleared. In exchange the latch gained a **direct
+   drive-power trigger** (`NOT (Btn_Contactor_X AND Btn_Enable_X)`, same for Z), which catches the
+   real failure mode `HomingDone` cannot see. The contactor/enable clear on **exit from MANUAL** was
+   also removed — with ITEM-49's interlock gone it was de-energising the drives on every manual
+   visit. See the reference-validity latch section and STATE 5.
+
 Also: `DB_MachineConfig` lost its `NON_RETAIN` keyword so `SheetLoadPos_X/_Z/SheetLoadTol` can be
 marked **Retain** in the TIA DB editor — **that tick is a manual step, do it after every import** or
 the park position keeps reverting to the start values on power cycle.
@@ -205,8 +215,9 @@ Triggered by Cmd_Reset (operator) or first PLC scan after power-up:
   `bBSTerminalPrev` → **TRUE** (seeded, so power-up in STOPPED does not fire a retract nobody asked
   for). Doing this every scan in STOPPED instead was what stopped the retract ever firing on a stop
 - bWaitingSpindleStop → FALSE (cancels any pending spindle-stop wait)
-- bRequireHoming → TRUE (a reset from any state makes the axis reference suspect — note this means
-  **pressing Reset always costs a homing cycle on the next auto start**, by design)
+- bRequireHoming → TRUE **only if the reset was pressed from a state other than STOPPED(0) /
+  MANUAL(5) / COMPLETE(100)** (2026-08-09, ITEM-51). Evaluated at the **top** of the block, before
+  `State` is overwritten. Never cleared here — see the reference-validity latch section
 
 ### Cmd_Pause
 - Accepted only when `Running = TRUE` AND NOT `bPauseActive`
@@ -304,11 +315,40 @@ transition is caught immediately):
 |---------|-------|
 | E-Stop active (`NOT EStop_OK AND NOT Bypass_EStop`) | latch block after the CASE |
 | `State = STATE_ERROR` | latch block after the CASE |
-| Hard reset (`bDoHardReset`) | hard-reset block |
-| Power-up / download | VAR start value is `TRUE` |
+| **Drive power down** — `NOT (Btn_Contactor_X AND Btn_Enable_X)` or the Z pair (2026-08-09) | latch block after the CASE |
+| Hard reset (`bDoHardReset`) — **only when pressed from a state other than STOPPED(0) / MANUAL(5) / COMPLETE(100)** (2026-08-09) | hard-reset block, evaluated *before* `State` is overwritten |
+| Power-up / download | `bInitDone` first-scan block sets it explicitly (VAR start value is also `TRUE`) |
 
 **Cleared ONLY** where a homing sequence actually completes — the two STATE_HOMING exits that also
 set `CurrentTool := 1` (tool-axis done, and the `Bypass_ToolAxis` path). Nothing else may clear it.
+
+### Two triggers changed 2026-08-09 (ITEM-51)
+
+**Reset no longer always demands homing.** It used to be unconditional, so an operator pressing
+Reset out of habit on an idle machine — a very common habit — paid for a full homing cycle on the
+next start. It is now conditional on the state the reset was pressed *in*, evaluated at the top of
+the hard-reset block because the block overwrites `State` immediately afterwards. The list is a
+**whitelist of motionless states**, so any state added later fails safe and demands homing. MANUAL
+is on the whitelist because jogging is tracked by the TO (STATE_STARTING already handles "trusted
+but parked elsewhere" with a park move) and because an `MC_Home` aborted mid-seek clears
+`StatusBits.HomingDone` on its own, which `bRefTrusted` checks separately. **The reset path only
+ever sets the latch, never clears it** — a requirement raised earlier by an E-Stop, a fault or loss
+of drive power survives any number of resets.
+
+**Drive power is now watched directly.** This is the honest detector for exactly the failure mode
+this latch was invented for and that `HomingDone` cannot see: with the contactor open, an open-loop
+axis can be pushed by hand or back-driven while the TO keeps reporting the last commanded position.
+Level-triggered, so it holds the latch for as long as the drives are down. It also covers what makes
+whitelisting MANUAL safe — if the operator switched drive power off to move something by hand, this
+catches it regardless of which state the Reset was pressed in. X and Z only: there is no
+`Btn_Enable_Tool`, and `Btn_Contactor_Tool` is deliberately FALSE whenever `Bypass_ToolAxis` is set,
+which would latch it permanently; the tool axis is covered by its own `HomingDone` term in
+`bRefTrusted`.
+
+Two supporting changes in the same session removed the reasons the drives kept dropping out
+underneath this latch: the `FC_ContactorControl` mode interlock (ITEM-49) and the contactor/enable
+clear on **exit from MANUAL** (see STATE 5), both of which cut drive power while the machine was
+idle.
 
 **Exposed as** `DB_Diagnostic.Require_Homing` so the HMI can explain to the operator why a cycle
 homed while fast cycle mode was enabled.
@@ -363,6 +403,19 @@ homed while fast cycle mode was enabled.
 - `FB_ManualMode` handles all jog/home/step/spindle actions from `DB_Manual`
 - FB_Process monitors exit conditions
 - **Manual CMD=40 / CMD=41 (2026-07-30)** — see below
+
+**On exit (`ManualModeActive = FALSE`) — changed 2026-08-09 (ITEM-51):**
+`Btn_Contactor_X/Z/Tool/Spindle` and `Btn_Enable_X/Z` are **no longer cleared** here. They were,
+"so stale HMI button states cannot activate outputs in STATE_STOPPED" — which only held while
+`FC_ContactorControl` blocked every output in STOPPED anyway (`modePermit`, retired with ITEM-49).
+With that gone, this clear physically de-energised the drives on **every exit from manual mode**,
+so the axes lost holding torque and their reference every time the operator opened the manual page
+— one of the "sometimes it homes" paths, and it defeated fast cycle mode after any manual visit.
+The flags now stay as the operator left them: drives stay powered if they were powered, and if the
+operator switched drive power OFF to move an axis by hand the flags stay FALSE and the
+reference-validity latch demands a homing cycle. STATE_STARTING forces them all TRUE on the next
+auto start regardless, and E-Stop still drops every output. The MDI status/latch clears in the same
+branch are unchanged.
 
 **Manual CMD=40 / CMD=41 (BackSupport) — 2026-07-30:**
 

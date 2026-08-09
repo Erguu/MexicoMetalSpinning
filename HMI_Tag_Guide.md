@@ -420,17 +420,24 @@ With fast cycle mode ON (`AlwaysHomeOnAutoStart = FALSE`), the homing seek runs 
 cycle after power-up and after any fault — every later cycle goes straight to the sheet prompt.
 CAM post-processors can drop the trailing `G0 X0 Z0`; the PLC parks the axes itself.
 
-> **If the machine homes when you did not expect it to,** check these three in order:
-> 1. **Did the operator press Reset?** A hard reset always sets `bRequireHoming` — by design, a
->    reset can be pressed mid-motion so the reference is treated as suspect. `DB_Diagnostic.Require_Homing`
->    shows the latch.
-> 2. **Was there an E-Stop or a fault since the last cycle?** Same latch, same reason.
+> **If the machine homes when you did not expect it to,** check these in order. The latch that
+> forces it is visible as `DB_Diagnostic.Require_Homing`.
+> 1. **Was there an E-Stop or a fault since the last cycle?** Both always force a re-home.
+> 2. **Is drive power off?** Since 2026-08-09 the latch watches the drives directly: if
+>    `Btn_Contactor_X`+`Btn_Enable_X` (or the Z pair) are off, the reference is treated as lost —
+>    an unpowered stepper can be moved by hand and the PLC would never know. Switching drive power
+>    off on the manual page therefore costs a homing cycle, deliberately.
 > 3. **Are the axes actually at `SheetLoadPos` ± `SheetLoadTol`?** Outside the window the PLC does a
 >    park move (state 16), not a homing cycle — that is normal and much faster.
+> 4. **Was Reset pressed while the machine was moving?** A reset from a moving state still forces a
+>    re-home (it aborts whatever motion was running). A reset from idle — STOPPED, MANUAL or
+>    COMPLETE — does **not**.
 >
-> Until 2026-08-09 there was a fourth cause with no operator-visible trigger: `FC_ContactorControl`
-> cut drive power on every visit to STOPPED, which could clear the axis `HomingDone` status. Fixed —
-> the drives now stay powered while the machine is idle.
+> Three causes with no operator-visible trigger were removed on 2026-08-09: `FC_ContactorControl`
+> cut drive power on every visit to STOPPED; leaving manual mode cleared the contactor/enable flags
+> and did the same; and **Reset** forced a re-home unconditionally, so the common habit of pressing
+> Reset before Start cost a homing cycle every time. All three are fixed — the drives now stay
+> powered while the machine is idle.
 
 > ⚠️ **`SheetLoadPos` is safety-relevant.** This is where an operator reaches in to insert a sheet
 > and where the MandrelLock clamps. Set it only to a position where the tool head does not

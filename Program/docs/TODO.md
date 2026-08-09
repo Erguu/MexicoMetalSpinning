@@ -1408,13 +1408,95 @@ contactor and enable, and STATE_ERROR was already allowed so the operator can jo
 - Nothing is energised before the first auto start: `DB_HMI.Btn_Contactor_*` / `Btn_Enable_*` are
   FALSE from power-up until STATE_STARTING sets them, and MANUAL keeps them under HMI control.
 
-### Not fixed, by design
+### Follow-up
 
-Pressing **Reset** sets `bRequireHoming := TRUE` in the hard-reset block, so the next auto start
-always homes regardless of `AlwaysHomeOnAutoStart`. If the operator habitually presses Reset before
-Start, they will still see a homing cycle. That latch is the safety backstop for "a reset can be
-pressed from any state, including mid-motion" — leave it alone unless the operator asks, and then
-change it deliberately, not as a side effect.
+Two sibling paths were still de-energising the drives or forcing a re-home after this fix — the
+operator confirmed the Reset habit in the same session, so both were closed under **ITEM-51** below.
+
+---
+
+## ITEM-51 — Reset always forced a homing cycle; manual exit killed drive power
+
+**Found:** 2026-08-09 (operator: "I have that habit too, spamming reset before start") |
+**Status: RESOLVED 2026-08-09**, same branch. Not compiled, not commissioned.
+
+Follow-up to ITEM-49. Once drive power stopped dropping in STOPPED, two paths were left that still
+made the machine home when nothing had actually invalidated the reference.
+
+### (a) `bDoHardReset` armed `bRequireHoming` unconditionally
+
+The comment justified it as *"a hard reset can be pressed from any state, including one where an
+axis was mid-motion and got halted"* — true, but it charged every reset for the worst case. Reset
+from an idle machine invalidates nothing, and pressing Reset before Start is a near-universal
+operator habit.
+
+**Fix.** The latch is now armed only when the reset was pressed from a state other than
+**STOPPED(0) / MANUAL(5) / COMPLETE(100)**, evaluated at the **top** of the hard-reset block —
+the block overwrites `#State` three lines later, so order matters here.
+
+- It is a **whitelist of motionless states**, not a blacklist of moving ones, so a state added
+  later fails safe and demands homing.
+- MANUAL is on the whitelist: jogging is tracked by the TO, STATE_STARTING already handles
+  "trusted but parked elsewhere" with a park move, and an `MC_Home` aborted mid-seek clears
+  `StatusBits.HomingDone` by itself — which `bRefTrusted` checks separately.
+- **The reset path only ever sets the latch, never clears it.** A requirement raised earlier by an
+  E-Stop, a fault or loss of drive power survives any number of resets. Do not "simplify" this into
+  an assignment.
+- Power-up now sets `bRequireHoming := TRUE` explicitly in the `bInitDone` first-scan block. It
+  used to arrive via the unconditional hard-reset assignment; with the state test in place, the
+  first scan (State = 0) would otherwise skip it. The VAR start value is also TRUE, but only
+  because the instance DB is NON_RETAIN — do not rely on that alone.
+
+### (b) Leaving MANUAL cleared the contactor and enable flags
+
+`STATE_MANUAL`'s exit branch cleared `Btn_Contactor_X/Z/Tool/Spindle` and `Btn_Enable_X/Z`
+"so stale HMI button states cannot activate outputs in STATE_STOPPED". That reasoning depended
+entirely on `modePermit` blocking those outputs in STOPPED — retired in ITEM-49. What was left was
+a clear that **physically de-energised the drives every time the operator left the manual page**,
+losing holding torque and the reference, and defeating fast cycle mode after any manual visit.
+
+**Fix.** The flags are left as the operator set them. Drives stay powered if they were powered; if
+the operator switched drive power off to move an axis by hand, the flags stay FALSE and (c) below
+demands a homing cycle. STATE_STARTING forces them all TRUE on the next auto start regardless, and
+E-Stop still drops every output through `drivePermit`.
+
+### (c) New trigger: the latch now watches drive power directly
+
+Removing two triggers means the remaining ones have to be honest, so `bRequireHoming` gained:
+
+```
+IF NOT ("DB_HMI".Btn_Contactor_X AND "DB_HMI".Btn_Enable_X)
+   OR NOT ("DB_HMI".Btn_Contactor_Z AND "DB_HMI".Btn_Enable_Z) THEN
+    #bRequireHoming := TRUE;
+END_IF;
+```
+
+This is the exact failure mode the latch was invented for and the one `StatusBits.HomingDone`
+cannot see: with the contactor open, an open-loop axis can be pushed by hand or back-driven by
+gravity while the TO keeps reporting the last commanded position. Level-triggered, so it holds for
+as long as the drives are down and is released only by a completed homing cycle afterwards.
+
+- **X and Z only.** There is no `Btn_Enable_Tool`, and `Btn_Contactor_Tool` is deliberately FALSE
+  whenever `Bypass_ToolAxis` is set — including it would latch the flag permanently on that
+  machine variant. The tool axis is covered by its own `HomingDone` term in `bRefTrusted`.
+- **Power-up falls out of this for free:** `DB_HMI` is NON_RETAIN, so the flags are FALSE until the
+  first STATE_STARTING asserts them.
+
+### Net behaviour
+
+| Situation | Homes? |
+|-----------|--------|
+| Reset (any number of times) from STOPPED / MANUAL / COMPLETE, drives powered | **No** |
+| Reset pressed while the machine was moving | Yes |
+| E-Stop, or any fault | Yes |
+| Drive power switched off from the manual page | Yes |
+| Power-up | Yes |
+| Axes simply parked somewhere else | No — park move (state 16), not a homing seek |
+
+### Deliberately unchanged
+
+`AlwaysHomeOnAutoStart = TRUE` still homes on every auto start, and `bRequireHoming` still cannot
+be overridden by it. Precedence stays one-way: the switch can only ever cause *more* homing.
 
 ---
 
