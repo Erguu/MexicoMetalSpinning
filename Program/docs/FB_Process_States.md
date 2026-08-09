@@ -22,8 +22,10 @@
    block was clearing `bBSEndRetract`, `tonBSEndRetract` and `Cmd_Retract` and forcing
    `bBSTerminalPrev := TRUE` **every scan while idle**, which destroyed the STOPPED rising edge the
    ITEM-41 retract depends on — so on the Stop path the BackSupport was simply left frozen wherever
-   the recipe put it. That reset moved to the `bDoHardReset` block (where the code comments always
-   said it lived); STOPPED now clears `Cmd_Retract` only when the retract window is not running.
+   the recipe put it. That reset moved to the **`bInitDone` first-scan block** (power-up is the only
+   case that needs the seed — putting it in the general hard-reset block instead would suppress the
+   retract on a Reset pressed while RUNNING); STOPPED and the hard reset now clear `Cmd_Retract`
+   only when the retract window is not running, so neither can abandon a retract mid-stroke.
    Both retract timers (`tonSheetHolderHold`, `tonBSEndRetract`) are gated on E-Stop OK so an E-Stop
    mid-stroke pauses the window instead of burning it with the coils dead.
 4. **Drives stay powered in STOPPED** — `FC_ContactorControl`'s mode interlock
@@ -210,10 +212,14 @@ Triggered by Cmd_Reset (operator) or first PLC scan after power-up:
 - bMandrelRetractPulse → TRUE (one-shot: releases MandrelLock)
 - bSheetHolderRetractHold → TRUE (held: releases SheetHolder — 5/3 blocked centre, see State 14).
   `tonSheetHolderHold` needs no explicit reset: its `IN` is this latch, so re-arming restarts it
-- BackSupport end-retract reset (moved here from the STATE_STOPPED CASE block, 2026-08-09):
-  `Cmd_Retract` → FALSE, `bBSEndRetract` → FALSE, `tonBSEndRetract(IN := FALSE)`,
-  `bBSTerminalPrev` → **TRUE** (seeded, so power-up in STOPPED does not fire a retract nobody asked
-  for). Doing this every scan in STOPPED instead was what stopped the retract ever firing on a stop
+- BackSupport end-retract: **deliberately not reset here** (2026-08-09). `Cmd_Retract` → FALSE only
+  while `bBSEndRetract = FALSE`, so a reset cannot abandon a retract mid-stroke; `bBSEndRetract`,
+  `tonBSEndRetract` and `bBSTerminalPrev` are left alone. Same exception class as
+  `bMandrelRetractPending` — an in-flight safety motion outlives the reset. Seeding
+  `bBSTerminalPrev := TRUE` **here** would suppress the retract on a Reset pressed while RUNNING:
+  the block sets `State := STOPPED` a few lines above, so a pre-seeded edge memory sees
+  terminal→terminal and no retract fires. The seed lives in the `bInitDone` first-scan block, which
+  is the only case where `State` is already STOPPED before this block runs
 - bWaitingSpindleStop → FALSE (cancels any pending spindle-stop wait)
 - bRequireHoming → TRUE **only if the reset was pressed from a state other than STOPPED(0) /
   MANUAL(5) / COMPLETE(100)** (2026-08-09, ITEM-51). Evaluated at the **top** of the block, before

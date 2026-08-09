@@ -350,8 +350,9 @@ BEGIN
     // Contactor and enable outputs: FC_ContactorControl is called at the END of
     // FB_Process (in sync with the state machine) -- NOT here. ITEM-37: the
     // duplicate OB1 call was removed; nothing between fbProcess and this point
-    // writes any input the FC depends on (Btn_Contactor_*, Bypass_EStop,
-    // MachineState, Safety_Estop), so one call per scan is sufficient.
+    // writes any input the FC depends on (Btn_Contactor_*, Btn_Enable_*, Bypass_EStop,
+    // Safety_Estop), so one call per scan is sufficient. MachineState dropped off that
+    // list on 2026-08-09 when the mode interlock was retired (ITEM-49).
 
     // Automatically update tool slot angles based on slot count
     "FC_ToolAngleCalc"();

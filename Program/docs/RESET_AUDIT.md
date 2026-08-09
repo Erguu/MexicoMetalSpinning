@@ -523,7 +523,9 @@ Additional:
   route never raises `bResetRecipe`, so relying on checkpoint 2 alone would have left the cylinder held
   retracting for the whole manual session. This was found by tracing, not by test.
 - **New TON:** `tonBSEndRetract`, `IN := bBSEndRetract`. The latch is FALSE in every non-terminal
-  state, so `IN` drops and the timer resets on leaving. Also called with `IN := FALSE` in the hard reset.
+  state, so `IN` drops and the timer resets on leaving. Also called with `IN := FALSE` in the
+  `bInitDone` first-scan block. **Corrected 2026-08-09:** it is *not* called from `bDoHardReset` —
+  see the ITEM-51 section at the end of this file for why an in-flight retract must survive a Reset.
 - **Ordering is load-bearing.** The end-retract block sits **after** the `#fbRecipeHandler` call, making
   FB_Process the last writer of `Cmd_Retract` in the scan. The handler's `IF #Reset THEN` block is
   level-triggered and also writes BackSupport commands; if the order were reversed it would wipe the
@@ -579,14 +581,27 @@ Branch `fix/cylinder-idle-and-drive-power`. Covers ITEM-46 through ITEM-50 in `T
 
 ### BackSupport end-retract reset relocated
 
-- [x] **Checkpoint 1 — hard reset.** `Cmd_Retract := FALSE`, `bBSEndRetract := FALSE`,
-      `tonBSEndRetract(IN := FALSE)` and the `bBSTerminalPrev := TRUE` seeding now live in the
-      `bDoHardReset` block. This is where the end-retract block's own comments always said they
-      were; they had in fact been written into the STATE_STOPPED CASE, where they ran every idle
-      scan and destroyed the STOPPED rising edge (ITEM-48).
+- [x] **Checkpoint 1 — hard reset. Deliberate exception, documented in place.** `bBSEndRetract`,
+      `tonBSEndRetract` and `bBSTerminalPrev` are **not** reset by `bDoHardReset`; `Cmd_Retract` is
+      cleared there only while `bBSEndRetract = FALSE`. Same exception class as
+      `bMandrelRetractPending`, which is likewise excluded so an in-flight safety motion survives
+      the reset. Two concrete failures if this is ever "tidied" back into the reset block:
+      `bDoHardReset` sets `State := STOPPED` at its top, so seeding `bBSTerminalPrev := TRUE` there
+      makes a **Reset pressed while RUNNING** read as terminal→terminal — no rising edge, no
+      retract, cylinder left frozen mid-recipe; and clearing `bBSEndRetract` there abandons the
+      piston mid-stroke if the Reset lands inside the 2 s window. **Both were present in the first
+      version of this fix and were caught on review.**
+- [x] **Power-up seeding lives in the `bInitDone` first-scan block.** That is the only path where
+      `State` is already STOPPED before the reset block runs, so it is the only place a seed is
+      both necessary and harmless. `Cmd_Retract := FALSE`, `bBSEndRetract := FALSE` and
+      `tonBSEndRetract(IN := FALSE)` are done there too.
 - [x] **Checkpoint 3 — STATE_STOPPED** still clears `Cmd_Retract`, now gated on
       `NOT bBSEndRetract`. The actuator command is therefore still driven FALSE every scan while
       idle *except* during the 2 s window that STOPPED itself opens.
+- [x] **Reset from a moving state now retracts, which it never did before.** Reset from RUNNING /
+      PAUSED / STOPPING etc. lands in STOPPED with `bBSTerminalPrev = FALSE` (the previous scan was
+      not terminal), so the edge fires and the cylinder is retracted. Previously the STOPPED CASE
+      block suppressed it on the same scan.
 - [x] **Checkpoint 4 — STATE_ERROR** unchanged: it never touched `Cmd_Retract` (the end-retract
       block owns it) and still does not.
 - [x] `tonBSEndRetract` gated on E-Stop OK for the same reason as `tonSheetHolderHold`.

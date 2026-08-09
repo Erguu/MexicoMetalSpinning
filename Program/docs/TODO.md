@@ -1349,10 +1349,20 @@ did not — it had been written into the STOPPED CASE instead, where it also ran
 ### Fix
 
 - Moved `Cmd_Retract := FALSE` + `bBSEndRetract := FALSE` + `tonBSEndRetract(IN := FALSE)` +
-  `bBSTerminalPrev := TRUE` into the **`bDoHardReset`** block. Power-up still cannot fire an
-  unwanted retract (the hard reset runs with State already STOPPED, so no edge).
+  `bBSTerminalPrev := TRUE` into the **`bInitDone` first-scan block**. Power-up still cannot fire
+  an unwanted retract (that scan ends in STOPPED with the edge memory seeded).
 - STATE_STOPPED now clears `Cmd_Retract` **only while `bBSEndRetract = FALSE`** — Reset-Path Rule
-  checkpoint 3 is still satisfied, without cancelling the window on the scan it opens.
+  checkpoint 3 is still satisfied, without cancelling the window on the scan it opens. The
+  `bDoHardReset` block clears it under the same guard, for the same reason.
+
+> **Caught on review — do not repeat.** The first attempt put that reset in the general
+> `bDoHardReset` block, which reads naturally ("resets belong in the reset block") and is wrong.
+> `bDoHardReset` sets `State := STOPPED` at the top, so seeding `bBSTerminalPrev := TRUE` there
+> makes a Reset pressed **while RUNNING** look like terminal→terminal: no rising edge, no retract,
+> BackSupport left frozen mid-recipe — the exact bug this item exists to fix, just moved to a
+> different trigger. Clearing `bBSEndRetract` there was also wrong: a Reset inside the 2 s window
+> abandoned the piston mid-stroke. Power-up is the *only* case where `State` is already STOPPED
+> before the reset block runs, so power-up is the only place the seed belongs.
 - `tonBSEndRetract` gated on E-Stop OK, same reasoning as `tonSheetHolderHold`: `FB_CylinderControl`
   forces State -1 and drops every coil while `SafetyOK` is FALSE, so an E-Stop during the window
   would run the timer out with the piston never moving.
@@ -1522,3 +1532,36 @@ restart, so Retain there only consumes retentive memory.
 
 Changing retentivity forces a full re-initialisation of the DB on the next download: **the park
 position must be re-entered on the HMI once after that download.**
+
+---
+
+## ITEM-52 — FC_CylinderDispatch leaves manual commands latched on the previously selected cylinder
+
+**Found:** 2026-08-09 (spotted while reviewing ITEM-46/47, not reported from the machine) |
+**Status: OPEN (low) — not fixed, logged only**
+
+`FC_CylinderDispatch` writes `Cmd_ExtendFull` / `Cmd_RetractFull` / `Cmd_GotoPos` **only into the
+cylinder currently named by `DB_Manual.SelectedCylinder`** (`09_Sensors_Actuators.scl`, the big
+`CASE`). Nothing clears those fields on the cylinder that was selected a moment ago.
+
+So if the operator is holding (or has latched) `Btn_CylExtendFull` and switches `SelectedCylinder`,
+the old cylinder keeps `Cmd_ExtendFull = TRUE` **for ever** — no state, no reset path and no HMI
+action writes it again until that cylinder is selected once more.
+
+Consequences on a 5/3 blocked centre, worst case (SheetHolder):
+
+- `FB_CylinderControl` State 0/4 → `Cmd_ExtendFull` → State 1, and State 1 does not test
+  `Cmd_Retract`, so the automatic retract cannot get in until the extend times out to State 3.
+- From State 3 the FB_Process retract hold does win (`Cmd_Retract` is tested before the
+  `Cmd_ExtendFull` branch), so it retracts — then State 0 sees `Cmd_ExtendFull` still TRUE and
+  extends again. Slow ping-pong, `Sol_A` energised most of the time.
+
+**Pre-existing, not introduced by the 2026-08-09 work** — and note the ITEM-46/47 single-writer
+block does *not* protect against it, because `Cmd_ExtendFull` is a different field from
+`Cmd_Extend`. Requires an HMI button that latches (or a selection change mid-press) to reach, which
+is why it has never been seen.
+
+**Fix when someone touches this FC:** clear the three command fields on *all* cylinders before the
+`CASE` writes the selected one — four lines each, no behaviour change for the selected cylinder
+because it is rewritten in the same scan. An `ELSE` branch in the `CASE` is not enough; the stale
+cylinder is not the selected one by definition.
