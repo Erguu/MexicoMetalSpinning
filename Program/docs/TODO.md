@@ -1565,3 +1565,64 @@ is why it has never been seen.
 `CASE` writes the selected one — four lines each, no behaviour change for the selected cylinder
 because it is rewritten in the same scan. An `ELSE` branch in the `CASE` is not enough; the stale
 cylinder is not the selected one by definition.
+
+---
+
+## ITEM-53 — SheetHolder extend coil stays energised through a fault
+
+**Found:** 2026-08-09 (raised during the ITEM-46 review, then requested by the operator) |
+**Status: RESOLVED 2026-08-09**, branch `fix/cylinder-idle-and-drive-power`. Not compiled, not
+commissioned.
+
+### What happens
+
+The mirror image of ITEM-46, on the extend side.
+
+`PositioningMode = 0` latches `Sol_A := TRUE` in cylinder FB **State 3 (AT SETPOINT)**
+(`09_Sensors_Actuators.scl`, State-3 output branch — the `PositioningMode = 0` test comes *first*,
+before the valve-type branches, so a 5/3 cylinder gets the 5/2 pressure-hold behaviour). The only
+exits from State 3 are a new extend or a retract command.
+
+The SheetHolder reaches State 3 after `Timeout_Extend` (T#5S) during **SHEET_WAIT Ph1**, which is
+correct while it is holding the blank and the operator is loading. But if the machine faults there,
+FB_Process dropping `Cmd_Extend` does nothing — `%Q12.2` stays energised for as long as the machine
+sits in ERROR, which is until somebody presses Ack. Could be the rest of the shift.
+
+Note this is the *only* window where it matters: from Ph3 onward the holder is already in State 0
+with both coils off, so a fault anywhere else leaves nothing energised.
+
+### Why the obvious fix is wrong
+
+"Retract it on fault entry" releases the blank — and a fault in Ph1/Ph2 is exactly when
+**MandrelLock has not clamped yet**. That is also the only time the holder is extended at all, so
+"retract on error" is *only* ever exercised in the one situation where it is questionable.
+
+### Fix — release is not retract
+
+New `FB_CylinderControl` input **`Cmd_Release`**: drop both coils **without moving the piston**.
+On a 5/3 blocked centre that is a real, distinct operation — the valve holds the piston
+mechanically with no power at all. Same physical end state the machine already accepts on E-Stop,
+where the `SafetyOK` guard forces State -1 and de-energises everything.
+
+| Detail | Value |
+|--------|-------|
+| Guard | `ValveType <> 1` — on a spring return, cutting the coil *is* motion, so it is ignored |
+| Priority | Last in the State 3 / State 4 `ELSIF` chain, so any real `Cmd_Extend` / `Cmd_Retract` wins |
+| Target state | 0 (IDLE) — its output branch drives both coils FALSE |
+| Asserted by | FB_Process, SheetHolder only, in ERROR(999) and STOPPED(0) |
+| Default | FALSE, so every other cylinder is unaffected |
+
+**BackSupport deliberately does not get it.** `CMD=40` needs live extend pressure against the
+workpiece; its State 3 hold is documented as intentional in the `DB_Cylinder_BackSupport` header.
+If a future operator asks for the same treatment there, it is one line — but it is a force
+question, not a heat question, so ask first.
+
+The Ack path is unchanged: it arms `bSheetHolderRetractHold`, State 0 accepts `Cmd_Retract`
+normally, and the blank is released under operator control exactly as before.
+
+### Consequence to plan for
+
+Adding a `VAR_INPUT` changes the `FB_CylinderControl` interface, so **all four cylinder instance
+DBs re-initialise on the next download**. Anything tuned online rather than in source —
+`PositioningMode`, `Tolerance`, the Mode-2 zone limits and pulse times — reverts to the values in
+`02_DataBlocks.scl`. Write down the live values before downloading.

@@ -3291,6 +3291,31 @@ BEGIN
     "DB_Cylinder_SheetHolder".Cmd_Extend :=
         (#State = STATE_SHEET_WAIT) AND NOT #bSheetWaitPhase3;
 
+    // Cmd_Release: drop the coil hold WITHOUT moving the piston (5/3 blocked centre).
+    //
+    // The extend side has the same dead end ITEM-46 fixed on the retract side: with
+    // PositioningMode=0 the cylinder FB latches Sol_A ON in State 3 (AT SETPOINT) and the only
+    // exits are a new extend or a retract command. The holder reaches State 3 after
+    // Timeout_Extend during SHEET_WAIT Ph1 -- correct while the operator is loading, since the
+    // blank is being held -- but if the machine faults there, dropping Cmd_Extend is not enough:
+    // Sol_A stays energised for however long the machine sits in ERROR waiting for an Ack.
+    //
+    // Releasing is NOT the same as retracting, and that distinction is the whole point. A retract
+    // would let go of a blank that MandrelLock has not clamped yet (a fault in Ph1/Ph2 is exactly
+    // when that is true, and it is the only time the holder is extended at all). Cmd_Release takes
+    // the FB to State 0 instead: both coils off, and the blocked centre holds the piston exactly
+    // where it is. Same physical outcome the machine already accepts on E-Stop, where
+    // FB_CylinderControl forces State -1 and de-energises everything.
+    //
+    // Asserted in ERROR and STOPPED (Reset-Path Rule checkpoints 3 and 4: no actuator override may
+    // stay latched in either). In STOPPED it is a no-op on every traced path -- every route to
+    // STOPPED runs a retract first, which ends in State 0 anyway -- but it is the deterministic
+    // guard if a future path ever leaves the FB holding while the machine is idle.
+    // The operator's Ack still performs the actual release: it arms bSheetHolderRetractHold, and
+    // State 0 accepts Cmd_Retract normally.
+    "DB_Cylinder_SheetHolder".Cmd_Release :=
+        (#State = STATE_ERROR) OR (#State = STATE_STOPPED);
+
     #tonSheetHolderHold(IN := #bSheetHolderRetractHold AND (#EStop_OK OR "DB_HMI".Bypass_EStop),
                         PT := "DB_MachineConfig".CylSheetHolder_RetractTime);
     IF #tonSheetHolderHold.Q THEN

@@ -222,6 +222,9 @@ END_FUNCTION_BLOCK
 //    DB_Cylinder1.Cmd_ExtendFull  Bool   Full extend button -- bypass sensors/ruler; release = stop (pulse use)
 //    DB_Cylinder1.Cmd_Retract     Bool   Retract button
 //    DB_Cylinder1.Cmd_RetractFull Bool   Full retract button -- bypass sensors/ruler; release = stop (pulse use)
+//    DB_Cylinder1.Cmd_Release     Bool   5/3 ONLY: drop both coils, hold position (no motion).
+//                                        Escapes the State 3 / State 4 coil latch. NOT an HMI
+//                                        button today -- written by FB_Process for the SheetHolder.
 //    DB_Cylinder1.Timeout_Extend  Time   Extend timeout (Modes 0/1/3, default T#5S)
 //    DB_Cylinder1.Timeout_Retract Time   Retract timeout (Modes 0/1, default T#5S)
 //    DB_Cylinder1.TargetPos       Real   Mode 3: ruler stop position (mm) -- set from HMI or recipe
@@ -365,6 +368,15 @@ VERSION : 3.0
         Cmd_ExtendFull  : Bool := FALSE;    // Full extend: bypass sensors/ruler, timeout = done; release = stop (pulse use)
         Cmd_Retract     : Bool := FALSE;    // Retract
         Cmd_RetractFull : Bool := FALSE;    // Full retract: bypass sensors/ruler, timeout = done; release = stop (pulse use)
+        // Release the coil hold WITHOUT moving the piston -- 5/3 valves only (added 2026-08-09).
+        // States 3 (AT SETPOINT) and 4 (AT RETRACT) latch a solenoid ON for PositioningMode=0,
+        // with no exit except a new motion command. On a 5/3 blocked centre that hold buys
+        // nothing -- the valve holds the piston mechanically with both coils off -- so the coil
+        // just dissipates heat for as long as the machine sits in that state. Raising this input
+        // drops the FB to State 0 (IDLE, both coils off) and the piston stays exactly where it is.
+        // IGNORED when ValveType=1: on a spring return, cutting the coil retracts the cylinder,
+        // which is motion, not a release. Lowest priority -- any real motion command wins.
+        Cmd_Release     : Bool := FALSE;    // 5/3 only: drop both coils, hold position
 
         // Sensor inputs -- connected from FB_DigitalSensor.State in OB1 (Modes 0/1)
         Sen_AtSetpoint  : Bool := FALSE;    // Mid/target point magnetic switch (Mode 1)
@@ -634,6 +646,12 @@ BEGIN
             ELSIF #ValveType = 1 AND NOT #Cmd_Extend AND NOT #Cmd_ExtendFull AND #PositioningMode <> 0 THEN
                 // 5/2: Cmd_Extend released → spring retracts (Mode 0: hold until retract commanded)
                 #State := 2;
+            ELSIF #Cmd_Release AND #ValveType <> 1 THEN
+                // 5/3 blocked centre: give up the coil hold without moving. State 0 drives both
+                // coils FALSE and the valve holds the piston mechanically where it stands.
+                // Last in the chain, so any real motion command above still wins.
+                // Not reachable on ValveType=1 -- there, dropping the coil IS motion (spring).
+                #State := 0;
             END_IF;
 
         4: // AT RETRACT -- confirmed by Sen_AtRetract=TRUE (Mode 1)
@@ -687,6 +705,11 @@ BEGIN
                         #State           := 1;
                     END_IF;
                 END_IF;
+            ELSIF #Cmd_Release AND #ValveType <> 1 AND #PositioningMode = 0 THEN
+                // Same as State 3: Mode 0 + 5/3 latches Sol_B here (see the output CASE), which
+                // the blocked centre makes pointless. Drop to State 0 -> both coils off, piston
+                // held mechanically. Mode-0 gated because only Mode 0 latches a coil in State 4.
+                #State := 0;
             END_IF;
 
         5: // RULER_PULSE -- fires solenoid for zone-calculated duration (Mode 2)

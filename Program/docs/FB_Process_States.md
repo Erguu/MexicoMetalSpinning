@@ -45,6 +45,18 @@
    also removed — with ITEM-49's interlock gone it was de-energising the drives on every manual
    visit. See the reference-validity latch section and STATE 5.
 
+6. **SheetHolder extend coil no longer stays hot through a fault (ITEM-53).** The mirror of ITEM-46
+   on the extend side: `PositioningMode=0` latches `Sol_A` in cylinder FB **State 3**, reached after
+   `Timeout_Extend` during SHEET_WAIT Ph1, with no exit but a new motion command — so a fault while
+   the operator was loading left `%Q12.2` energised until someone pressed Ack. New
+   `FB_CylinderControl` input **`Cmd_Release`** (5/3 valves only, ignored on `ValveType=1`, lowest
+   priority) drops the FB to State 0: **both coils off, piston held where it stands** by the blocked
+   centre. FB_Process asserts it on the SheetHolder in ERROR and STOPPED. It is a *release*, not a
+   *retract* — a fault in Ph1/Ph2 is precisely when MandrelLock has not clamped the blank yet.
+   **This adds an input to `FB_CylinderControl`, so all four cylinder instance DBs re-initialise on
+   the next download** — re-enter anything tuned online (`PositioningMode`, `Tolerance`, Mode-2 zone
+   pulses).
+
 Also: `DB_MachineConfig` lost its `NON_RETAIN` keyword so `SheetLoadPos_X/_Z/SheetLoadTol` can be
 marked **Retain** in the TIA DB editor — **that tick is a manual step, do it after every import** or
 the park position keeps reverting to the start values on power cycle.
@@ -375,6 +387,10 @@ homed while fast cycle mode was enabled.
 - `MandrelLock.Cmd_Extend = FALSE` (spring already retracted but held clear)
 - `SheetHolder.Cmd_Extend` — **not written here since 2026-08-09.** Its single writer at the bottom
   of the FB drives it FALSE in every state except SHEET_WAIT Ph1/Ph2
+- `SheetHolder.Cmd_Release = TRUE` (2026-08-09, ITEM-53) — no actuator coil hold may survive into
+  idle. A no-op on every traced path (every route to STOPPED runs a retract first, ending in FB
+  State 0), but it is the deterministic guard if a future path ever leaves the FB latched in
+  State 3/4. See STATE 999 for the full reasoning
 - `BackSupport.SolAtmo_Cmd = FALSE`
 - `BackSupport.Cmd_Extend = FALSE` (2026-07-30 — added so the manual CMD=40 button cannot
   stay asserted after leaving manual mode; previously cleared only by FB_RecipeHandler)
@@ -1111,6 +1127,15 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
   button and for a handler in IDLE/DONE, which are the paths that matter here)
 - `SheetHolder.Cmd_Extend` — driven FALSE by the single-writer block at the bottom of the FB
   (State ≠ SHEET_WAIT); not written in this state since 2026-08-09
+- `SheetHolder.Cmd_Release = TRUE` (2026-08-09, ITEM-53) — **de-energises the holder without moving
+  it.** Dropping `Cmd_Extend` is not enough: with `PositioningMode=0` the cylinder FB latches
+  `Sol_A` ON in State 3 (AT SETPOINT), which it reaches after `Timeout_Extend` during SHEET_WAIT
+  Ph1, and the only exits are a new extend or a retract. A fault during sheet loading therefore
+  left `%Q12.2` energised for as long as the machine sat in ERROR. `Cmd_Release` takes the FB to
+  State 0 — both coils off, blocked centre holds the piston where it is. **Deliberately not a
+  retract:** a fault in Ph1/Ph2 is the only time the holder is extended at all, and it is exactly
+  when MandrelLock has not clamped the blank yet. The operator's Ack still does the real release
+  (it arms `bSheetHolderRetractHold`)
 - `savedLineIndex` captured on first entry only (`IF savedLineIndex < 0`) — warm restart position
 - `DB_HMI.ResumeLine := savedLineIndex` (shown on HMI so operator knows which line will resume)
 - Error context: `DB_Diagnostic.Error_ProcessState`, `Error_Code`, `Error_Line`

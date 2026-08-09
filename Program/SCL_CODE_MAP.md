@@ -525,6 +525,17 @@ S7-1200: 0V=0, 10V=27648 | 4-20mA: Raw_Min=5530, Raw_Max=27648
 - `ValveType=1` (5/2 Spring Return) — spring retracts if Cmd_Extend is not held
 - `ValveType=3` (5/3 Exhaust Center) — dangerous for metal spinning, do not use
 
+**`PositioningMode=0` latches a coil in States 3 and 4 — and `Cmd_Release` is the way out
+(2026-08-09).** State 3 holds `Sol_A` ON, State 4 holds `Sol_B` ON, neither with any exit but a new
+motion command. Correct for a **5/2 spring return**, where the pressure hold is what keeps the
+cylinder extended; pointless on a **5/3 blocked centre**, which holds the piston mechanically with
+both coils off — the coil just dissipates heat for as long as the machine sits there. That is
+ITEM-46 (State 4) and ITEM-53 (State 3). The `Cmd_Release` input drops a 5/3 cylinder from State 3
+or 4 to State 0: **both coils off, piston does not move.** Ignored on `ValveType=1` (there, cutting
+the coil is motion), lowest priority in both chains, default FALSE. Written today only by FB_Process
+for the SheetHolder, in STOPPED and ERROR. **Release ≠ retract** — use it when the cylinder must
+stop drawing power but must not move.
+
 **BackSupport coil sequence (CMD=40 / CMD=41) — rewritten 2026-08-07, closes ITEM-41:**
 The authoritative coil table lives in the `DB_Cylinder_BackSupport` header in `02_DataBlocks.scl`.
 
@@ -571,6 +582,14 @@ Both commands are owned by one block at the bottom of FB_Process,
   period — is unreachable for this cylinder now. That closes ITEM-46.
 - **`CylSheetHolder_RetractTime` now bounds the physical stroke**, not just the Ph3 state advance.
   It must be ≥ the real retract time or the piston is left parked mid-stroke.
+- `Cmd_Release := (State = STATE_ERROR) OR (State = STATE_STOPPED)` — **ITEM-53.** Mode 0 latches
+  `Sol_A` in FB State 3 (reached after `Timeout_Extend` during SHEET_WAIT Ph1), so dropping
+  `Cmd_Extend` alone left `%Q12.2` energised for the whole time the machine sat in ERROR. This new
+  `FB_CylinderControl` input takes the FB to State 0 — **both coils off, piston unmoved** (blocked
+  centre). Deliberately a *release*, not a *retract*: a fault in Ph1/Ph2 is exactly when MandrelLock
+  has not clamped the blank. Ignored on `ValveType=1`, lowest priority, default FALSE — so
+  BackSupport / ToolHeadLock / MandrelLock are untouched. **Adding it re-initialises all four
+  cylinder instance DBs on the next download.**
 
 ---
 

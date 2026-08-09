@@ -118,6 +118,25 @@ Cmd_Extend (maintained button)
 
 Use for simple actuators where the mechanical end is the target and timeout = arrived.
 
+> **Mode 0 latches a coil in States 3 and 4 — and on a 5/3 valve that is a trap.** State 3 holds
+> `Sol_A` ON and State 4 holds `Sol_B` ON, in both cases with no exit except a new motion command.
+> That is right for a **5/2 spring return**, where cutting the coil means the spring pulls the
+> cylinder back — the pressure hold is what keeps it extended. It is pointless on a **5/3 blocked
+> centre**, which holds the piston mechanically with both coils off: the coil just dissipates heat
+> for as long as the machine sits in that state, which for an idle machine is indefinitely.
+> This is the ITEM-46 (State 4) and ITEM-53 (State 3) failure.
+>
+> **`Cmd_Release` (added 2026-08-09)** is the escape: raise it and a 5/3 cylinder in State 3 or 4
+> drops to State 0 — both coils off, **piston stays exactly where it is**. It is ignored on
+> `ValveType=1`, where dropping the coil would be motion, not a release, and it sits last in the
+> priority chain so any real `Cmd_Extend` / `Cmd_Retract` still wins.
+>
+> Releasing is not retracting. Use `Cmd_Release` when the cylinder should stop *drawing power*
+> but must not *move* — e.g. a workpiece holder that faults mid-hold. Use `Cmd_Retract` when the
+> piston should actually travel back. FB_Process asserts `Cmd_Release` on the SheetHolder in
+> STOPPED and ERROR; BackSupport deliberately does **not** get it, because `CMD=40` needs live
+> extend pressure against the workpiece (see the `DB_Cylinder_BackSupport` header).
+
 ---
 
 ## Mode 1 — Magnetic Switch

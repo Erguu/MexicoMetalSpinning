@@ -676,3 +676,34 @@ reset-path behaviour**, so it gets its own checkpoint pass.
       power-up still forces one. `DB_Diagnostic.Require_Homing` is the tag to watch.
 
 **Result: PASS on all four checkpoints** (1 open commissioning check)
+
+### `SheetHolder.Cmd_Release` — new actuator override (ITEM-53, 2026-08-09)
+
+New `FB_CylinderControl` input, written by FB_Process for the SheetHolder only.
+
+- [x] **Checkpoints 3 & 4 — STATE_STOPPED / STATE_ERROR.** This override is *asserted*, not
+      cleared, in exactly those two states — it is the thing that guarantees no coil hold survives
+      into idle or a fault. It is written unconditionally every scan from the single-writer block
+      (`Cmd_Release := (State = STATE_ERROR) OR (State = STATE_STOPPED)`), so it is FALSE in every
+      other state by construction. There is no latch and nothing to leave stuck.
+- [x] **Checkpoints 1 & 2 — hard reset / recipe reset.** Nothing to clear: the value is a pure
+      function of `#State`, and the hard reset ends in STOPPED, where TRUE is the wanted value.
+      `FB_RecipeHandler` writes no SheetHolder field.
+- [x] **Cannot fight the retract.** State 3 tests `Cmd_Retract` *before* `Cmd_Release`, and States
+      0 and 2 do not test `Cmd_Release` at all — so with both asserted in STOPPED (hard reset arms
+      the retract hold) the retract still wins and still completes.
+- [x] **Cannot cause motion.** Its only effect is `State := 0`, whose output branch drives both
+      coils FALSE. On a blocked centre that is a mechanical hold, not a move.
+- [x] **No other cylinder affected.** Default FALSE on every instance; BackSupport, ToolHeadLock
+      and MandrelLock are never written. The `ValveType <> 1` guard additionally makes it inert on
+      the two spring-return cylinders even if someone wires it later by mistake.
+- [ ] **OPEN — download side effect.** Adding a `VAR_INPUT` re-initialises all four cylinder
+      instance DBs on the next download. Record any online-tuned values (`PositioningMode`,
+      `Tolerance`, Mode-2 zone limits/pulses) first — they revert to `02_DataBlocks.scl`.
+- [ ] **OPEN — commissioning.** Confirm on the machine that the blank stays put when a fault is
+      injected during SHEET_WAIT Ph1: `%Q12.2` should drop while the piston does not move.
+      This is the first time the SheetHolder is asked to hold a load on the blocked centre alone,
+      and it is the same assumption as the accepted E-Stop fail-safe behaviour — verify both
+      together.
+
+**Result: PASS on all four checkpoints** (2 open items: download side effect, commissioning check)
