@@ -530,7 +530,10 @@ Additional:
   FB_Process the last writer of `Cmd_Retract` in the scan. The handler's `IF #Reset THEN` block is
   level-triggered and also writes BackSupport commands; if the order were reversed it would wipe the
   retract command within the same scan.
-- **`Timeout_Retract := T#24H` is deliberate.** While `Cmd_Retract` is held the FB must stay in State 2
+- **`Timeout_Retract := T#24H` is deliberate** (reason updated 2026-08-09 — the State-4 `Sol_B` latch
+  it cites was deleted for ITEM-46, so expiring is now merely premature, not dangerous; it is kept
+  because the `CMD=41 P2..P3` window is recipe-controlled and unmeasured).
+  While `Cmd_Retract` is held the FB must stay in State 2
   (`Sol_A` off, `Sol_B` on). If the timeout expired it would drop to State 4, where Mode 0 + 5/3 latches
   `Sol_B` ON with no exit except `Cmd_Extend` (`09:851-854`) — the same dead-end as State 3. Do not
   "tidy" this value.

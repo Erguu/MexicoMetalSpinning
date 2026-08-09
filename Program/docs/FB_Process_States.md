@@ -12,8 +12,11 @@
    **extended straight back out about a second later**.
 2. **SheetHolder retract coil is now time-bounded (ITEM-46 — closed).** `bSheetHolderRetractHold` is
    released by a new TON `tonSheetHolderHold` (PT = `CylSheetHolder_RetractTime`, T#0.5S) instead of
-   by the cylinder FB reaching State 4, and `DB_Cylinder_SheetHolder.Timeout_Retract` is **T#1S →
-   T#24H** so the FB stays in State 2 for the whole hold. The holder now retracts for the hold time
+   by the cylinder FB reaching State 4. The State-4 `Sol_B` latch (`PositioningMode=0 AND
+   ValveType<>1`) is **deleted from FB_CylinderControl** — it applied to two cylinders and both
+   already dodged it with `Timeout_Retract := T#24H`, so it protected nobody; State 4 now drives both
+   coils off. `DB_Cylinder_SheetHolder.Timeout_Retract` is a readable **T#5S** backstop again. The
+   holder now retracts for the hold time
    and then **both coils de-energise** — the blocked centre holds it. Previously `%Q12.3` stayed
    energised continuously from the first power-up retract for as long as the machine sat idle.
    **`CylSheetHolder_RetractTime` now bounds the physical stroke** — it must be ≥ the real retract
@@ -781,10 +784,10 @@ SHEET_WAIT. Renamed in intent 2026-08-03: it used to move only far enough to cle
 > - `Cmd_Extend := (State = SHEET_WAIT) AND NOT bSheetWaitPhase3` — no state latches it any more.
 > - `bSheetHolderRetractHold` is released by `tonSheetHolderHold` (PT =
 >   `CylSheetHolder_RetractTime`), **not** by the cylinder FB reaching State 4, and
->   `Timeout_Retract` is now **T#24H** so the FB stays in State 2 for the whole hold. When the
->   latch drops, the FB goes to State 0 and **both coils de-energise** — the blocked centre holds
->   the piston at the retract end. State 4 (which latches `Sol_B` on for ever in Mode 0 + 5/3, and
->   is why the coil used to stay powered all through idle) is no longer reachable here.
+>   `Timeout_Retract` is a plain **T#5S** backstop. When the latch drops, the FB goes to State 0 and
+>   **both coils de-energise** — the blocked centre holds the piston at the retract end. State 4 used
+>   to latch `Sol_B` on for ever in Mode 0 + 5/3, which is why the coil stayed powered all through
+>   idle; that branch is **deleted**, so State 4 is now harmless whichever way the FB leaves State 2.
 
 **Phase 1 — Sheet insertion prompt** (`NOT bSheetWaitPhase2 AND NOT bSheetWaitPhase3`):
 - `bSheetHolderRetractHold = FALSE` — drop any retract hold left from the previous cycle

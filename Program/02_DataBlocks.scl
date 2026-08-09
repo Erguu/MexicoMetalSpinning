@@ -880,13 +880,18 @@ BEGIN
     Timeout_Extend      := T#3S;        // Measured extend stroke ~2s + margin. Was T#1S500MS, which was
                                         // SHORTER than the real stroke: STATE_CYL_GOTO_WAIT(71) advanced
                                         // mid-travel and CMD=41 P1 fired into a still-moving cylinder.
-    Timeout_Retract     := T#24H;       // DELIBERATE -- do NOT shorten. The retract is commanded by
-                                        // CMD=41 P2 (Cmd_Retract latched) and released by P3. While
-                                        // Cmd_Retract is held the FB must stay in State 2 (Sol_A=FALSE,
-                                        // Sol_B=TRUE). If this timeout expires the FB drops to State 4,
-                                        // where Mode 0 + 5/3 latches Sol_B ON with no way out except
-                                        // Cmd_Extend (09:851-854) -- the same dead-end as State 3.
-                                        // Same technique as DB_Cylinder_ToolHeadLock.Timeout_Extend.
+    Timeout_Retract     := T#24H;       // DELIBERATE -- do NOT shorten without measuring first.
+                                        // The retract is commanded by CMD=41 P2 (Cmd_Retract latched)
+                                        // and released by P3, so the window is RECIPE-controlled and
+                                        // its upper bound has never been measured. While Cmd_Retract
+                                        // is held the FB must stay in State 2 (Sol_A=FALSE, Sol_B=TRUE);
+                                        // a timeout expiring mid-sequence would quietly stop driving
+                                        // the cylinder back part-way through a P2..P3 window.
+                                        // NOTE (2026-08-09): the old reason for this value is gone --
+                                        // State 4 no longer latches Sol_B for Mode 0 + 5/3, it drives
+                                        // both coils off like every other cylinder. Expiring is
+                                        // therefore no longer dangerous, just premature. Once the real
+                                        // P2..P3 duration is known this can become a normal timeout.
 END_DATA_BLOCK
 
 DATA_BLOCK "DB_Cylinder_Sen_BackSupport_Setpt"
@@ -955,15 +960,21 @@ BEGIN
     ValveType       := 2;       // 5/3 blocked centre -- twin solenoid, active retract on Sol_B
     PositioningMode := 0;       // No sensor -- full stroke, timeout = done, no error
     Timeout_Extend  := T#5S;
-    // T#24H is DELIBERATE (ITEM-46) -- do NOT set this to a real stroke time.
-    // State 4 (AT RETRACT) is a dead end for Mode 0 + ValveType<>1: it holds Sol_B
-    // energised for ever and is left only on a new extend command, so the retract coil
-    // stayed powered the whole time the machine sat idle. With this timeout the FB
-    // simply stays in State 2 (RETRACTING, Sol_B=TRUE) for as long as Cmd_Retract is
-    // held, and FB_Process's own timer ends the stroke: dropping Cmd_Retract takes the
-    // FB to State 0 and both coils go off. The retract duration is therefore owned by
-    // DB_MachineConfig.CylSheetHolder_RetractTime, not by this value.
-    Timeout_Retract := T#24H;
+    // Backstop only -- it is NOT what ends the retract.
+    //
+    // The retract duration is owned by FB_Process: it holds Cmd_Retract for
+    // DB_MachineConfig.CylSheetHolder_RetractTime (T#0.5S) and then drops it, which takes
+    // the FB from State 2 to State 0 with both coils off. This value only decides what
+    // happens if a retract is ever commanded for LONGER than that -- the FB gives up
+    // waiting, calls the stroke done and moves to State 4, which since 2026-08-09 also
+    // drives both coils off. So either exit ends with the coil de-energised and the
+    // blocked centre holding the piston; the difference is cosmetic.
+    //
+    // (History: this was T#24H for a few hours during the ITEM-46 work, to dodge the old
+    // State 4 behaviour where Mode 0 + 5/3 latched Sol_B ON for ever. That latch has been
+    // deleted from FB_CylinderControl, so the dodge is no longer needed and a plain,
+    // readable timeout is back. Keep it comfortably above CylSheetHolder_RetractTime.)
+    Timeout_Retract := T#5S;
 END_DATA_BLOCK
 
 // =============================================================================

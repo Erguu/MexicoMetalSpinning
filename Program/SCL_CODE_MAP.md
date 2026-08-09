@@ -553,7 +553,9 @@ The authoritative coil table lives in the `DB_Cylinder_BackSupport` header in `0
   internally mutually exclusive — **never re-add an override on either output.**
 - `Cmd_Retract` is a **latched** command (nothing else writes it for this cylinder). Cleared by RESET,
   hard reset, `CMD=41 P3`, the end-retract timeout, and on leaving a terminal state mid-retract.
-- `Timeout_Retract := T#24H` is deliberate — State 4 latches `Sol_B` with no exit but `Cmd_Extend`.
+- `Timeout_Retract := T#24H` is deliberate, but **not** for the original reason: State 4 stopped latching
+  `Sol_B` on 2026-08-09 (ITEM-46). It is kept because the `CMD=41 P2..P3` window is recipe-controlled
+  and unmeasured — a timeout expiring mid-sequence would stop driving the cylinder back part-way.
 - End-of-recipe retract: edge-triggered on entry to STOPPED / ERROR / COMPLETE, holds `Sol_B` for
   `DB_MachineConfig.CylBackSupport_EndRetractTime` (T#2S), then drops every coil.
 
@@ -576,10 +578,10 @@ Both commands are owned by one block at the bottom of FB_Process,
   TRUE through STOPPING(18)/LOCK_RETRACT_WAIT(29) and the holder extended again ~1 s into the stop.
 - `Cmd_Retract := bSheetHolderRetractHold`, released by `tonSheetHolderHold`
   (PT = `DB_MachineConfig.CylSheetHolder_RetractTime`), gated on E-Stop OK. `Timeout_Retract` is
-  **T#24H** so the FB stays in State 2 for the whole hold; dropping the latch takes it to State 0
-  and **both coils go off** (blocked centre holds the piston). State 4 — which latches `Sol_B` on
-  for ever in Mode 0 + `ValveType<>1`, and used to keep `%Q12.3` powered through the entire idle
-  period — is unreachable for this cylinder now. That closes ITEM-46.
+  a plain **T#5S** backstop. The State-4 `Sol_B` latch that kept `%Q12.3` powered through the entire
+  idle period was **deleted from FB_CylinderControl** (it applied to two cylinders, both of which
+  already dodged it with a 24 h timeout — it protected nobody), so State 4 now drives both coils off
+  like every other state and either exit ends de-energised. That closes ITEM-46.
 - **`CylSheetHolder_RetractTime` now bounds the physical stroke**, not just the Ph3 state advance.
   It must be ≥ the real retract time or the piston is left parked mid-stroke.
 - `Cmd_Release := (State = STATE_ERROR) OR (State = STATE_STOPPED)` — **ITEM-53.** Mode 0 latches

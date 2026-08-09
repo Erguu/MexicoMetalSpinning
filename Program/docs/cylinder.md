@@ -118,18 +118,24 @@ Cmd_Extend (maintained button)
 
 Use for simple actuators where the mechanical end is the target and timeout = arrived.
 
-> **Mode 0 latches a coil in States 3 and 4 — and on a 5/3 valve that is a trap.** State 3 holds
-> `Sol_A` ON and State 4 holds `Sol_B` ON, in both cases with no exit except a new motion command.
+> **Mode 0 used to latch a coil in States 3 and 4 — on a 5/3 valve that is a trap.** State 3 holds
+> `Sol_A` ON and State 4 held `Sol_B` ON, in both cases with no exit except a new motion command.
 > That is right for a **5/2 spring return**, where cutting the coil means the spring pulls the
 > cylinder back — the pressure hold is what keeps it extended. It is pointless on a **5/3 blocked
 > centre**, which holds the piston mechanically with both coils off: the coil just dissipates heat
 > for as long as the machine sits in that state, which for an idle machine is indefinitely.
 > This is the ITEM-46 (State 4) and ITEM-53 (State 3) failure.
 >
-> **`Cmd_Release` (added 2026-08-09)** is the escape: raise it and a 5/3 cylinder in State 3 or 4
-> drops to State 0 — both coils off, **piston stays exactly where it is**. It is ignored on
-> `ValveType=1`, where dropping the coil would be motion, not a release, and it sits last in the
-> priority chain so any real `Cmd_Extend` / `Cmd_Retract` still wins.
+> **State 4 was fixed at the source (2026-08-09):** the `Sol_B` latch is **deleted**, so State 4 now
+> drives both coils off for every mode and valve type. It applied to exactly two cylinders and both
+> already dodged it by setting `Timeout_Retract := T#24H` — a latch every caller has to avoid is not
+> a feature. Retract timeouts can now be ordinary readable values again.
+>
+> **State 3 keeps its hold on purpose** (BackSupport needs live extend pressure against the
+> workpiece), so it gets an opt-in escape instead: **`Cmd_Release` (added 2026-08-09)** — raise it
+> and a 5/3 cylinder in State 3 drops to State 0, both coils off, **piston stays exactly where it
+> is**. Ignored on `ValveType=1`, where dropping the coil would be motion rather than a release, and
+> last in the priority chain so any real `Cmd_Extend` / `Cmd_Retract` still wins.
 >
 > Releasing is not retracting. Use `Cmd_Release` when the cylinder should stop *drawing power*
 > but must not *move* — e.g. a workpiece holder that faults mid-hold. Use `Cmd_Retract` when the

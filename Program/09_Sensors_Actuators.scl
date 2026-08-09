@@ -705,12 +705,10 @@ BEGIN
                         #State           := 1;
                     END_IF;
                 END_IF;
-            ELSIF #Cmd_Release AND #ValveType <> 1 AND #PositioningMode = 0 THEN
-                // Same as State 3: Mode 0 + 5/3 latches Sol_B here (see the output CASE), which
-                // the blocked centre makes pointless. Drop to State 0 -> both coils off, piston
-                // held mechanically. Mode-0 gated because only Mode 0 latches a coil in State 4.
-                #State := 0;
             END_IF;
+            // No Cmd_Release branch here: since 2026-08-09 State 4 drives both coils off by
+            // itself (see the output CASE), so there is no coil hold left to release. State 3 is
+            // now the only state that latches a solenoid with no exit but a motion command.
 
         5: // RULER_PULSE -- fires solenoid for zone-calculated duration (Mode 2)
             //
@@ -874,14 +872,20 @@ BEGIN
                 #Sol_A := FALSE;
                 #Sol_B := TRUE;     // 5/3 blocked: active retract
             END_IF;
-        4: // AT RETRACT (Mode 0/1)
-            IF #PositioningMode = 0 AND #ValveType <> 1 THEN
-                #Sol_A := FALSE;
-                #Sol_B := TRUE;                              // Mode 0 + 5/3: hold retract solenoid
-            ELSE
-                #Sol_A := FALSE;                             // Mode 1 or 5/2: both off
-                #Sol_B := FALSE;
-            END_IF;
+        4: // AT RETRACT (Mode 0/1) -- both coils off, always (changed 2026-08-09, ITEM-46)
+            //
+            // This used to hold Sol_B ON for PositioningMode=0 AND ValveType<>1, with State 4
+            // reachable only by a new extend command. That is a coil energised indefinitely for
+            // zero benefit: the piston is already at the retract end, a 5/3 blocked centre holds
+            // it there mechanically, and a 5/2 spring return holds it with the spring.
+            //
+            // The branch was also protecting nobody. It applied to exactly two cylinders --
+            // SheetHolder and BackSupport -- and BOTH avoided it by setting Timeout_Retract to
+            // T#24H so State 4 could never be reached. A latch that every caller has to dodge is
+            // not a feature. Deleting it lets Timeout_Retract go back to being an honest "assume
+            // the stroke is done" value instead of a tripwire.
+            #Sol_A := FALSE;
+            #Sol_B := FALSE;
         7: // RULER_HOLD: mechanical lock (Mode 2)
             #Sol_A := FALSE;
             #Sol_B := FALSE;

@@ -1271,7 +1271,8 @@ Implemented as recommended above, with one deviation: the operator chose to **re
 
 | Change | Where |
 |--------|-------|
-| `Timeout_Retract` T#1S → **T#24H** (FB stays in State 2, never reaches the State-4 `Sol_B` dead end) | `02_DataBlocks.scl` `DB_Cylinder_SheetHolder` |
+| **State-4 `Sol_B` latch deleted** — `PositioningMode=0 AND ValveType<>1` no longer holds the coil; State 4 drives both coils off like every other state | `09_Sensors_Actuators.scl` State-4 output branch |
+| `Timeout_Retract` T#1S → **T#5S** — a plain backstop, not a tripwire. It briefly went to T#24H to dodge the State-4 latch; with the latch gone that dodge is unnecessary | `02_DataBlocks.scl` `DB_Cylinder_SheetHolder` |
 | New `tonSheetHolderHold : TON` releases `bSheetHolderRetractHold`; replaces the `IF State = 4` release | `06_MainProcess.scl` bottom block |
 | Timer gated on E-Stop OK — the coils are dead in FB State -1, so an E-Stop must pause the window, not burn it | same |
 | `Cmd_Extend` given a single writer: `(State = STATE_SHEET_WAIT) AND NOT bSheetWaitPhase3` | same block; removed from SHEET_WAIT Ph1/Ph2/bypass, STOPPED, ERROR |
@@ -1312,8 +1313,9 @@ The 1 s delay in the report is exactly `Timeout_Retract`. Left alone it oscillat
 `Cmd_Extend` now has one writer at the bottom of FB_Process,
 `(State = STATE_SHEET_WAIT) AND NOT bSheetWaitPhase3`, so leaving state 14 by *any* path — Stop,
 error, reset, normal Ph3 advance — drops it in the same scan. No state latches it any more. The
-ITEM-46 change (`Timeout_Retract := T#24H`) independently removes step 2, so State 4 is unreachable
-for this cylinder; either fix alone would have stopped the re-extend, and both are wanted.
+ITEM-46 change independently defuses step 2 — State 4 no longer latches a coil and no longer
+re-extends on a stale `Cmd_Extend`; either fix alone would have stopped the re-extend, and both are
+wanted.
 
 **Do not** re-introduce a `Cmd_Extend` write inside a state block for this cylinder.
 
