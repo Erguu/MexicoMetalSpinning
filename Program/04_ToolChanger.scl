@@ -135,7 +135,6 @@ BEGIN
                 "DB_Diagnostic".Error_Code := #ErrorID;
                 // Single-writer: DB_HMI.ErrorText comes from FB_AlarmManager via FB_Process forward.
                 "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
-                "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
                 #state := 999;
             END_IF;
 

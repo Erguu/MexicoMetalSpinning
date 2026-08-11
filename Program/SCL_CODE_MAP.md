@@ -99,7 +99,7 @@ The schema of all DBs in the project is defined here. All HMI tag connections ar
 
 | DB | Capacity | Description |
 |----|---------|-------------|
-| `DB_RecipeProgram1..10` | 1000 lines × 12 bytes ≈ 12 KB each | **LOAD MEMORY ONLY** (`UNLINKED`) — zero work memory, cannot be read directly or monitored online. Standard access (mandatory for `READ_DBL`) |
+| `DB_RecipeProgram1..50` | 1000 lines × 12 bytes ≈ 12 KB each | **LOAD MEMORY ONLY** (`UNLINKED`) — zero work memory, cannot be read directly or monitored online. Standard access (mandatory for `READ_DBL`) |
 | `DB_SelectedRecipe` | Header + 1000 lines ≈ 12 KB | **The one buffer the machine runs from.** Work memory, standard access. Filled by `FB_RecipeLoader` in STATE_RECIPE_LOAD(11). `FB_RecipePreScan` and `FB_RecipeHandler` bind here and nowhere else |
 
 #### Interface and Control DBs
@@ -190,7 +190,7 @@ The most critical business logic file.
 Copies the selected `DB_RecipeProgram<n>` out of load memory into `DB_SelectedRecipe` with **two
 sequential `READ_DBL` sub-reference transfers — `.Header`, then `.Lines`**. Called every scan from
 FB_Process; `Execute` is TRUE only in STATE_RECIPE_LOAD(11).
-- **In:** `Execute`, `ProgramNo` (1..10), `Reset` · **Out:** `Done`, `Busy`, `Error`, `ErrorCode`, `ErrorPhase`, `LoadedProgram`
+- **In:** `Execute`, `ProgramNo` (1..50), `Reset` · **Out:** `Done`, `Busy`, `Error`, `ErrorCode`, `ErrorPhase`, `LoadedProgram`
 - States: 0 IDLE → 10 LATCH → 20 REQ_HDR → 30 WAIT_HDR → 35 HDR_SETTLE → 40 REQ_LINES → 50 WAIT_LINES → 60 DONE / 90 ERROR
 - **Why two calls, not one whole-DB call (2026-08-06, field fault):** the original version copied the
   whole DB in one call. On the machine that delivered `Header` correctly and left `Lines` entirely

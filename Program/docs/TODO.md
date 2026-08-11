@@ -1628,3 +1628,256 @@ Adding a `VAR_INPUT` changes the `FB_CylinderControl` interface, so **all four c
 DBs re-initialise on the next download**. Anything tuned online rather than in source —
 `PositioningMode`, `Tolerance`, the Mode-2 zone limits and pulse times — reverts to the values in
 `02_DataBlocks.scl`. Write down the live values before downloading.
+
+---
+
+## ITEM-54 — Pre-scan accepts `CMD=20 Param=0` (spindle on at zero RPM)
+
+**Found:** 2026-08-10 | **Status: OPEN (low, but it is a "runs the program with no spindle" class of hole)**
+
+### The gap
+
+Pre-scan check #4 validates spindle speed against one bound only —
+`05_RecipeHandler.scl:467-470`:
+
+```scl
+IF #Lines[#scanIndex].CMD = 20 THEN   // CMD_SPINDLE_ON
+    #spindleRPM := INT_TO_REAL(BYTE_TO_INT(#Lines[#scanIndex].Param)) * SPINDLE_PARAM_TO_RPM;
+    IF #spindleRPM > "DB_Spindle".MaxSpeed THEN
+```
+
+There is no lower bound, so `Param=0` — "spindle on at 0 RPM" — validates clean. A program whose
+spindle speeds are all zero is fully runnable and will feed a tool into a stationary blank at the
+recipe's programmed feedrate (`F=300`/`F=50` in the observed case).
+
+### How it showed up
+
+`gcodes/DB_RecipeProgram1.scl` regenerated 2026-08-07 19:59:28 with all four `CMD=20` lines at
+`Param := 0` (was 60/30/30/30). This was **intentional** — a deliberate spindle-off dry run by the
+operator — so it is not itself a bug. The problem is that the resulting file is indistinguishable
+from a CAM RPM-propagation failure, and nothing between the file and the spindle would object.
+Two supporting details worth knowing: the CAM comment header was left internally inconsistent
+(Op1 still read `RPM=600.0` while emitting `Param := 0`), and this is program 1 — the one partially
+field-verified 2026-08-06.
+
+### Why the guard costs nothing
+
+`DB_HMI.Bypass_Spindle` already exists for exactly this purpose and is the *correct* dry-run
+mechanism: `05_RecipeHandler.scl:828-833` skips `CMD_SPINDLE_ON`/`CMD_SPINDLE_OFF` outright when it
+is set, and `00_Configuration.scl:390` classifies it as a functional (not safety) bypass, safe to
+expose on the HMI. So rejecting `Param=0` removes no capability — it only stops a dry-run artefact
+from being runnable as a production program. The dry run keeps its real RPM values in the recipe.
+
+### Proposed fix
+
+Extend check #4 with a lower bound and a new code:
+
+| Detail | Value |
+|--------|-------|
+| Condition | `CMD = 20 AND Param = 0` |
+| Error code | **`16#0314`** (next free in the recipe range; 0x0300–0x0313 are taken) |
+| `ErrorDesc` | `'Spindle ON with 0 RPM (line n) - use Bypass_Spindle for a dry run'` |
+| Severity | 2 (project) — consistent with the other pre-scan rejections |
+| Where | `FB_RecipePreScan`, alongside the existing `> MaxSpeed` test |
+
+Also decide whether to reject or warn. Rejection is the safer default and matches how every other
+pre-scan violation behaves; a warning would let the zeroed program run, which is the situation this
+item exists to prevent.
+
+**Follow-on:** `AlarmWord_Recipe` maps `0x0301–0x0308` only, so `0x0314` will not raise a Discrete
+Alarm View bit on the HMI — same pre-existing gap noted under ITEM-26. It will still reach
+`ErrorText` and `DB_AlarmHistory`.
+
+### Docs to update when this is implemented
+
+`Program/SCL_CODE_MAP.md` error-code table, `PLC_Recipe_Format_Spec.md` (the `CMD=20` note added
+2026-08-10 already warns CAM authors not to emit `Param=0` — change it from advice to a stated
+rejection), and `CAM_INTERFACE_SPEC.md` if it lists validation rules.
+
+---
+
+## ITEM-55 — Work-memory reclaim: Spanish string mirrors → WinCC text lists
+
+**Found:** 2026-08-10 | **Status: OPEN, scoped, not started** | Branch `feat/recipe-slots-and-batching`
+
+### Why
+
+50 recipe slots compiled to **101% work memory** and would not download. The slot count is
+generated code (`tools/gen_recipe_slots.py`) — two `READ_DBL` call sites per slot — and on the
+S7-1200 compiled code shares the same 100 KB work memory as DB data. Load memory was only 51%,
+so the recipe DBs themselves are fine; it is the loader `CASE` that overflowed. Currently backed
+off to **20 slots** (loader only; `02b` still declares 50, deliberately — see its header).
+
+### Measured inventory (2026-08-10)
+
+Parsed global work-memory DBs total only **~17 KB** of ~100 KB, and `DB_SelectedRecipe` is 12 KB
+of that. The other **~83 KB is compiled code + 10 FB instance DBs** — so code is the dominant
+consumer and DB field-trimming is small change. TIA *Program info → Resources* is the authority
+for per-block figures; the estimates below came from parsing source.
+
+| Candidate | Frees | Status |
+|---|---|---|
+| Spanish mirrors → WinCC text lists | **~8–12 KB** (both languages) / **~4–6 KB** (Spanish only) | **This item** |
+| Unreachable states 19 + 21 | 105 executable lines | Not started, zero risk |
+| `DB_fbSpindle` (uncalled FB instance) | ~300–800 B (unmeasurable from source) | Not started |
+| `DB_HMI.Axis_Status_*` | 56 B | Not started |
+| `DB_HMI.ProgramNames`/`ProgramValid` | ~230 B | **Check WinCC writes them first** |
+| `DB_Spindle.Hist_Log` + `Diag_*` + snapshot code | ~200–250 B + code | Judgement — serves resolved ITEM-03 |
+| ~~`DB_SelectedRecipe` 1000 → 400 lines~~ | ~~7 KB~~ | **REJECTED by user 2026-08-10** — the `gcodes/` recipes (38..314 lines) are TEST data; production uses the full 1000. Last resort only. See the warning comment at the array declaration in `02_DataBlocks.scl` |
+
+### Scope of this item
+
+Measured: **161** `_ES :=` assignments, **4,942** literal characters, **388 B** of `_ES` DB fields.
+English side is **153** assignments — roughly even, so Spanish alone is about half the total.
+
+| Group | Count | Keys off |
+|---|---|---|
+| `ActiveErrorText_ES` (AlarmManager error table) | 65 | `DB_HMI.ErrorID` — already exposed |
+| `ErrorDetail_ES` | 57 | **dynamic** (`CONCAT` with line/tool/TO text) — cannot be a plain text list |
+| `StatusMsg_ES` | 22 | needs a new `StatusID` Int in `DB_HMI` (currently FB-internal only) |
+| `Bypass_ES` | 31 | existing bypass flags |
+| MDI / Warning / misc | ~13 | existing tags |
+
+33 of the 161 are dynamic; 128 are static literals and migrate cleanly.
+
+### Decision taken
+
+**Do Option A first: remove Spanish only, keep English in the PLC.** ~4–6 KB, and English stays
+fully readable online in TIA — no debuggability lost. English display fields on the HMI keep
+reading the existing PLC tags, so they do not need repointing, which also makes A much less WinCC
+work than a full migration. Re-read the work-memory figure afterwards and only go further if
+needed. Note that even a full migration keeps error context readable online: `DB_Diagnostic.Error_Text`
+has **35 English write sites** and stays.
+
+### Open question (blocks the PLC work)
+
+**Does `ErrorDetail` need Spanish at all?** It is a service/diagnostic field, not an operator one.
+English-only drops **57 of the 161** with zero WinCC work. If Spanish is required there, those 57
+need parameterised WinCC text fields — the fiddly part.
+
+### Split of work
+
+**PLC (assistant):** add `StatusID` to `DB_HMI`; delete the 161 `_ES :=` assignments and the five
+`_ES` fields (`StatusMsg_ES`, `ErrorText_ES`, `ErrorDetail_ES`, `WarningText_ES`,
+`MDI_StatusText_ES`); generate a **CSV of key/EN/ES triples** from the SCL for TIA text import so
+the ~120 rows are imported, not typed.
+
+**WinCC (user):** project languages EN+ES; create the text lists; import the CSV; delete the old
+`_ES` tags once nothing references them.
+
+### The real argument for doing it
+
+Today every new message costs two assignments and two string literals in work memory. Afterwards a
+new message costs one `Int` value plus text-list rows — **zero PLC work memory**. Adding messages
+stops eating the budget, and the 161 places where EN and ES can silently drift apart go away.
+
+### Related
+
+The better fix for the slot count specifically is `Program/docs/indexed_gatetest/` — if `READ_DBL`
+accepts a runtime index the `CASE` collapses to one call pair and the slot count stops costing work
+memory at all, making 100 slots free without spending any reclaim on them.
+
+### Stage 1 DONE 2026-08-10 — Spanish removed from the PLC
+
+Scope chosen deliberately: **Spanish only**, English left in place. Removing English in the
+same pass would leave the operator with blank messages between the download and the WinCC
+text-list work. Stage 1 is safe to download on its own.
+
+| Change | Detail |
+|--------|--------|
+| 161 `_ES :=` assignments deleted | 140 whole lines + 21 stripped from lines shared with the English assignment (the `CASE #State` status table put both on one line) |
+| 5 DB string fields deleted | `StatusMsg_ES` (52 B), `ErrorText_ES` (102), `ErrorDetail_ES` (122), `WarningText_ES` (82), `MDI_StatusText_ES` (30) = **388 B** |
+| 2 FB_AlarmManager members deleted | `ActiveErrorText_ES` output + `latchedText_ES` var = ~164 B of the FB_Process instance |
+| Literals removed | 4,942 characters, plus the compiled code for 161 string copies |
+
+Verified: 0 `_ES` assignments and 0 `_ES` declarations remain; every English counterpart
+still present with unchanged counts (22 `StatusMsg`, 63 `ActiveErrorText`, 57 `ErrorDetail`,
+7 `MDI_StatusText`, 4 `WarningText`); block BEGIN/END balance intact. **Not compiled.**
+
+`latchedText_ES` is gone rather than replaced. It existed only because `DB_Error` has no
+`Details_ES`, so the Spanish counterpart of the *latched* error had to be carried separately
+through the secondary-error restore path. With Spanish resolved from `ErrorID`, code and text
+cannot disagree — the restore path already puts `DB_Error.Code` back into `ActiveErrorCode`.
+
+**Text extracted before deletion** to `tools/hmi_texts.csv` (87 rows, EN+ES paired) by
+`tools/extract_hmi_texts.py`. Re-runnable, but only against a tree that still has the
+Spanish — i.e. before this commit. The wording is otherwise only in git history.
+
+### Findings from the extraction
+
+- **Only ONE new DB field is needed, not two.** Status text keys off `DB_HMI.MachineState`,
+  which is already written every scan (`06_MainProcess.scl:1299`, `CASE #State OF`). An
+  earlier estimate said a new `StatusID` was required; it is not. Only `WarningID` is missing.
+- **`MDI_Status` has key collisions.** Values 1 and 3 each carry two different messages
+  (`CMD40 done`/`Executed`, `CMD40: use Param 0 or 1`/`CMD41: use Param 1,2,3`). A text list
+  keyed off it would silently show the wrong hint. Two new values must be assigned in stage 2.
+- **`STATE_COMPLETE`'s status text lives outside the `CASE`** (it is an `IF` block), so a naive
+  extraction misses state 100. Worth remembering for any future sweep of the status table.
+- `error/0x0505` has an empty message in the SCL — dropped from the CSV, worth a look.
+- There is **no `Bypass_ES` group.** An earlier count of 31 was the pattern `_ES` matching
+  `Bypass_EStop`. Real totals are 71 error / 57 ErrorDetail / 22 status / 7 MDI / 4 warning.
+
+### Stage 2 — remaining work (blocked on the WinCC text lists existing)
+
+1. Build the four text lists in WinCC from `tools/hmi_texts.csv`; repoint the message display
+   objects at them.
+2. PLC: add `WarningID : Int` to `DB_HMI` (+ the four reset-path checkpoints for it); assign
+   two new `MDI_Status` values for the collisions.
+3. PLC: delete the English message text — the 58-code `CASE` in FB_AlarmManager, the
+   `CASE #State` status table, `WarningText`, `MDI_StatusText`, and the `ActiveErrorText` /
+   `DB_HMI.ErrorText` plumbing. Keep `ErrorDetail` (English, dynamic) and
+   `DB_Diagnostic.Error_Text` (35 English write sites — the online fault trail).
+4. Optional extra ~1.3 KB: `DB_Error.Details`, `History_Details[1..10]` and
+   `AlarmEntry.ErrorText` (42 B x 20 = 840 B) become redundant once history text is resolved
+   from `History_Code` / `ErrorCode` on the HMI. Touches the alarm-history screen.
+
+**Do not start step 3 before step 1 is live**, or a download leaves the machine with no
+operator messages at all.
+
+### Stage 1 defect found and fixed 2026-08-10 (same day) — read before doing stage 2
+
+The first removal pass deleted Spanish assignments **line by line**. Nine of them in
+`05_RecipeHandler.scl` were multi-line statements ending in an open `CONCAT(`:
+
+```scl
+"DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                           IN1 := INT_TO_STRING(#lineIndex), IN2 := CONCAT(
+                           IN1 := ' TO:', IN2 := "DB_Diagnostic".TO_ErrorText)));
+```
+
+Deleting only the first line left the two continuation lines orphaned, which TIA reports as a
+missing semicolon at the *following* statement — so the reported line is not the broken one.
+12 orphaned lines were removed in a second pass.
+
+**Do not remove SCL statements line-by-line. Remove them statement-by-statement**, tracking
+paren depth with string literals and `//` comments stripped first (a `'...'` literal can contain
+a paren or semicolon and will corrupt a naive count).
+
+The verification that actually proves it: walk each file accumulating paren depth **without
+clamping at zero**, and require `end == 0` **and** `min == 0`. An orphaned continuation run drives
+depth negative, so a plain end-of-file balance check passes while the file is still broken —
+`min` is what catches it. All 12 SCL files pass both after the fix.
+
+**This matters directly for stage 2:** the English `ErrorDetail` and `Error_Text` statements use
+the same multi-line `CONCAT` shape, and there are 57 and 35 of them. Any statement-removal in
+stage 2 must be depth-aware from the start, and must be checked with the min-depth test.
+
+### Measured work-memory cost, 2026-08-11 (real compiles, CPU 1214C)
+
+| Configuration | Work memory |
+|---|---|
+| 50 slots, Spanish still in the PLC | **101%** — would not download |
+| 20 slots, Spanish removed | **86%** |
+| 50 slots, Spanish removed | **93%** |
+
+- **Per slot: ~233 bytes** (7% over 30 slots), i.e. ~117 B per `READ_DBL` call site, two per slot.
+  About double the earlier estimate of 100-125 B.
+- **Spanish removal freed ~11-12 KB**, not the 4-6 KB estimated. Subtracting the ~3.4 KB from
+  50→20 slots leaves ~11.6 KB for the 161 assignments — the compiled string-copy code cost far
+  more than the 4,942 literal characters alone suggested.
+- Hard ceiling ≈ **75 slots**. **Settled at 50**, keeping ~7 KB free as margin for chaining rather
+  than filling the budget.
+
+Stage 2 (removing the English text) is therefore no longer needed to make the slot count work.
+It is now purely optional headroom — worth doing only if a future feature needs the space, or for
+the EN/ES drift benefit. Re-scope it as such rather than as a blocker.

@@ -1,0 +1,424 @@
+// =============================================================================
+// Test_03_FB_IdxLoader.scl -- INDEXED-container gate test, READ_DBL driver
+//
+// Throwaway gate-test project. DO NOT IMPORT INTO THE MACHINE PROJECT.
+// Import order: Test_01, Test_02, then this file, then Test_04.
+//
+// =============================================================================
+// WHAT EACH MODE ASKS
+// =============================================================================
+//   Mode 1  gate A   SRCBLK := "DB_IdxTestStore4".Programs[#idxLatched]
+//                    Whole element, RUNTIME index.
+//   Mode 2  gate B   SRCBLK := "...".Programs[#idxLatched].Header  then .Lines
+//                    Two transfers, RUNTIME index. THE FORM PRODUCTION WOULD USE.
+//   Mode 3  gate C   SRCBLK := "...".Programs[2].Lines
+//                    CONSTANT index. The fallback probe: if a runtime index is
+//                    refused but a constant one works, recipes can still be
+//                    grouped into containers with a CASE over CONTAINERS, which
+//                    is 10 branches for 50 slots instead of 50.
+//
+// =============================================================================
+// *** IF THIS FILE DOES NOT COMPILE, THAT IS A RESULT -- NOT A MISTAKE ***
+// =============================================================================
+// The likely rejection is "constant index required" / "invalid parameter" on the
+// indexed SRCBLK forms, because SRCBLK is a VARIANT and the S7-1200 is far more
+// restrictive than the S7-1500 about what may be handed to one.
+//
+// The three call forms are in SEPARATELY MARKED blocks below for exactly this
+// reason: one refused form must not stop you testing the others. If a block will
+// not compile:
+//     1. copy the compiler message VERBATIM into result.md -- the wording is the
+//        finding, and "it didn't work" is not a usable answer six months from now
+//     2. comment out that block ONLY (each is fenced with GATE x BEGIN/END)
+//     3. re-compile and carry on with the remaining gates
+//
+// A compile failure on mode 1 and 2 with mode 3 passing is a perfectly good
+// outcome: it says "keep a CASE, but over containers, not slots".
+//
+// =============================================================================
+// WHY THE BUFFER IS WIPED BEFORE EVERY TRANSFER
+// =============================================================================
+// Same reason FB_RecipeLoader poisons DB_SelectedRecipe at ST_LATCH. The
+// destination survives failed transfers and delta downloads, so leftover data
+// from a previous load can read as evidence that this load worked. Field
+// debugging on 2026-08-06 lost time to exactly that. Wiping first means: if you
+// can read a valid signature afterwards, it arrived in THIS transfer.
+// =============================================================================
+FUNCTION_BLOCK "FB_IdxTestLoader"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_INPUT
+        Execute     : Bool;         // rising edge starts a transfer
+        Reset       : Bool;         // level: abort, clear error
+        SelectIndex : Int := 3;     // element to fetch, 1..4
+        TestMode    : Int := 2;     // 1 = gate A, 2 = gate B, 3 = gate C
+    END_VAR
+    VAR_OUTPUT
+        State        : Int;
+        Busy         : Bool;
+        Done         : Bool;
+        ErrorFlag    : Bool;
+        RetVal       : Int;
+        ErrorPhase   : Int;
+        Elapsed      : Time;
+        ScanCount    : Int;
+        Result       : String[80];
+        TestPassed   : Bool;
+        RequestedIndex   : Int;
+        MatchedProgram   : Int;
+        Chk_RightProgram : Bool;
+        Chk_FirstLine    : Bool;
+        Chk_MidLine      : Bool;
+        Chk_LastLine     : Bool;
+        Chk_Header       : Bool;
+        Checksum          : Real;
+        Checksum_Expected : Real;
+    END_VAR
+    VAR
+        // READ_DBL is NOT declared here. It is an instance-less system function
+        // (SFC 83 heritage); declaring it as a multi-instance gives
+        // "Data type READ_DBL is unknown". Also: RET_VAL is the FUNCTION RETURN
+        // VALUE, not an output parameter -- "RET_VAL => x" will not compile.
+        tonWatch    : TON;
+        idxLatched  : Int := 1;     // frozen index for the whole transfer
+        modeLatched : Int := 2;     // frozen mode for the whole transfer
+        phaseLines  : Bool;         // FALSE = Header call live, TRUE = Lines call
+        reqActive   : Bool;         // REQ level, derived from state every scan
+        busyRaw     : Bool;
+        retValRaw   : Int;
+        prevExecute : Bool;
+        rtExecute   : Bool;
+        i           : Int;
+        sum         : Real;
+        expSum      : Real;
+        tStart      : Time;
+        k           : Int;
+    END_VAR
+    CONST
+        ST_IDLE     : Int := 0;
+        ST_LATCH    : Int := 10;
+        ST_WIPE     : Int := 15;
+        ST_REQ_HDR  : Int := 20;
+        ST_WAIT_HDR : Int := 30;
+        ST_SETTLE   : Int := 35;
+        ST_REQ_LIN  : Int := 40;
+        ST_WAIT_LIN : Int := 50;
+        ST_VERIFY   : Int := 55;
+        ST_DONE     : Int := 60;
+        ST_ERROR    : Int := 90;
+        WATCHDOG    : Time := T#10S;
+        TOL         : Real := 0.5;  // float compare tolerance. The sums are exact
+                                    // (997 addends are 0.0) but an equality test
+                                    // on Reals that happens to work is still an
+                                    // equality test on Reals.
+    END_CONST
+BEGIN
+    #rtExecute := #Execute AND NOT #prevExecute;
+    #prevExecute := #Execute;
+
+    IF #Reset THEN
+        #State := ST_IDLE;
+        #Done := FALSE;
+        #ErrorFlag := FALSE;
+        #RetVal := 0;
+        #ErrorPhase := 0;
+        #phaseLines := FALSE;
+        #MatchedProgram := 0;
+        #Result := 'reset';
+    END_IF;
+
+    // REQ derived from state EVERY scan -- never latched on its own, so no
+    // transfer can stay in flight across a reset.
+    #reqActive := (#State = ST_REQ_HDR) OR (#State = ST_WAIT_HDR)
+                  OR (#State = ST_REQ_LIN) OR (#State = ST_WAIT_LIN);
+
+    // =========================================================================
+    // THE READ_DBL CALL BLOCK
+    // Exactly ONE call executes per scan. The branch follows #modeLatched and
+    // #idxLatched -- never the live inputs -- so changing SelectIndex mid-
+    // transfer cannot splice two elements together.
+    // =========================================================================
+    CASE #modeLatched OF
+
+        // ---------------------------------------------------------------------
+        // GATE A BEGIN -- whole element, runtime index
+        // Comment out from here to "GATE A END" if it will not compile.
+        // Expect this one to be the suspect: the equivalent whole-object copy is
+        // what silently half-succeeded in ITEM-44. If it reports success, check
+        // Chk_LastLine before believing it.
+        // ---------------------------------------------------------------------
+        1:  #retValRaw := READ_DBL(REQ := #reqActive,
+                                   SRCBLK := "DB_IdxTestStore4".Programs[#idxLatched],
+                                   BUSY => #busyRaw,
+                                   DSTBLK := "DB_IdxTestSelectedWhole".Prog);
+        // --------------------------------- GATE A END ------------------------
+
+        // ---------------------------------------------------------------------
+        // GATE B BEGIN -- two sub-reference transfers, runtime index
+        // THE ONE THAT MATTERS. If this passes, FB_RecipeLoader's CASE collapses
+        // to this single pair of calls and the slot count stops costing code.
+        // ---------------------------------------------------------------------
+        2:  IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive,
+                                       SRCBLK := "DB_IdxTestStore4".Programs[#idxLatched].Lines,
+                                       BUSY => #busyRaw,
+                                       DSTBLK := "DB_IdxTestSelected".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive,
+                                       SRCBLK := "DB_IdxTestStore4".Programs[#idxLatched].Header,
+                                       BUSY => #busyRaw,
+                                       DSTBLK := "DB_IdxTestSelected".Header);
+            END_IF;
+        // --------------------------------- GATE B END ------------------------
+
+        // ---------------------------------------------------------------------
+        // GATE C BEGIN -- CONSTANT index. The fallback.
+        // Index is hardcoded 2, so RequestedIndex is forced to 2 in this mode
+        // regardless of SelectIndex. Only .Lines is copied, so Chk_Header is
+        // forced TRUE and the Result string says so.
+        // ---------------------------------------------------------------------
+        3:  #retValRaw := READ_DBL(REQ := #reqActive,
+                                   SRCBLK := "DB_IdxTestStore4".Programs[2].Lines,
+                                   BUSY => #busyRaw,
+                                   DSTBLK := "DB_IdxTestSelected".Lines);
+        // --------------------------------- GATE C END ------------------------
+    END_CASE;
+
+    #tonWatch(IN := #reqActive, PT := WATCHDOG);
+
+    IF #reqActive THEN
+        #ScanCount := #ScanCount + 1;
+    END_IF;
+
+    // =========================================================================
+    // STATE MACHINE
+    // =========================================================================
+    CASE #State OF
+
+        ST_IDLE:
+            IF #rtExecute AND #SelectIndex >= 1 AND #SelectIndex <= 4
+               AND #TestMode >= 1 AND #TestMode <= 3 THEN
+                #State := ST_LATCH;
+            END_IF;
+
+        // --- freeze index and mode; clear the verdict -------------------------
+        ST_LATCH:
+            #idxLatched  := #SelectIndex;
+            #modeLatched := #TestMode;
+            #phaseLines  := FALSE;
+            #Done := FALSE;
+            #ErrorFlag := FALSE;
+            #RetVal := 0;
+            #ErrorPhase := 0;
+            #ScanCount := 0;
+            #MatchedProgram := 0;
+            #Chk_RightProgram := FALSE;
+            #Chk_FirstLine := FALSE;
+            #Chk_MidLine := FALSE;
+            #Chk_LastLine := FALSE;
+            #Chk_Header := FALSE;
+            #TestPassed := FALSE;
+            #Checksum := 0.0;
+            // Mode 3 uses a hardcoded index -- report what was really fetched,
+            // not what the watch table asked for.
+            IF #modeLatched = 3 THEN
+                #RequestedIndex := 2;
+            ELSE
+                #RequestedIndex := #idxLatched;
+            END_IF;
+            #Checksum_Expected := 30000.0 * INT_TO_REAL(#RequestedIndex) + 6.0;
+            #Result := 'running';
+            // Delete the next line if TIME_TCK does not resolve on your firmware;
+            // ScanCount alone still shows the transfer is asynchronous.
+            #tStart := TIME_TCK();
+            #State := ST_WIPE;
+
+        // --- wipe the destination so a no-op transfer cannot pass -------------
+        ST_WIPE:
+            IF #modeLatched = 1 THEN
+                "DB_IdxTestSelectedWhole".Prog.Header.sName := '';
+                "DB_IdxTestSelectedWhole".Prog.Header.LineCount := 0;
+                "DB_IdxTestSelectedWhole".Prog.Header.ToolCount := 0;
+                FOR #i := 0 TO 999 DO
+                    "DB_IdxTestSelectedWhole".Prog.Lines[#i].X := 0.0;
+                    "DB_IdxTestSelectedWhole".Prog.Lines[#i].CMD := 0;
+                    "DB_IdxTestSelectedWhole".Prog.Lines[#i].Param := 0;
+                END_FOR;
+            ELSE
+                "DB_IdxTestSelected".Header.sName := '';
+                "DB_IdxTestSelected".Header.LineCount := 0;
+                "DB_IdxTestSelected".Header.ToolCount := 0;
+                FOR #i := 0 TO 999 DO
+                    "DB_IdxTestSelected".Lines[#i].X := 0.0;
+                    "DB_IdxTestSelected".Lines[#i].CMD := 0;
+                    "DB_IdxTestSelected".Lines[#i].Param := 0;
+                END_FOR;
+            END_IF;
+            // Mode 2 starts on the Header transfer; modes 1 and 3 are single-call
+            // and reuse the "Lines" leg of the state machine.
+            IF #modeLatched = 2 THEN
+                #State := ST_REQ_HDR;
+            ELSE
+                #phaseLines := TRUE;
+                #State := ST_REQ_LIN;
+            END_IF;
+
+        ST_REQ_HDR:
+            #State := ST_WAIT_HDR;
+
+        ST_WAIT_HDR:
+            IF #tonWatch.Q THEN
+                #RetVal := 16#FFFF;
+                #ErrorPhase := 1;
+                #State := ST_ERROR;
+            ELSIF NOT #busyRaw THEN
+                IF #retValRaw = 0 THEN
+                    #State := ST_SETTLE;
+                ELSE
+                    #RetVal := #retValRaw;
+                    #ErrorPhase := 1;
+                    #State := ST_ERROR;
+                END_IF;
+            END_IF;
+
+        // One scan with REQ low so the Header call sees its job closed before the
+        // phase switches, and so the watchdog TON resets for phase 2.
+        ST_SETTLE:
+            #phaseLines := TRUE;
+            #State := ST_REQ_LIN;
+
+        ST_REQ_LIN:
+            #State := ST_WAIT_LIN;
+
+        ST_WAIT_LIN:
+            IF #tonWatch.Q THEN
+                #RetVal := 16#FFFF;
+                #ErrorPhase := 2;
+                #State := ST_ERROR;
+            ELSIF NOT #busyRaw THEN
+                IF #retValRaw = 0 THEN
+                    #State := ST_VERIFY;
+                ELSE
+                    #RetVal := #retValRaw;
+                    #ErrorPhase := 2;
+                    #State := ST_ERROR;
+                END_IF;
+            END_IF;
+
+        // =====================================================================
+        // VERIFY -- RET_VAL = 0 is NOT a pass. This is where the test earns its
+        // keep: checksum the whole array, work out which element the data
+        // actually is, and compare that against what was asked for.
+        // =====================================================================
+        ST_VERIFY:
+            #Elapsed := TIME_TCK() - #tStart;
+            #sum := 0.0;
+            IF #modeLatched = 1 THEN
+                FOR #i := 0 TO 999 DO
+                    #sum := #sum + "DB_IdxTestSelectedWhole".Prog.Lines[#i].X;
+                END_FOR;
+                #Chk_FirstLine := ABS("DB_IdxTestSelectedWhole".Prog.Lines[0].X
+                                      - (10000.0 * INT_TO_REAL(#RequestedIndex) + 1.0)) < TOL;
+                #Chk_MidLine   := ABS("DB_IdxTestSelectedWhole".Prog.Lines[499].X
+                                      - (10000.0 * INT_TO_REAL(#RequestedIndex) + 2.0)) < TOL;
+                #Chk_LastLine  := ABS("DB_IdxTestSelectedWhole".Prog.Lines[999].X
+                                      - (10000.0 * INT_TO_REAL(#RequestedIndex) + 3.0)) < TOL;
+                #Chk_Header    := "DB_IdxTestSelectedWhole".Prog.Header.ToolCount = #RequestedIndex
+                                  AND "DB_IdxTestSelectedWhole".Prog.Header.LineCount = 1000;
+            ELSE
+                FOR #i := 0 TO 999 DO
+                    #sum := #sum + "DB_IdxTestSelected".Lines[#i].X;
+                END_FOR;
+                #Chk_FirstLine := ABS("DB_IdxTestSelected".Lines[0].X
+                                      - (10000.0 * INT_TO_REAL(#RequestedIndex) + 1.0)) < TOL;
+                #Chk_MidLine   := ABS("DB_IdxTestSelected".Lines[499].X
+                                      - (10000.0 * INT_TO_REAL(#RequestedIndex) + 2.0)) < TOL;
+                #Chk_LastLine  := ABS("DB_IdxTestSelected".Lines[999].X
+                                      - (10000.0 * INT_TO_REAL(#RequestedIndex) + 3.0)) < TOL;
+                IF #modeLatched = 3 THEN
+                    // Only .Lines was transferred -- the header was never part of
+                    // the job. Forced TRUE so it cannot read as a check that ran.
+                    #Chk_Header := TRUE;
+                ELSE
+                    #Chk_Header := "DB_IdxTestSelected".Header.ToolCount = #RequestedIndex
+                                   AND "DB_IdxTestSelected".Header.LineCount = 1000;
+                END_IF;
+            END_IF;
+            #Checksum := #sum;
+
+            // WHICH element is this actually? Signature sums are 30000*k + 6.
+            #MatchedProgram := 0;
+            FOR #k := 1 TO 4 DO
+                #expSum := 30000.0 * INT_TO_REAL(#k) + 6.0;
+                IF ABS(#sum - #expSum) < TOL THEN
+                    #MatchedProgram := #k;
+                END_IF;
+            END_FOR;
+            #Chk_RightProgram := (#MatchedProgram = #RequestedIndex);
+
+            #TestPassed := #Chk_RightProgram AND #Chk_FirstLine AND #Chk_MidLine
+                           AND #Chk_LastLine AND #Chk_Header;
+
+            // --- the verdict, in words -----------------------------------------
+            IF #TestPassed THEN
+                #Result := CONCAT(IN1 := 'PASS - element ',
+                            IN2 := CONCAT(IN1 := INT_TO_STRING(#RequestedIndex),
+                            IN2 := ' arrived complete, all 1000 lines, right element'));
+            ELSIF #MatchedProgram <> 0 AND NOT #Chk_RightProgram THEN
+                // The dangerous one. RET_VAL was 0 and a full valid recipe landed
+                // -- just the WRONG one. This is why the test exists.
+                #Result := CONCAT(IN1 := 'FAIL INDEX IGNORED - asked ',
+                            IN2 := CONCAT(IN1 := INT_TO_STRING(#RequestedIndex),
+                            IN2 := CONCAT(IN1 := ' but got element ',
+                            IN2 := INT_TO_STRING(#MatchedProgram))));
+            ELSIF #Chk_FirstLine AND NOT #Chk_LastLine THEN
+                #Result := 'FAIL TRUNCATED - first line ok, line 999 missing. Per-call size cap';
+            ELSIF NOT #Chk_FirstLine AND #MatchedProgram = 0 THEN
+                #Result := 'FAIL EMPTY - RetVal 0 but nothing arrived. Silent no-op copy';
+            ELSIF NOT #Chk_Header THEN
+                #Result := 'FAIL HEADER - lines ok, header wrong or not copied';
+            ELSE
+                #Result := 'FAIL - see Chk_* flags and Checksum vs Checksum_Expected';
+            END_IF;
+
+            #Done := TRUE;
+            #State := ST_DONE;
+
+        ST_DONE:
+            IF #rtExecute AND #SelectIndex >= 1 AND #SelectIndex <= 4
+               AND #TestMode >= 1 AND #TestMode <= 3 THEN
+                #State := ST_LATCH;
+            END_IF;
+
+        ST_ERROR:
+            #ErrorFlag := TRUE;
+            #TestPassed := FALSE;
+            IF #RetVal = 16#FFFF THEN
+                #Result := CONCAT(IN1 := 'FAIL WATCHDOG - BUSY never cleared, phase ',
+                                  IN2 := INT_TO_STRING(#ErrorPhase));
+            ELSE
+                #Result := CONCAT(IN1 := 'FAIL RET_VAL ',
+                            IN2 := CONCAT(IN1 := INT_TO_STRING(#RetVal),
+                            IN2 := CONCAT(IN1 := ' at phase ',
+                            IN2 := INT_TO_STRING(#ErrorPhase))));
+            END_IF;
+            IF #rtExecute THEN
+                #State := ST_LATCH;
+            END_IF;
+    END_CASE;
+
+    // State is a VAR_OUTPUT and has been driven directly by the CASE above, so it
+    // is already the live value the watch table reads. Nothing to mirror here.
+    #Busy := #reqActive;
+END_FUNCTION_BLOCK
+
+// -----------------------------------------------------------------------------
+// Instance DB for FB_IdxTestLoader
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_IdxTestLoaderInst"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_IdxTestLoader"
+BEGIN
+END_DATA_BLOCK

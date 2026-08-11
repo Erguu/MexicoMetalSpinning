@@ -1,0 +1,75 @@
+// =============================================================================
+// Test_01_Types.scl -- INDEXED-container gate test, UDTs
+//
+// Throwaway gate-test project. DO NOT IMPORT INTO THE MACHINE PROJECT.
+// Every block name carries an "IdxTest" prefix so an accidental import cannot
+// overwrite a real UDT, DB or FB -- and so it cannot collide with the FIRST
+// gate test (loadmem_gatetest/, which uses a "Test" prefix).
+//
+// Question this project exists to answer, in one sentence:
+//   can READ_DBL select its source with a RUNTIME index -- SRCBLK :=
+//   "DB_Store".Programs[#i] -- so that FB_RecipeLoader stops needing one
+//   hand-written CASE branch per recipe slot?
+//
+// See README.md. Import order: this file FIRST, then Test_02, Test_03, Test_04.
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// IdxTestLine -- structural copy of "RecipeLine" (12 bytes, no padding)
+// Byte layout must stay identical to the real type; that is part of what is
+// under test.
+// -----------------------------------------------------------------------------
+TYPE "IdxTestLine"
+VERSION : 0.1
+    STRUCT
+        X : Real;       // 4 bytes
+        Z : Real;       // 4 bytes
+        F : Int;        // 2 bytes
+        CMD : Byte;     // 1 byte
+        Param : Byte;   // 1 byte
+    END_STRUCT;
+END_TYPE
+
+// -----------------------------------------------------------------------------
+// IdxTestHeader -- structural copy of "RecipeHeader"
+// -----------------------------------------------------------------------------
+TYPE "IdxTestHeader"
+VERSION : 0.1
+    STRUCT
+        sName : String[20];
+        LineCount : Int;
+        Valid : Bool;
+        PreScanned : Bool;
+        MinX : Real;
+        MaxX : Real;
+        MinZ : Real;
+        MaxZ : Real;
+        ProvidesToolConfig : Bool;
+        ToolCount : Int;
+        AutoCalcAngles : Bool;
+        ToolCode_List : Array[1..4] of Int;
+        ToolAngle_List : Array[1..4] of Real;
+    END_STRUCT;
+END_TYPE
+
+// -----------------------------------------------------------------------------
+// IdxTestProgram -- ONE recipe as a single nested type.
+//
+// This is the type that does not exist in the machine program today, and the
+// whole point of the test. Today each recipe is its own DB, which is why the
+// loader needs a CASE: the S7-1200 cannot pick a DB by number at runtime. If
+// recipes become ELEMENTS OF AN ARRAY inside one DB, the selection becomes an
+// array index -- something the CPU can compute -- provided READ_DBL accepts an
+// indexed sub-reference as its VARIANT source. That is gate A/B.
+//
+// Size: header (~48 B) + 1000 x 12 B = ~12 KB per element. Deliberately the
+// real production size: the first gate test already burned this project once by
+// proving a call form at 350 lines and assuming it at 1000 (ITEM-44).
+// -----------------------------------------------------------------------------
+TYPE "IdxTestProgram"
+VERSION : 0.1
+    STRUCT
+        Header : "IdxTestHeader";
+        Lines  : Array[0..999] of "IdxTestLine";
+    END_STRUCT;
+END_TYPE

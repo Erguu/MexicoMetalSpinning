@@ -44,7 +44,7 @@
 // │  DB_HMI.Btn_Continue       (Bool)        →PLC  Resume from pause        │
 // │  DB_HMI.Btn_AckError       (Bool)        →PLC  Acknowledge error + STOP │
 // │  DB_HMI.Btn_Reset          (Bool)        →PLC  Full reset + STOPPED     │
-// │  DB_HMI.ProductSelect      (Int, 1-5)    →PLC  Which program to run     │
+// │  DB_HMI.ProductSelect      (Int, 1-50)    →PLC  Which program to run     │
 // │  DB_HMI.FeedrateOverride   (Real, %)     →PLC  G1 speed multiplier      │
 // │  DB_HMI.RapidOverride      (Real, %)     →PLC  G0 speed multiplier      │
 // │  DB_HMI.SingleStepMode     (Bool)        →PLC  Line-by-line execution   │
@@ -363,7 +363,7 @@ BEGIN
     //    100% = normal speed, 50% = half speed, 200% = double speed
     //    HMI slider should be connected to this tag (recommend min 50, max 200)
     //  RapidOverride: Same logic for G0 rapid moves
-    //  ProductSelect: Which program is active at startup (1-5)
+    //  ProductSelect: Which program is active at startup (1-50)
     // =========================================================================
     "DB_HMI".FeedrateOverride := 100.0;   // % -- initial feed rate multiplier
     "DB_HMI".RapidOverride    := 100.0;   // % -- initial rapid rate multiplier

@@ -1,0 +1,58 @@
+Eje X: fallo en comando de movimiento
+Eje Z: fallo en comando de movimiento
+Eje X: fallo en referenciado
+Eje Z: fallo en referenciado
+Fallo en variador - revisar servo
+Eje herramienta: fallo de movimiento
+Eje herramienta: fallo de referenciado
+Tiempo de movimiento excedido - eje bloqueado
+Fallo de potencia variador X
+Fallo de potencia variador Z
+Tiempo de referenciado excedido - revisar sensor
+Tiempo de espera variador - revisar contactor/cableado
+Fallo de potencia variador herramienta
+Operador presiono PARO
+Bloqueo cabezal: tiempo de extension excedido - revisar cilindro/sensor
+Fallo TO eje X - revisar diagnostico TO
+Fallo TO eje Z - revisar diagnostico TO
+Fallo TO eje herramienta - revisar diagnostico TO
+Fallo TO husillo - revisar diagnostico TO
+X fuera de limite minimo
+X fuera de limite maximo
+Z fuera de limite minimo
+Z fuera de limite maximo
+Zona PNP: proximidad MIN Eje X
+Zona PNP: proximidad MAX Eje X
+Zona PNP: proximidad MIN Eje Z
+Zona PNP: proximidad MAX Eje Z
+Numero de herramienta invalido
+Numero de herramienta fuera de rango
+Tiempo de rotacion herramienta excedido
+Fallo al retraer a posicion de herramienta
+Fallo en rotacion de herramienta
+Tiempo de cambio herramienta excedido - revisar variador
+Receta: Comando invalido
+Receta: Error de analisis
+Receta: Programa vacio
+Receta: Conteo de lineas cero
+PreVerificacion: Trayectoria fuera de limites
+Receta: Avance invalido
+Receta: Tiempo de movimiento excedido
+Receta: Numero de herramienta invalido
+Error cilindro BackSupport - posicion no alcanzada
+Husillo: tiempo de velocidad excedido (10s)
+Husillo: tiempo de paro excedido (15s)
+Receta no cargada - revisar TotalLines
+Receta sin tabla de herramientas - regenerar en CAM
+Fallo al cargar la receta desde memoria de carga
+Datos de receta vacios/corruptos - falta marca de fin
+PARO DE EMERGENCIA ACTIVO!
+Puerta de seguridad abierta
+Variadores no listos
+Presion de aire baja
+Interlock de seguridad activo
+Discrepancia en contacto Paro de Emergencia!
+Husillo: fallo al encender
+Husillo: fallo al ejecutar comando
+Husillo: fallo al detener
+Husillo: velocidad no alcanzada

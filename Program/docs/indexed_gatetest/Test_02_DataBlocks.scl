@@ -1,0 +1,247 @@
+// =============================================================================
+// Test_02_DataBlocks.scl -- INDEXED-container gate test, data blocks
+//
+// Throwaway gate-test project. DO NOT IMPORT INTO THE MACHINE PROJECT.
+// Import order: Test_01 first, then this file, then Test_03, Test_04.
+//
+// =============================================================================
+// THE SIGNATURE SCHEME -- read this or the checksums mean nothing
+// =============================================================================
+// Each container element k gets three NON-ZERO lines and nothing else:
+//
+//     Lines[0]   .X := 10000*k + 1      first line   -> "something copied"
+//     Lines[499] .X := 10000*k + 2      middle line
+//     Lines[999] .X := 10000*k + 3      last line    -> "not truncated"
+//
+// Every other line stays 0.0, so the checksum over all 1000 X values is exactly
+//
+//     30000*k + 6      ->  k=1: 30006   k=2: 60006   k=3: 90006   k=4: 120006
+//
+// Those four values are far apart and cannot be confused, which is the entire
+// point: the checksum does not merely say "a copy happened", it says WHICH
+// ELEMENT arrived. The loader reports that as MatchedProgram.
+//
+// *** THAT IS THE FINDING THIS TEST EXISTS FOR. ***
+// The dangerous failure mode for an indexed source is not a refused transfer --
+// a non-zero RET_VAL is easy to see. It is an index that compiles, returns 0,
+// and quietly always reads element 1. On this machine that means spinning a part
+// from the wrong geometry with no error anywhere. So: ask for element 3, and
+// verify that element 3 -- not element 1 -- actually landed.
+//
+// Why only three lines per element instead of populating all 1000: fully
+// populating four 1000-line elements is 4000 assignment statements of generated
+// source. The sparse scheme costs 12 and still catches both failures that matter
+// (wrong element, truncated transfer). Its one blind spot: a transfer truncated
+// somewhere between byte 5988 (Lines[499]) and byte 11988 (Lines[999]) would
+// fail Chk_LastLine but the checksum could not say exactly where it stopped.
+// Chk_LastLine failing at all is enough to reject the call form.
+//
+// Sanity note: Real is a 32-bit float (~7 significant digits) and 997 of the
+// 1000 addends are exactly 0.0, so these sums are exact. No epsilon needed --
+// but the loader compares with a small tolerance anyway, because a float
+// equality test that happens to work is still a float equality test.
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// DB_IdxTestStore4 -- FOUR recipes in ONE load-memory DB. ~48 KB.
+//
+// This is the shape the production design would take if gate A or B passes:
+// recipes as array elements, selection as an index, ONE pair of READ_DBL calls
+// in the loader instead of one CASE branch per slot.
+//
+// UNLINKED before NON_RETAIN -- mandatory order, verified TIA V17 / 1214C
+// 2026-08-04. Reversed generates nothing; omitted fails SILENTLY by putting the
+// whole thing in work memory (which at 48 KB would not fit anyway, so on this
+// particular DB a missing UNLINKED would at least be loud for once).
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_IdxTestStore4"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+UNLINKED
+NON_RETAIN
+    VAR
+        Programs : Array[1..4] of "IdxTestProgram";
+    END_VAR
+BEGIN
+    // --- element 1: checksum 30006 ---
+    Programs[1].Header.sName := 'IDX_PROG_01';
+    Programs[1].Header.LineCount := 1000;
+    Programs[1].Header.Valid := TRUE;
+    Programs[1].Header.ProvidesToolConfig := TRUE;
+    Programs[1].Header.ToolCount := 1;
+    Programs[1].Lines[0].X := 10001.0;   Programs[1].Lines[0].Param := 1;
+    Programs[1].Lines[499].X := 10002.0; Programs[1].Lines[499].Param := 1;
+    Programs[1].Lines[999].X := 10003.0; Programs[1].Lines[999].Param := 1;
+    Programs[1].Lines[999].CMD := 99;    // END marker, as a real recipe has
+
+    // --- element 2: checksum 60006 ---
+    Programs[2].Header.sName := 'IDX_PROG_02';
+    Programs[2].Header.LineCount := 1000;
+    Programs[2].Header.Valid := TRUE;
+    Programs[2].Header.ProvidesToolConfig := TRUE;
+    Programs[2].Header.ToolCount := 2;
+    Programs[2].Lines[0].X := 20001.0;   Programs[2].Lines[0].Param := 2;
+    Programs[2].Lines[499].X := 20002.0; Programs[2].Lines[499].Param := 2;
+    Programs[2].Lines[999].X := 20003.0; Programs[2].Lines[999].Param := 2;
+    Programs[2].Lines[999].CMD := 99;
+
+    // --- element 3: checksum 90006 ---
+    // Use THIS one for the first test. It is neither the first element (which a
+    // broken index would return by default) nor the last (which an off-by-one
+    // might clamp to).
+    Programs[3].Header.sName := 'IDX_PROG_03';
+    Programs[3].Header.LineCount := 1000;
+    Programs[3].Header.Valid := TRUE;
+    Programs[3].Header.ProvidesToolConfig := TRUE;
+    Programs[3].Header.ToolCount := 3;
+    Programs[3].Lines[0].X := 30001.0;   Programs[3].Lines[0].Param := 3;
+    Programs[3].Lines[499].X := 30002.0; Programs[3].Lines[499].Param := 3;
+    Programs[3].Lines[999].X := 30003.0; Programs[3].Lines[999].Param := 3;
+    Programs[3].Lines[999].CMD := 99;
+
+    // --- element 4: checksum 120006 ---
+    Programs[4].Header.sName := 'IDX_PROG_04';
+    Programs[4].Header.LineCount := 1000;
+    Programs[4].Header.Valid := TRUE;
+    Programs[4].Header.ProvidesToolConfig := TRUE;
+    Programs[4].Header.ToolCount := 4;
+    Programs[4].Lines[0].X := 40001.0;   Programs[4].Lines[0].Param := 4;
+    Programs[4].Lines[499].X := 40002.0; Programs[4].Lines[499].Param := 4;
+    Programs[4].Lines[999].X := 40003.0; Programs[4].Lines[999].Param := 4;
+    Programs[4].Lines[999].CMD := 99;
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_IdxTestSelected -- the work-memory destination. ~12 KB.
+// Stands in for the real DB_SelectedRecipe. Declared as two members (not the
+// nested IdxTestProgram type) because that is exactly how DB_SelectedRecipe is
+// declared, and the two-transfer form addresses .Header and .Lines separately.
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_IdxTestSelected"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Header : "IdxTestHeader";
+        Lines  : Array[0..999] of "IdxTestLine";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_IdxTestSelectedWhole -- destination for the WHOLE-ELEMENT copy (gate A).
+//
+// Gate A copies an entire IdxTestProgram in one call, so the destination has to
+// be a single object of that type rather than two separate members.
+//
+// Expect this gate to be the SUSPECT one. The equivalent whole-object form is
+// what silently half-copied on the machine in ITEM-44: header arrived, the 12 KB
+// array did not, RET_VAL was 0, nothing complained. If gate A "passes" here,
+// check Chk_LastLine before believing it -- that is the flag that caught it last
+// time. Gate B (two transfers) is the form production should use regardless.
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_IdxTestSelectedWhole"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Prog : "IdxTestProgram";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// =============================================================================
+// GATE D -- how big can ONE load-memory DB actually be on this CPU?
+//
+// This decides how many recipes fit per container, and therefore whether the
+// indexed design removes the CASE entirely or only shrinks it. If a DB caps at
+// 64 KB then a container holds ~5 recipes and 50 slots means 10 containers --
+// still a CASE, but with 10 branches instead of 50.
+//
+// These are DECLARATION-ONLY probes: no data, no code touches them. The result
+// is whether they COMPILE and DOWNLOAD, not anything they compute.
+//
+// *** WORK THROUGH THEM ONE AT A TIME, LARGEST LAST. ***
+// If one fails to compile, comment it out, record the exact compiler message in
+// result.md, and continue with the smaller ones. A compile failure here is a
+// RESULT, not a mistake -- it is precisely the number this gate is measuring.
+// =============================================================================
+
+// ~72 KB -- crosses the suspected 64 KB per-DB line
+DATA_BLOCK "DB_IdxTestStore6"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+UNLINKED
+NON_RETAIN
+    VAR
+        Programs : Array[1..6] of "IdxTestProgram";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// ~240 KB -- the aggressive probe. If THIS compiles and downloads, one container
+// holds 20 recipes and 50 slots is three containers.
+DATA_BLOCK "DB_IdxTestStore20"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+UNLINKED
+NON_RETAIN
+    VAR
+        Programs : Array[1..20] of "IdxTestProgram";
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_IdxTestControl -- watch-table interface. Everything the tester touches.
+// Same idea as DB_TestControl in the first gate test: read Result first, then
+// the flags behind it.
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_IdxTestControl"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        // --- commands (set from the watch table) ---
+        Cmd_Load     : Bool;        // TRUE starts a transfer (self-clearing)
+        Cmd_Reset    : Bool;        // TRUE clears an error / aborts
+        SelectIndex  : Int := 3;    // WHICH element to fetch, 1..4. Defaults to 3
+                                    // on purpose -- see the note in Test_02 above.
+        TestMode     : Int := 2;    // 1 = gate A, whole element, runtime index
+                                    // 2 = gate B, .Header then .Lines, runtime index
+                                    // 3 = gate C, .Lines at a CONSTANT index (2)
+                                    // Defaults to 2: the form production would use.
+
+        // --- status ---
+        State        : Int;
+        Busy         : Bool;
+        Done         : Bool;
+        ErrorFlag    : Bool;
+        RetVal       : Int;         // READ_DBL RET_VAL, latched (16#FFFF = watchdog)
+        ErrorPhase   : Int;         // which transfer failed: 1 = Header, 2 = Lines
+        Elapsed      : Time;        // measured across BUSY
+        ScanCount    : Int;         // scans BUSY was TRUE (async -> expect > 1)
+
+        // --- verdict: READ THIS ONE FIRST ---
+        Result       : String[80];
+        TestPassed   : Bool;
+
+        // --- the detail behind the verdict ---
+        RequestedIndex : Int;       // what was asked for (latched at transfer start)
+        MatchedProgram : Int;       // which element the data actually IS (0 = none).
+                                    // *** THE FLAG THAT MATTERS. ***
+                                    // RequestedIndex <> MatchedProgram = the index
+                                    // is being ignored or mis-resolved. RET_VAL will
+                                    // be 0 and nothing else will look wrong.
+        Chk_RightProgram : Bool;    // MatchedProgram = RequestedIndex
+        Chk_FirstLine    : Bool;    // Lines[0] carries the right signature
+        Chk_MidLine      : Bool;    // Lines[499] ditto
+        Chk_LastLine     : Bool;    // Lines[999] ditto -> FALSE = TRUNCATED at 12 KB
+        Chk_Header       : Bool;    // Header.sName / ToolCount match the element
+                                    // (gate B and A only; forced TRUE in mode 3)
+
+        Checksum          : Real;   // measured sum of every Lines[].X
+        Checksum_Expected : Real;   // what the REQUESTED element should give
+    END_VAR
+BEGIN
+END_DATA_BLOCK

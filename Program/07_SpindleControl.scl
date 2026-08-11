@@ -292,7 +292,6 @@ BEGIN
                                      Details := "DB_Diagnostic".Error_Text,
                                      Source := 'Spindle');
                     "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
-                    "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
                     #state := 999;
                 END_IF;
             END_IF;

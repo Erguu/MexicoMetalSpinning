@@ -1,0 +1,60 @@
+// =============================================================================
+// Test_04_OB1.scl -- INDEXED-container gate test, cyclic entry point
+//
+// Throwaway gate-test project. DO NOT IMPORT INTO THE MACHINE PROJECT.
+// Import order: Test_01, Test_02, Test_03, then this file.
+//
+// Everything the tester touches lives in DB_IdxTestControl. Put that DB in a
+// watch table and drive the test from there -- see README.md.
+// =============================================================================
+ORGANIZATION_BLOCK "Main"
+TITLE = "Indexed-container gate test -- main sweep"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+    VAR_TEMP
+        dummy : Bool;
+    END_VAR
+BEGIN
+    // -------------------------------------------------------------------------
+    // SelectIndex and TestMode are passed LIVE every scan on purpose: test 5 in
+    // the README changes the selection mid-transfer, and it must be the FB's own
+    // latch that protects the transfer -- not the caller happening to hold the
+    // value still. This is the same property FB_RecipeLoader relies on, and the
+    // one whose absence would splice the front of one recipe onto the tail of
+    // another with RET_VAL = 0.
+    // -------------------------------------------------------------------------
+    "DB_IdxTestLoaderInst"(Execute     := "DB_IdxTestControl".Cmd_Load,
+                           Reset       := "DB_IdxTestControl".Cmd_Reset,
+                           SelectIndex := "DB_IdxTestControl".SelectIndex,
+                           TestMode    := "DB_IdxTestControl".TestMode);
+
+    // Commands are one-shots as far as the watch table is concerned: the FB has
+    // already seen this scan's value, so clear them here.
+    "DB_IdxTestControl".Cmd_Load  := FALSE;
+    "DB_IdxTestControl".Cmd_Reset := FALSE;
+
+    // -------------------------------------------------------------------------
+    // Status mirror -- everything the watch table reads
+    // -------------------------------------------------------------------------
+    "DB_IdxTestControl".State      := "DB_IdxTestLoaderInst".State;
+    "DB_IdxTestControl".Busy       := "DB_IdxTestLoaderInst".Busy;
+    "DB_IdxTestControl".Done       := "DB_IdxTestLoaderInst".Done;
+    "DB_IdxTestControl".ErrorFlag  := "DB_IdxTestLoaderInst".ErrorFlag;
+    "DB_IdxTestControl".RetVal     := "DB_IdxTestLoaderInst".RetVal;
+    "DB_IdxTestControl".ErrorPhase := "DB_IdxTestLoaderInst".ErrorPhase;
+    "DB_IdxTestControl".Elapsed    := "DB_IdxTestLoaderInst".Elapsed;
+    "DB_IdxTestControl".ScanCount  := "DB_IdxTestLoaderInst".ScanCount;
+    "DB_IdxTestControl".Result     := "DB_IdxTestLoaderInst".Result;
+    "DB_IdxTestControl".TestPassed := "DB_IdxTestLoaderInst".TestPassed;
+
+    "DB_IdxTestControl".RequestedIndex   := "DB_IdxTestLoaderInst".RequestedIndex;
+    "DB_IdxTestControl".MatchedProgram   := "DB_IdxTestLoaderInst".MatchedProgram;
+    "DB_IdxTestControl".Chk_RightProgram := "DB_IdxTestLoaderInst".Chk_RightProgram;
+    "DB_IdxTestControl".Chk_FirstLine    := "DB_IdxTestLoaderInst".Chk_FirstLine;
+    "DB_IdxTestControl".Chk_MidLine      := "DB_IdxTestLoaderInst".Chk_MidLine;
+    "DB_IdxTestControl".Chk_LastLine     := "DB_IdxTestLoaderInst".Chk_LastLine;
+    "DB_IdxTestControl".Chk_Header       := "DB_IdxTestLoaderInst".Chk_Header;
+
+    "DB_IdxTestControl".Checksum          := "DB_IdxTestLoaderInst".Checksum;
+    "DB_IdxTestControl".Checksum_Expected := "DB_IdxTestLoaderInst".Checksum_Expected;
+END_ORGANIZATION_BLOCK

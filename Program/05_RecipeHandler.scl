@@ -7,14 +7,14 @@
 // -----------------------------------------------------------------------------
 // FB_RecipeLoader - Copy the selected recipe from LOAD memory into work memory
 // DOC:
-//  purpose: DB_RecipeProgram1..10 live in load memory (UNLINKED) and cannot be
+//  purpose: DB_RecipeProgram1..PROGRAM_COUNT live in load memory (UNLINKED) and cannot be
 //           read by the program directly. This FB copies the selected one into
 //           "DB_SelectedRecipe" using TWO sequential READ_DBL sub-reference
 //           transfers -- .Header first, then .Lines. Never the whole-DB form;
 //           see "TWO TRANSFERS, NOT ONE" below for what that cost on the machine.
 //           Runs once per cycle start, in STATE_RECIPE_LOAD(11), before the
 //           pre-scan -- the machine is stationary and nothing else is pending.
-//  inputs:  Execute (rising edge), ProgramNo (1..10), Reset (level)
+//  inputs:  Execute (rising edge), ProgramNo (1..PROGRAM_COUNT), Reset (level)
 //  outputs: Done, Busy, Error + ErrorCode, LoadedProgram
 //  design:  Program/docs/LOADMEM_COPY_ON_SELECT.md  (gate-tested 2026-08-04)
 //
@@ -57,7 +57,7 @@ FUNCTION_BLOCK "FB_RecipeLoader"
 VERSION : 0.1
     VAR_INPUT
         Execute   : Bool;           // Rising edge starts the copy
-        ProgramNo : Int;            // 1..10 -- which recipe to load
+        ProgramNo : Int;            // 1..PROGRAM_COUNT -- which recipe to load
         Reset     : Bool;           // Level: abort, clear error, invalidate buffer
     END_VAR
     VAR_OUTPUT
@@ -95,7 +95,9 @@ VERSION : 0.1
         ST_WAIT_LINES : Int := 50;
         ST_DONE       : Int := 60;
         ST_ERROR      : Int := 90;
-        PROGRAM_COUNT : Int := 10;  // Must match the DB_RecipeProgram* count below
+        // <<< GENERATED:PROGRAM_COUNT -- do not hand-edit; run tools/gen_recipe_slots.py >>>
+        PROGRAM_COUNT : Int := 50;  // Slot count. Generated -- must match the DB_RecipeProgram* count.
+        // <<< END GENERATED:PROGRAM_COUNT >>>
     END_CONST
 BEGIN
     // -------------------------------------------------------------------------
@@ -131,6 +133,7 @@ BEGIN
     // Both are the call forms the gate test passed; see the header note for why
     // the original single whole-DB call was wrong.
     // -------------------------------------------------------------------------
+    // <<< GENERATED:LOADER_CASE -- do not hand-edit; run tools/gen_recipe_slots.py >>>
     CASE #selLatched OF
         1:  IF #phaseLines THEN
                 #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines,
@@ -202,7 +205,288 @@ BEGIN
                 #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Header,
                                        BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
             END_IF;
+        11: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram11".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram11".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        12: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram12".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram12".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        13: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram13".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram13".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        14: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram14".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram14".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        15: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram15".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram15".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        16: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram16".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram16".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        17: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram17".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram17".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        18: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram18".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram18".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        19: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram19".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram19".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        20: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram20".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram20".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        21: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram21".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram21".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        22: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram22".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram22".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        23: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram23".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram23".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        24: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram24".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram24".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        25: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram25".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram25".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        26: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram26".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram26".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        27: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram27".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram27".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        28: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram28".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram28".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        29: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram29".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram29".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        30: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram30".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram30".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        31: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram31".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram31".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        32: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram32".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram32".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        33: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram33".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram33".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        34: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram34".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram34".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        35: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram35".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram35".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        36: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram36".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram36".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        37: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram37".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram37".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        38: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram38".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram38".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        39: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram39".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram39".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        40: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram40".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram40".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        41: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram41".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram41".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        42: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram42".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram42".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        43: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram43".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram43".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        44: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram44".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram44".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        45: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram45".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram45".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        46: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram46".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram46".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        47: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram47".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram47".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        48: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram48".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram48".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        49: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram49".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram49".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
+        50: IF #phaseLines THEN
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram50".Lines,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);
+            ELSE
+                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram50".Header,
+                                       BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+            END_IF;
     END_CASE;
+    // <<< END GENERATED:LOADER_CASE >>>
 
     // -------------------------------------------------------------------------
     // Hang watchdog -- only runs while a transfer is in flight
@@ -659,7 +943,11 @@ VERSION : 0.1
         CMD_SPINDLE_OFF : Byte := 21;
         CMD_DWELL : Byte := 30;
         CMD_CYLINDER_GOTO : Byte := 40;     // BackSupport full extend (PositioningMode=0 on this machine; Param ignored)
-        CMD_ATMO          : Byte := 41;     // BackSupport atmosphere: Param=1 → Sol_B+SolAtmo ON; Param=2 → SolAtmo OFF; Param=3 → release both
+        CMD_ATMO          : Byte := 41;     // BackSupport atmosphere. Param=1 → SolAtmo ON, Sol_A stays ON;
+                                            // Param=2 → SolAtmo OFF + Cmd_Retract (Sol_A off, Sol_B on);
+                                            // Param=3 → release retract, all coils off.
+                                            // (The old "Sol_B+SolAtmo ON" at P1 was the SolB_Cmd41
+                                            //  override, deleted 2026-08-07 -- see ITEM-41.)
         CMD_END : Byte := 99;
 
         // Recipe format: RecipeLine.Param encodes spindle speed as RPM ÷ 10.
@@ -816,9 +1104,6 @@ BEGIN
                             "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Tool code ', IN2 := CONCAT(
                                                        IN1 := INT_TO_STRING(#tmpToolCode),
                                                        IN2 := ' not mapped. Open Tool Setup, enter slot code & Apply.'));
-                            "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Codigo herramienta ', IN2 := CONCAT(
-                                                       IN1 := INT_TO_STRING(#tmpToolCode),
-                                                       IN2 := ' sin asignar. Ir a Config. Herramienta y Aplicar.'));
                             #state := STATE_ERROR;
                         ELSE
                             // Mapping found -> request tool change for mapped slot
@@ -991,9 +1276,6 @@ BEGIN
                         "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
                                                    IN1 := INT_TO_STRING(#lineIndex), IN2 := CONCAT(
                                                    IN1 := ' TO:', IN2 := "DB_Diagnostic".TO_ErrorText)));
-                        "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
-                                                   IN1 := INT_TO_STRING(#lineIndex), IN2 := CONCAT(
-                                                   IN1 := ' TO:', IN2 := "DB_Diagnostic".TO_ErrorText)));
                     ELSE
                         #ErrorID := 16#0002;
                         "DB_Diagnostic".MoveZ_ErrorID := #fbMoveZ.ErrorID;
@@ -1001,9 +1283,6 @@ BEGIN
                         "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Z Move Failed: ', IN2 := "DB_Diagnostic".TO_ErrorText);
                         // Single-writer: ErrorText from FB_AlarmManager (FB_Process forwards #ErrorID)
                         "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
-                                                   IN1 := INT_TO_STRING(#lineIndex), IN2 := CONCAT(
-                                                   IN1 := ' TO:', IN2 := "DB_Diagnostic".TO_ErrorText)));
-                        "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
                                                    IN1 := INT_TO_STRING(#lineIndex), IN2 := CONCAT(
                                                    IN1 := ' TO:', IN2 := "DB_Diagnostic".TO_ErrorText)));
                     END_IF;
@@ -1021,20 +1300,14 @@ BEGIN
                         "DB_Diagnostic".Error_Text := 'Motion Timeout: X+Z axes';
                         "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'X+Z Ln:', IN2 := CONCAT(
                                                   IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (30s limit)'));
-                        "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'X+Z Ln:', IN2 := CONCAT(
-                                                  IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (limite 30s)'));
                     ELSIF #bMoveX THEN
                         "DB_Diagnostic".Error_Text := 'Motion Timeout: X axis';
                         "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'X axis Ln:', IN2 := CONCAT(
                                                   IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (30s limit)'));
-                        "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Eje X Ln:', IN2 := CONCAT(
-                                                  IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (limite 30s)'));
                     ELSE
                         "DB_Diagnostic".Error_Text := 'Motion Timeout: Z axis';
                         "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Z axis Ln:', IN2 := CONCAT(
                                                   IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (30s limit)'));
-                        "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Eje Z Ln:', IN2 := CONCAT(
-                                                  IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (limite 30s)'));
                     END_IF;
                     #state := STATE_ERROR;
                 END_IF;
@@ -1104,8 +1377,6 @@ BEGIN
                 // Single-writer: ErrorText from FB_AlarmManager (FB_Process forwards #ErrorID)
                 "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
                                           IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (10s limit)'));
-                "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
-                                          IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (limite 10s)'));
                 #state := STATE_ERROR;
             ELSIF #Pause THEN
                 #tonAtSpeed(IN := FALSE, PT := "DB_MachineConfig".Timeout_SpindleAtSpeed);
@@ -1157,8 +1428,6 @@ BEGIN
                 // Single-writer: ErrorText from FB_AlarmManager (FB_Process forwards #ErrorID)
                 "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
                                           IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (15s limit)'));
-                "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
-                                          IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (limite 15s)'));
                 #state := STATE_ERROR;
             ELSIF #Pause THEN
                 #tonAtSpeed(IN := FALSE, PT := "DB_MachineConfig".Timeout_SpindleStop);
@@ -1210,8 +1479,6 @@ BEGIN
                 // Single-writer: ErrorText from FB_AlarmManager (FB_Process forwards #ErrorID)
                 "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
                                           IN1 := INT_TO_STRING(#lineIndex), IN2 := ' target not reached'));
-                "DB_HMI".ErrorDetail_ES := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
-                                          IN1 := INT_TO_STRING(#lineIndex), IN2 := ' objetivo no alcanzado'));
                 #state := STATE_ERROR;
             END_IF;
 

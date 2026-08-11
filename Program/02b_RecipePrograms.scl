@@ -1,26 +1,33 @@
 // =============================================================================
 // 02b_RecipePrograms.scl
-// Recipe program data blocks (DB_RecipeProgram1..10)
+// Recipe program data blocks (DB_RecipeProgram1..50)
+//
+// *** GENERATED FILE -- do not hand-edit. ***
+// Produced by tools/gen_recipe_slots.py --slots 50
+// To change the slot count, run that script; do not add declarations by hand.
+//
 // Kept separate from 02_DataBlocks.scl so real recipe data is not overwritten
 // when 02_DataBlocks.scl is regenerated.
 // Depends on: 01_DataTypes.scl (RecipeHeader, RecipeLine UDTs)
 //
-// *** DO NOT REGENERATE THIS FILE AFTER CAM RECIPES HAVE BEEN IMPORTED ***
+// *** IMPORTING THIS FILE INTO TIA WIPES ALL RECIPE DATA ***
 // (warning added 2026-08-06, field commissioning)
 // The BEGIN blocks below are EMPTY -- these declarations exist only so the
 // project compiles before any CAM file arrives. The real recipe data lives in
 // the CAM-generated files (gcodes/DB_RecipeProgramN.scl), which declare the
-// SAME block names and overwrite these when imported. Generating blocks from
-// THIS file after a CAM import therefore replaces every recipe with all-zero
-// data -- and because the DBs are UNLINKED (load memory only, not monitorable
-// online), the wipe is invisible until a cycle start copies zeros into
-// DB_SelectedRecipe. Pre-scan now catches that as 16#0313 (missing END marker),
-// but the recipes are still gone: re-import the gcodes files to restore them.
-// Import order when starting from scratch: 02b first (structure), CAM files
-// after (data). Never the other way, never 02b again afterwards.
+// SAME block names and overwrite these when imported. Importing THIS file after
+// a CAM import therefore replaces every recipe with all-zero data -- and because
+// the DBs are UNLINKED (load memory only, not monitorable online), the wipe is
+// invisible until a cycle start copies zeros into DB_SelectedRecipe. Pre-scan
+// catches that as 16#0313 (missing END marker), but the recipes are still gone.
+//
+// So the import order is not optional:
+//     1. this file        (structure)
+//     2. EVERY gcodes/DB_RecipeProgramN.scl   (data)
+// Never step 1 without step 2.
 //
 // =============================================================================
-// LOAD-MEMORY RECIPES (2026-08-04) -- read this before editing or regenerating
+// LOAD-MEMORY RECIPES (2026-08-04) -- read this before editing the generator
 // =============================================================================
 // These DBs live in LOAD MEMORY ONLY. They cost zero work memory. FB_Process
 // copies the selected one into "DB_SelectedRecipe" (work memory) with READ_DBL
@@ -42,7 +49,7 @@
 //      *** OMITTING UNLINKED FAILS SILENTLY. ***
 //      The recipe then sits in work memory, READ_DBL still succeeds (it reads
 //      the DB's start values either way), every test still passes, and the
-//      only symptom is that ~4-12 KB of work memory per recipe is quietly
+//      only symptom is that ~12 KB of work memory per recipe is quietly
 //      consumed again. It will not surface until the CPU runs out. Wrong
 //      ORDER is loud (nothing generates); a MISSING line is silent.
 //
@@ -53,7 +60,26 @@
 // the quickest proof the attribute took effect. To inspect recipe data, run a
 // cycle and look at DB_SelectedRecipe instead.
 //
-// Load memory cost: 10 x ~12 KB = ~120 KB of the 1214C's 4 MB. Not a concern.
+// Slot count does NOT affect scan time: FB_RecipeLoader's CASE executes exactly
+// one branch per scan regardless of how many slots exist, and unselected recipes
+// are never touched.
+//
+// It DOES cost work memory, which is the constraint that bites. These DBs are free
+// (UNLINKED, load memory), but the loader CASE is two READ_DBL call sites per slot
+// and on the S7-1200 compiled code lives in the same 100 KB work memory as the DB
+// data. 50 slots compiled to 101% on 2026-08-10 and would not download.
+//
+// *** THE COUNT HERE MAY DELIBERATELY EXCEED THE LOADER'S COUNT. ***
+// FB_RecipeLoader's PROGRAM_COUNT and the activeProgram clamp may be LOWER than
+// the number of DATA_BLOCKs below, while the work-memory budget is being tuned
+// with gen_recipe_slots.py --loader-only. Surplus declarations are harmless: they
+// cost load memory (plenty spare) and the clamp makes them unreachable. The
+// LOADER's count is the number of slots an operator can actually select -- not the
+// number of DATA_BLOCKs in this file. The generator refuses to shrink this file
+// without --shrink-02b, because importing a shrunk 02b wipes recipe data as well
+// as removing declarations.
+//
+// Load memory cost: 50 x ~12 KB = ~0.57 MB of the 1214C's 4 MB.
 // =============================================================================
 
 // -----------------------------------------------------------------------------
@@ -80,8 +106,8 @@ VERSION : 0.2
 UNLINKED
 NON_RETAIN
     VAR
-        Header : "RecipeHeader";
-        Lines  : Array[0..999] of "RecipeLine";
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
     END_VAR
 BEGIN
 END_DATA_BLOCK
@@ -95,8 +121,8 @@ VERSION : 0.2
 UNLINKED
 NON_RETAIN
     VAR
-        Header : "RecipeHeader";
-        Lines  : Array[0..999] of "RecipeLine";
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
     END_VAR
 BEGIN
 END_DATA_BLOCK
@@ -110,8 +136,8 @@ VERSION : 0.2
 UNLINKED
 NON_RETAIN
     VAR
-        Header : "RecipeHeader";
-        Lines  : Array[0..999] of "RecipeLine";
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
     END_VAR
 BEGIN
 END_DATA_BLOCK
@@ -125,14 +151,14 @@ VERSION : 0.2
 UNLINKED
 NON_RETAIN
     VAR
-        Header : "RecipeHeader";
-        Lines  : Array[0..999] of "RecipeLine";
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
     END_VAR
 BEGIN
 END_DATA_BLOCK
 
 // -----------------------------------------------------------------------------
-// DB_RecipeProgram6 - Recipe data for Program 6   (new 2026-08-04)
+// DB_RecipeProgram6 - Recipe data for Program 6
 // -----------------------------------------------------------------------------
 DATA_BLOCK "DB_RecipeProgram6"
 { S7_Optimized_Access := 'FALSE' }
@@ -140,14 +166,14 @@ VERSION : 0.2
 UNLINKED
 NON_RETAIN
     VAR
-        Header : "RecipeHeader";
-        Lines  : Array[0..999] of "RecipeLine";
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
     END_VAR
 BEGIN
 END_DATA_BLOCK
 
 // -----------------------------------------------------------------------------
-// DB_RecipeProgram7 - Recipe data for Program 7   (new 2026-08-04)
+// DB_RecipeProgram7 - Recipe data for Program 7
 // -----------------------------------------------------------------------------
 DATA_BLOCK "DB_RecipeProgram7"
 { S7_Optimized_Access := 'FALSE' }
@@ -155,14 +181,14 @@ VERSION : 0.2
 UNLINKED
 NON_RETAIN
     VAR
-        Header : "RecipeHeader";
-        Lines  : Array[0..999] of "RecipeLine";
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
     END_VAR
 BEGIN
 END_DATA_BLOCK
 
 // -----------------------------------------------------------------------------
-// DB_RecipeProgram8 - Recipe data for Program 8   (new 2026-08-04)
+// DB_RecipeProgram8 - Recipe data for Program 8
 // -----------------------------------------------------------------------------
 DATA_BLOCK "DB_RecipeProgram8"
 { S7_Optimized_Access := 'FALSE' }
@@ -170,14 +196,14 @@ VERSION : 0.2
 UNLINKED
 NON_RETAIN
     VAR
-        Header : "RecipeHeader";
-        Lines  : Array[0..999] of "RecipeLine";
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
     END_VAR
 BEGIN
 END_DATA_BLOCK
 
 // -----------------------------------------------------------------------------
-// DB_RecipeProgram9 - Recipe data for Program 9   (new 2026-08-04)
+// DB_RecipeProgram9 - Recipe data for Program 9
 // -----------------------------------------------------------------------------
 DATA_BLOCK "DB_RecipeProgram9"
 { S7_Optimized_Access := 'FALSE' }
@@ -185,14 +211,14 @@ VERSION : 0.2
 UNLINKED
 NON_RETAIN
     VAR
-        Header : "RecipeHeader";
-        Lines  : Array[0..999] of "RecipeLine";
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
     END_VAR
 BEGIN
 END_DATA_BLOCK
 
 // -----------------------------------------------------------------------------
-// DB_RecipeProgram10 - Recipe data for Program 10  (new 2026-08-04)
+// DB_RecipeProgram10 - Recipe data for Program 10
 // -----------------------------------------------------------------------------
 DATA_BLOCK "DB_RecipeProgram10"
 { S7_Optimized_Access := 'FALSE' }
@@ -200,8 +226,608 @@ VERSION : 0.2
 UNLINKED
 NON_RETAIN
     VAR
-        Header : "RecipeHeader";
-        Lines  : Array[0..999] of "RecipeLine";
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram11 - Recipe data for Program 11
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram11"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram12 - Recipe data for Program 12
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram12"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram13 - Recipe data for Program 13
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram13"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram14 - Recipe data for Program 14
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram14"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram15 - Recipe data for Program 15
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram15"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram16 - Recipe data for Program 16
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram16"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram17 - Recipe data for Program 17
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram17"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram18 - Recipe data for Program 18
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram18"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram19 - Recipe data for Program 19
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram19"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram20 - Recipe data for Program 20
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram20"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram21 - Recipe data for Program 21
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram21"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram22 - Recipe data for Program 22
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram22"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram23 - Recipe data for Program 23
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram23"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram24 - Recipe data for Program 24
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram24"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram25 - Recipe data for Program 25
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram25"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram26 - Recipe data for Program 26
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram26"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram27 - Recipe data for Program 27
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram27"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram28 - Recipe data for Program 28
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram28"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram29 - Recipe data for Program 29
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram29"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram30 - Recipe data for Program 30
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram30"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram31 - Recipe data for Program 31
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram31"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram32 - Recipe data for Program 32
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram32"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram33 - Recipe data for Program 33
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram33"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram34 - Recipe data for Program 34
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram34"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram35 - Recipe data for Program 35
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram35"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram36 - Recipe data for Program 36
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram36"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram37 - Recipe data for Program 37
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram37"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram38 - Recipe data for Program 38
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram38"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram39 - Recipe data for Program 39
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram39"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram40 - Recipe data for Program 40
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram40"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram41 - Recipe data for Program 41
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram41"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram42 - Recipe data for Program 42
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram42"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram43 - Recipe data for Program 43
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram43"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram44 - Recipe data for Program 44
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram44"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram45 - Recipe data for Program 45
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram45"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram46 - Recipe data for Program 46
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram46"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram47 - Recipe data for Program 47
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram47"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram48 - Recipe data for Program 48
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram48"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram49 - Recipe data for Program 49
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram49"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram50 - Recipe data for Program 50
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram50"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines  : Array[0..999] of "RecipeLine"; // 1000 lines max
     END_VAR
 BEGIN
 END_DATA_BLOCK

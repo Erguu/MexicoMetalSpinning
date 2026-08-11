@@ -34,20 +34,45 @@ NON_RETAIN
         // ===========================================================
         // MODE SELECTION (Input)
         // ===========================================================
-        ProductSelect : Int := 1;           // Recipe selector (1-10) -- 10 programs since 2026-08-04
+        ProductSelect : Int := 1;           // Recipe selector (1-50) -- 50 slots since 2026-08-10 (was 10)
         FeedrateOverride : Real := 100.0;   // Speed % for G1 moves (50-200, 100=normal)
         RapidOverride : Real := 100.0;      // Speed % for G0 rapid moves (50-200)
         SingleStepMode : Bool := FALSE;     // TRUE = stop after each line, wait for StepNext
         StepNext : Bool := FALSE;           // Pulse to advance one step in SingleStepMode
         
-        // Program names and validity -- PLC does NOT write to these tags.
-        // Written by CAM post-processor or HMI operator.
-        // Can be read for displaying the program list on HMI.
-        // Extended 1..5 -> 1..10 on 2026-08-04 with the load-memory recipe change.
-        // HMI ACTION REQUIRED: the HMI project must be updated to match, or entries
-        // 6..10 will be unnamed and unselectable from the program list screen.
-        ProgramNames : Array[1..10] of String[20];  // Operator-defined program names
-        ProgramValid : Array[1..10] of Bool;        // Is program loaded? (written by HMI/CAM)
+        // Program names and validity.
+        //
+        // *** DELIBERATELY NOT EXTENDED TO 50 (2026-08-10). Read before touching. ***
+        // Verified 2026-08-10: NOTHING in this project writes or reads either array --
+        // not the PLC, and not the CAM post-processor (grep gcodes/ for ProgramNames:
+        // no hits). They have been declared-and-unused since 1..5. At 50 slots they would
+        // cost ~1.1 KB of the 100 KB work memory to stay just as unused, on a CPU that ran
+        // out of work memory on 2026-07-31.
+        //
+        // The name problem is solved two other ways instead:
+        //   - WHICH program is loaded now: DB_HMI.LoadedProgramName, a continuous mirror of
+        //     DB_SelectedRecipe.Header.sName. One String[20] regardless of slot count.
+        //   - BROWSING all 50 names before selection: a WinCC text list keyed off
+        //     ProductSelect. Zero PLC bytes, and operator-editable on the HMI, which is what
+        //     "operator-defined names" wanted in the first place.
+        //
+        // Kept at 1..10 rather than deleted because the WinCC project may write them and it
+        // is not visible from here -- deleting would silently break an HMI tag connection.
+        // If the HMI does not use them either, they are ~230 B of reclaimable work memory.
+        ProgramNames : Array[1..10] of String[20];  // UNUSED -- see note above
+        ProgramValid : Array[1..10] of Bool;        // UNUSED -- see note above
+
+        // Name of the recipe currently in DB_SelectedRecipe (2026-08-10). PLC-written,
+        // read-only for the HMI. Continuous mirror of DB_SelectedRecipe.Header.sName,
+        // written at the bottom of FB_Process next to the DB_Diagnostic mirrors -- so it
+        // appears in no reset path by design (nothing to clear; it always reports the
+        // buffer's true content, blank when the buffer is poisoned or a load failed).
+        // 22 bytes, flat regardless of slot count. Display it beside ProductSelect so the
+        // operator sees WHICH program is about to run, not just a slot number out of 50.
+        // NOTE: CAM currently emits the same generic sName ('SpinningCam Program') for
+        // every program -- ask SpinningCam for a distinct name per program or this reads
+        // identically for all 50 slots.
+        LoadedProgramName : String[20];
         
         // Tool slot codes editable from HMI. Enter external codes like 101, 406 etc.
         // These are copied to DB_ToolConfig.ToolCode_List when operator presses Apply.
@@ -101,19 +126,28 @@ NON_RETAIN
         // WARNING DISPLAY (Output)
         // ===========================================================
         HasWarning : Bool;          // TRUE when a non-blocking warning is active (E-Stop bypass or sheet insert prompt)
+        // Key for the HMI's warning text list (ITEM-55). Written every scan next to
+        // WarningText, so it needs no reset-path entry: the ELSE branch of the warning
+        // block drives it to 0 unconditionally. 0 must stay "no warning".
+        //   1 = E-Stop bypass ON - auto start blocked
+        //   2 = Insert sheet, then press both start buttons
+        WarningID : Int;
         WarningText : String[70];   // Warning message text -- English (E-Stop bypass or operator prompts only)
         ResumeLine : Int := -1;     // Saved recipe line for warm restart (-1 = none). Set in STATE_ERROR, cleared on Btn_Restart.
 
         // ===========================================================
-        // SPANISH TEXT MIRRORS (Output) -- for Mexican operator HMI
-        // PLC writes these every scan alongside the English equivalents.
-        // Connect to a second-language screen or a language-toggle switch.
+        // SPANISH TEXT MIRRORS -- REMOVED 2026-08-10 (ITEM-55, stage 1).
+        // StatusMsg_ES / ErrorText_ES / ErrorDetail_ES / WarningText_ES are gone,
+        // along with the 161 PLC assignments that filled them (~4.9 KB of string
+        // literals plus the copy code, on a CPU that hit 101% work memory).
+        // Spanish now comes from WinCC text lists keyed off tags the PLC already
+        // writes: ErrorID, MachineState, DB_Manual.MDI_Status, and WarningID.
+        // The wording was extracted to tools/hmi_texts.csv BEFORE deletion -- use
+        // that to populate the text lists; do not retype or re-translate.
+        // Do NOT re-add per-language string fields here: each new language then
+        // costs work memory again, which is exactly what this removed.
         // ===========================================================
-        StatusMsg_ES    : String[50];   // Estado actual (Español)
-        ErrorText_ES    : String[100];   // Descripcion de error (Español)
-        ErrorDetail_ES  : String[120];   // Detalle adicional (Español)
-        WarningText_ES  : String[80];   // Advertencia (Español)
-        
+
         // ===========================================================
         // BYPASS SWITCHES (for testing) - Version_GCODE compatible
         // ⚠️ All bypasses reset to FALSE on restart (FC_LoadConfig).
@@ -488,7 +522,7 @@ NON_RETAIN
         // =========================================================
         // RECIPE HANDLER STATE
         // =========================================================
-        Recipe_CurrentProgram : Int;    // Active program number (1-10)
+        Recipe_CurrentProgram : Int;    // Active program number (1-50)
         // Which recipe is actually sitting in DB_SelectedRecipe (0 = none/invalid).
         // Written by STATE_RECIPE_LOAD(11) after a successful READ_DBL copy.
         // Diagnostic value: if this disagrees with Recipe_CurrentProgram, the
@@ -666,9 +700,18 @@ NON_RETAIN
         MDI_Cmd             : Int;          // Command number to execute (40, 41, ...)
         MDI_Param           : Int;          // Command parameter (meaning depends on MDI_Cmd)
         Btn_MDI_Execute     : Bool;         // Rising edge: execute MDI_Cmd once
-        MDI_Status          : Int;          // 0=idle, 1=accepted/done, 2=unknown CMD, 3=invalid Param, 4=cylinder error
+        // MDI_Status doubles as the key for the HMI's MDI text list (ITEM-55), so every
+        // distinct message needs its OWN value -- 5 and 6 exist only because 1 and 3
+        // each used to carry two different messages, which a text list would collapse.
+        // 0=idle  1=Executed  2=unknown/blocked CMD  3=CMD40 bad Param
+        // 4=CMD40 cylinder error  5=CMD40 done  6=CMD41 bad Param
+        MDI_Status          : Int;
         MDI_StatusText      : String[24];   // Result text (EN)
-        MDI_StatusText_ES   : String[28];   // Result text (ES)
+        // MDI_StatusText_ES removed 2026-08-10 (ITEM-55) -- Spanish comes from a
+        // WinCC text list keyed off MDI_Status. NOTE: MDI_Status is not yet unique --
+        // values 1 and 3 each carry two different messages, so two new values must be
+        // assigned before the text list can distinguish them. See tools/hmi_texts.csv
+        // (rows marked COLLISION).
 
         // Selected cylinder status (PLC → HMI)
         SelCyl_Name         : String[20];   // "Cylinder 1" etc.
@@ -1068,7 +1111,7 @@ END_DATA_BLOCK
 // DB_SelectedRecipe - the ONE recipe buffer the machine actually runs from
 //                     (load-memory recipes, 2026-08-04)
 //
-// DB_RecipeProgram1..10 live in LOAD memory (UNLINKED) and cost no work memory.
+// DB_RecipeProgram1..50 live in LOAD memory (UNLINKED) and cost no work memory.
 // FB_RecipeLoader copies the selected one into here with READ_DBL during
 // STATE_RECIPE_LOAD(11), before the pre-scan. FB_RecipePreScan and
 // FB_RecipeHandler are then bound to THIS block and nothing else.
@@ -1092,6 +1135,15 @@ VERSION : 0.1
 NON_RETAIN
     VAR
         Header : "RecipeHeader";                // Copy of the selected recipe's header
+        // DO NOT SHRINK THIS ARRAY (user decision 2026-08-10).
+        // It is 12,070 B -- 71% of all data-block work memory -- and the recipes in
+        // gcodes/ are only 38..314 lines, so this looks like 7 KB of obvious waste.
+        // It is not: those are TEST recipes. Production parts are expected to use the
+        // full 1000 lines. Shrinking it is a LAST RESORT if no other work-memory
+        // reclaim is sufficient, and it is a coupled change -- the recipe DB bound
+        // (LINES_PER_RECIPE in tools/gen_recipe_slots.py), the pre-scan guard
+        // (06_MainProcess.scl, activeLineCount > 1000) and the SpinningCam output must
+        // all move together, or READ_DBL fails on a length mismatch.
         Lines  : Array[0..999] of "RecipeLine"; // Copy of the selected recipe's lines
     END_VAR
 BEGIN

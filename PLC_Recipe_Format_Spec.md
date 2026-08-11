@@ -23,10 +23,20 @@ This document defines the binary recipe format for the metal spinning machine's 
 
 **Total: 12 bytes per line × 1000 lines = 12 KB per program**
 
-**Memory (changed 2026-08-04 — load-memory recipes):** the 10 program DBs live in **load memory**
-(`UNLINKED`) and cost **zero work memory** — ~120 KB of the 1214C's 4 MB. Work memory pays for one
+**Memory (changed 2026-08-04 — load-memory recipes):** the **50** program DBs live in **load memory**
+(`UNLINKED`) and cost **zero work memory** — ~590 KB of the 1214C's 4 MB. Work memory pays for one
 buffer only, `DB_SelectedRecipe` at ~12 KB, replacing the ~21 KB the five old work-memory recipe DBs
 consumed. See `Program/docs/LOADMEM_COPY_ON_SELECT.md`.
+
+**Slot count.** Generated, not hand-maintained — run `tools/gen_recipe_slots.py --slots N`, which
+rewrites `02b_RecipePrograms.scl`, the `FB_RecipeLoader` `CASE`, `PROGRAM_COUNT` and the
+`activeProgram` clamp together.
+
+> ⚠️ **Slots cost work memory.** 50 slots compiled to **101%** and would not download (2026-08-10).
+> The recipe DBs are free — `UNLINKED`, load memory only — but the loader `CASE` is two `READ_DBL`
+> call sites per slot, and on the S7-1200 compiled code shares the same 100 KB work memory as DB
+> data. Check the work-memory figure after any count change. Scan time is genuinely unaffected: one
+> `CASE` branch executes per scan at any count.
 
 ---
 
@@ -44,6 +54,12 @@ consumed. See `Program/docs/LOADMEM_COPY_ON_SELECT.md`.
 | 41  | ATMO           | No        | No      | 1 / 2 / 3 (see below)    | —                 |
 | 99  | PROGRAM_END    | No        | No      | Ignored                  | M30               |
 
+> **CMD=20 note — do not emit `Param=0` for a dry run.** `Param=0` is a *valid* command meaning
+> "spindle on at 0 RPM", and pre-scan only checks the upper bound against `DB_Spindle.MaxSpeed`, so
+> a zeroed program validates clean and will feed a tool into a stationary blank. For a spindle-less
+> test run set **`DB_HMI.Bypass_Spindle`**, which skips every `CMD=20`/`CMD=21` line at runtime and
+> leaves the recipe's real speeds intact. Use `CMD=21` when the *program* should stop the spindle.
+
 > **CMD=40 note:** `Param` is currently **ignored**. The BackSupport cylinder runs
 > `PositioningMode=0` (full stroke) since the linear ruler hardware was removed, so CMD=40
 > is a plain "extend to end of stroke and wait" command. Emit `Param := 0`.
@@ -54,24 +70,36 @@ consumed. See `Program/docs/LOADMEM_COPY_ON_SELECT.md`.
 
 Fire-and-go: the PLC does not wait for anything, it sets flags and moves to the next line.
 
-| Param | SolB_Cmd41 (retract solenoid) | SolAtmo_Cmd (atmosphere valve) |
-|-------|-------------------------------|--------------------------------|
-| 1     | **ON**                        | **ON**                         |
-| 2     | unchanged (**stays ON**)      | OFF                            |
-| 3     | **OFF**                       | **OFF**                        |
+**Coil truth table.** The authority for this cylinder is the `DB_Cylinder_BackSupport` header in
+`02_DataBlocks.scl` (~line 847); reproduced here for CAM authors:
 
-**`Param=2` does not release the retract solenoid — only `Param=3` does.** Before 2026-07-30
-there was no way to release it from the recipe at all; it stayed energised until the program
-reached STOPPED / COMPLETE / ERROR. If a program latches atmosphere with `Param=1`, it should
-release with `Param=3` when finished with it.
+| Param | %Q12.0 Sol_A   | %Q12.1 Sol_B | %Q12.7 Atmo | Effect |
+|-------|----------------|--------------|-------------|--------|
+| 1     | **ON** (stays) | off          | **ON**      | Atmosphere on; cylinder still commanded out (slack) |
+| 2     | off            | **ON**       | off         | Atmosphere off **+ retract** |
+| 3     | off            | off          | off         | Release retract — all coils off, blocked centre holds the piston |
+
+`Sol_A` and `Sol_B` are **never** energised together. `Param=1` leaves `Sol_A` on deliberately —
+the cylinder stays commanded out while the atmosphere valve vents it. **`Param=2` is what actually
+retracts:** it latches `Cmd_Retract`, and the cylinder FB's own State 2 drops `Sol_A` and raises
+`Sol_B` in the same scan. `Param=3` clears that latch (State 2 → 0).
+
+> **Corrected 2026-08-10 (ITEM-41).** This section previously described a `SolB_Cmd41` override
+> that forced `Sol_B` on at `Param=1`, behind the cylinder state machine's back. With `Sol_A`
+> still latched from `CMD=40` that energised both coils at once and stalled the spool. The flag
+> was deleted 2026-08-07 — nothing in a recipe can override a solenoid output any more.
+
+If a program latches atmosphere with `Param=1`, release with `Param=3` when finished. On every
+recipe termination (STOPPED / COMPLETE / ERROR) FB_Process runs a 2 s end-retract and then drops
+every coil, so a program that forgets `Param=3` still leaves the cylinder clean for the next run.
 
 Typical sequence:
 
 ```
 CMD=40  Param=0     ; BackSupport extend, wait for stroke
-CMD=41  Param=1     ; retract solenoid + atmosphere ON
-CMD=41  Param=2     ; atmosphere OFF
-CMD=41  Param=3     ; release both — back to neutral
+CMD=41  Param=1     ; atmosphere ON (Sol_A stays on)
+CMD=41  Param=2     ; atmosphere OFF + retract
+CMD=41  Param=3     ; release retract — all coils off
 ```
 
 Params other than 1/2/3 are silently ignored (no error, no effect).
@@ -250,6 +278,6 @@ END_TYPE
 
 ## File Naming
 
-For program N (**1-10**, extended from 1-5 on 2026-08-04), generate: `DB_RecipeProgram[N].scl`
+For program N (**1-50**; 1-5 until 2026-08-04, 1-10 until 2026-08-10), generate: `DB_RecipeProgram[N].scl`
 
 Example: `DB_RecipeProgram1.scl`, `DB_RecipeProgram2.scl`, etc.

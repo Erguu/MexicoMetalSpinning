@@ -1,0 +1,88 @@
+﻿list,key,key_dec,en,es
+error,0x0001,1,X Axis: Move command failed,Eje X: fallo en comando de movimiento
+error,0x0002,2,Z Axis: Move command failed,Eje Z: fallo en comando de movimiento
+error,0x0003,3,X Axis: Homing failed,Eje X: fallo en referenciado
+error,0x0004,4,Z Axis: Homing failed,Eje Z: fallo en referenciado
+error,0x0005,5,Drive fault - check servo,Fallo en variador - revisar servo
+error,0x0006,6,Tool Axis: Move failed,Eje herramienta: fallo de movimiento
+error,0x0007,7,Tool Axis: Homing failed,Eje herramienta: fallo de referenciado
+error,0x0008,8,Motion timeout - axis stuck,Tiempo de movimiento excedido - eje bloqueado
+error,0x0009,9,X drive power failed,Fallo de potencia variador X
+error,0x000A,10,Z drive power failed,Fallo de potencia variador Z
+error,0x000B,11,Homing timeout - check ref switch,Tiempo de referenciado excedido - revisar sensor
+error,0x000C,12,Drive ready timeout - check contactor/enable wiring,Tiempo de espera variador - revisar contactor/cableado
+error,0x000D,13,Tool drive power failed,Fallo de potencia variador herramienta
+error,0x0010,16,User pressed STOP,Operador presiono PARO
+error,0x0012,18,ToolHeadLock: extend timeout - check cylinder/sensor,Bloqueo cabezal: tiempo de extension excedido - revisar cilindro/sensor
+error,0x0021,33,X axis TO fault - check TO diagnostics,Fallo TO eje X - revisar diagnostico TO
+error,0x0022,34,Z axis TO fault - check TO diagnostics,Fallo TO eje Z - revisar diagnostico TO
+error,0x0023,35,Tool axis TO fault - check TO diagnostics,Fallo TO eje herramienta - revisar diagnostico TO
+error,0x0024,36,Spindle TO fault - check TO diagnostics,Fallo TO husillo - revisar diagnostico TO
+error,0x0101,257,X beyond MIN soft limit,X fuera de limite minimo
+error,0x0102,258,X beyond MAX soft limit,X fuera de limite maximo
+error,0x0103,259,Z beyond MIN soft limit,Z fuera de limite minimo
+error,0x0104,260,Z beyond MAX soft limit,Z fuera de limite maximo
+error,0x0121,289,PNP zone: X axis MIN proximity,Zona PNP: proximidad MIN Eje X
+error,0x0122,290,PNP zone: X axis MAX proximity,Zona PNP: proximidad MAX Eje X
+error,0x0123,291,PNP zone: Z axis MIN proximity,Zona PNP: proximidad MIN Eje Z
+error,0x0124,292,PNP zone: Z axis MAX proximity,Zona PNP: proximidad MAX Eje Z
+error,0x0201,513,Invalid tool number,Numero de herramienta invalido
+error,0x0202,514,Tool number out of range,Numero de herramienta fuera de rango
+error,0x0203,515,Tool rotation timeout,Tiempo de rotacion herramienta excedido
+error,0x0204,516,Retract to tool pos failed,Fallo al retraer a posicion de herramienta
+error,0x0205,517,Tool rotation failed,Fallo en rotacion de herramienta
+error,0x0206,518,Tool change timeout - check turret drive,Tiempo de cambio herramienta excedido - revisar variador
+error,0x0301,769,Recipe: Invalid command,Receta: Comando invalido
+error,0x0302,770,Recipe: Parse error,Receta: Error de analisis
+error,0x0303,771,Recipe: Empty program,Receta: Programa vacio
+error,0x0304,772,Recipe: Line count zero,Receta: Conteo de lineas cero
+error,0x0305,773,PreScan: Path exceeds limits,PreVerificacion: Trayectoria fuera de limites
+error,0x0306,774,Recipe: Invalid feedrate,Receta: Avance invalido
+error,0x0307,775,Recipe: Motion timeout,Receta: Tiempo de movimiento excedido
+error,0x0308,776,Recipe: Invalid tool number,Receta: Numero de herramienta invalido
+error,0x0309,777,BackSupport cylinder error - target not reached,Error cilindro BackSupport - posicion no alcanzada
+error,0x030A,778,Spindle at-speed timeout (10s),Husillo: tiempo de velocidad excedido (10s)
+error,0x030B,779,Spindle stop timeout (15s),Husillo: tiempo de paro excedido (15s)
+error,0x0310,784,Recipe not loaded - check TotalLines,Receta no cargada - revisar TotalLines
+error,0x0311,785,Recipe has no tool table - regenerate in CAM,Receta sin tabla de herramientas - regenerar en CAM
+error,0x0312,786,Recipe load from load memory failed,Fallo al cargar la receta desde memoria de carga
+error,0x0313,787,Recipe data empty/corrupt - no END marker,Datos de receta vacios/corruptos - falta marca de fin
+error,0x0401,1025,EMERGENCY STOP ACTIVE!,PARO DE EMERGENCIA ACTIVO!
+error,0x0402,1026,Safety door is open,Puerta de seguridad abierta
+error,0x0403,1027,Drives not ready,Variadores no listos
+error,0x0404,1028,Air pressure too low,Presion de aire baja
+error,0x0405,1029,Safety interlock active,Interlock de seguridad activo
+error,0x0406,1030,E-Stop contact discrepancy!,Discrepancia en contacto Paro de Emergencia!
+error,0x0501,1281,Spindle: Power-on failed,Husillo: fallo al encender
+error,0x0502,1282,Spindle: Run command failed,Husillo: fallo al ejecutar comando
+error,0x0503,1283,Spindle: Halt failed,Husillo: fallo al detener
+error,0x0504,1284,Spindle: Speed not reached,Husillo: velocidad no alcanzada
+status,0,0,Stopped,Detenido
+status,5,5,Manual Mode,Modo Manual
+status,10,10,Starting...,Iniciando...
+status,11,11,Loading recipe...,Cargando receta...
+status,12,12,Pre-scanning...,Verificando receta...
+status,13,13,Clearing PNP zone...,Liberando zona PNP...
+status,14,14,Waiting for sheet...,Esperando lamina...
+status,15,15,Homing...,Referenciando...
+status,16,16,Sheet-load park move...,Moviendo a posicion de carga...
+status,17,17,Lock engaging...,Bloqueando cabezal...
+status,18,18,Stopping...,Deteniendo...
+status,19,19,Homing (post-stop)...,Referenciando (post-paro)...
+status,20,20,Running,Ejecutando
+status,21,21,Returning to zero...,Retornando a cero...
+status,22,22,PNP Halt - jog to escape limit zone,Zona PNP - joguear para salir
+status,25,25,Paused,Pausado
+status,29,29,Lock releasing...,Liberando bloqueo...
+status,30,30,Tool Change,Cambio de Herramienta
+status,35,35,Tool Change Wait,Esperando cambio...
+status,100,100,Program Complete,Programa Completado
+status,999,999,ERROR,ERROR
+mdi,1,1,Executed,Ejecutado
+mdi,2,2,Unknown/blocked CMD,CMD desconocido/no permitido
+mdi,3,3,CMD40: use Param 0 or 1,CMD40: use Param 0 o 1
+mdi,4,4,CMD40 cylinder error,CMD40 error cilindro
+mdi,5,5,CMD40 done,CMD40 completado
+mdi,6,6,"CMD41: use Param 1,2,3","CMD41: use Param 1,2,3"
+warning,1,1,E-Stop bypass ON - auto start blocked,Paro de emergencia desactivado - inicio automatico bloqueado
+warning,2,2,"Insert sheet, then press both start buttons",Inserte la lamina y presione ambos botones de inicio

@@ -1,0 +1,4 @@
+﻿screen,object,property,en,twin_said,used,why,screen_has_drift
+Manual_Cyl,Button_12,Text OFF,Cylinder,Posicionamiento,Cilindro,twin overridden by majority,yes
+Manual_Cyl,Button_11,Text OFF,Manage,Trote,Gestionar,twin overridden by majority,yes
+Manual_Cyl,Button_10,Text OFF,Positioning,Habilitar,Posicionamiento,twin overridden by majority,yes
