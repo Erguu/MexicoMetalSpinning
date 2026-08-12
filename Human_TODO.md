@@ -87,10 +87,38 @@ into the **en-US** language of the MEX screens. Runtime switching was fighting t
 - [ ] **Runtime settings → Language & font** → tick English + Spanish. Separate from project
       languages; if Spanish isn't ticked here it never reaches the panel
 - [ ] Add a language button: *Events → Click →* **`SetLanguage`** (toggle)
-- [ ] **Spot-check 3 navigation buttons** — `tools/es_twin_audit.csv`. On six screens the object
-      numbering drifted between the two trees, so same-named objects aren't the same button.
-      Three had to be corrected by majority vote (`Manage` → `Gestionar`, not `Trote`). Check the
-      `MEX_Manual_Cyl` nav buttons specifically
+- [ ] **Spot-check the drifted-twin labels** — `tools/es_twin_audit.csv`, now **29 rows**. On seven
+      screens the object numbering drifted between the two trees, so same-named objects aren't the
+      same control. Three were corrected by majority vote (`Manage` → `Gestionar`, not `Trote`)
+
+### 🔴 Re-import needed — five labels were wrong (found on the panel 2026-08-12)
+
+You spotted `Tool Slot 1 ID` reading **POTENCIA** and `Tool Slot 2 ID` reading **ACTIVAR**.
+Cause: `ENG_Manual_Manage` and `MEX_Manual_Manage` are different layouts. ENG's `Text field_5`/`_6`
+are the tool-slot labels; MEX's `Text field_5`/`_6` are `POTENCIA`/`ACTIVAR`. The filler paired them
+by object name, and that bad pair got harvested into the glossary — where it applied *silently*,
+because the glossary rule skipped the drift audit that the raw-twin rule performs.
+`Tool Slot 3 ID` was right only by luck: MEX has no `Text field_10` to mis-pair with.
+
+Fixed in `FORCE_ES` (`tools/fill_es_project_texts.py`), which outranks every automatic rule:
+
+| Screen / object | English | Was | Now |
+|---|---|---|---|
+| `Manual_Manage` `Text field_5` | Tool Slot 1 ID | POTENCIA | ID ranura herramienta 1 |
+| `Manual_Manage` `Text field_6` | Tool Slot 2 ID | ACTIVAR | ID ranura herramienta 2 |
+| `Manual_Manage` `Button_4` | Bypass Spindle | **Eje X** | Anular husillo |
+| `Manual_Jog` `Button_6`/`_7` | STEP | PUSH | PASO |
+| `Production` `Text field_8` | Last Duration: | Duración máxima: | Última duración: |
+
+**`Bypass Spindle` → `Eje X` is the one worth noting** — a spindle-bypass button labelled "Axis X".
+You hadn't reached that screen yet.
+
+- [ ] **Re-import `TIAProjectTexts_es_filled.xlsx`** (regenerated, still 901 cells)
+- [ ] Glance at these six, which are pre-existing MEX wording I carried over rather than errors I
+      introduced — clumsy, your call whether to reword: `Home Axis ALL` → `Inicio Axis TODO`
+      (half-translated), `SET POS`/`SET VEL` → `Conjunto POS`/`Conjunto VEL` (wrong sense of "set"),
+      `Progress:` → `Avances:`, `Total Line:` → `Total de la línea:`, `EXTEND` → `AMPLIAR` (= enlarge,
+      not extend)
 - [x] **All 270 remaining texts now have Spanish** (`tools/es_translations_draft.py`). It was only
       86 unique strings: 106 rows drafted, 164 deliberately identical in both languages
       (mnemonics `M`/`P`/`T`/`CMD`/`MDI`, M-code labels, axis letters, product names, the company

@@ -52,17 +52,26 @@ limit'), and plausible-but-wrong Spanish on a safety alarm is worse than English
 
 OBJECT-NAME DRIFT -- WHY TWIN CANNOT BE TRUSTED BLINDLY
 ------------------------------------------------------
-The twin rule pairs objects by name, and on six screens (Manual, Manual_Cyl,
-Manual_Home, Manual_Jog, Manual_Manage, Manual_Pos) the two trees do not share
-the same object names: ENG carries Button_5..8/16/17 where MEX carries
+The twin rule pairs objects by name, and on seven screens (Automatic, Manual,
+Manual_Cyl, Manual_Home, Manual_Jog, Manual_Manage, Manual_Pos) the two trees do
+not share the same object names: ENG carries Button_5..8/16/17 where MEX carries
 Button_10..14. Same-named objects on those screens are therefore not necessarily
-the same button, and a naive pairing invented 'Manage' -> 'Trote' (jog),
+the same control, and a naive pairing invented 'Manage' -> 'Trote' (jog),
 'Positioning' -> 'Habilitar' (enable) and 'Cylinder' -> 'Posicionamiento'.
 
-Two defences: the glossary's majority vote outranks any single twin, and every
-pair drawn from a drifted screen is written to tools/es_twin_audit.csv for a
-human spot-check. Navigation-button labels are the highest-risk group -- check
-those first.
+Three defences:
+  1. the glossary's majority vote outranks any single twin;
+  2. every pair drawn from a drifted screen is written to tools/es_twin_audit.csv
+     for a human spot-check -- including the case where the glossary and the twin
+     agree only because that twin is the glossary's sole source (`single_source`).
+     That case used to resolve silently and is how 'Tool Slot 1 ID' reached the
+     panel as 'POTENCIA';
+  3. FORCE_ES overrides anything the rules get wrong, permanently.
+
+Majority vote can only defend labels that appear on more than one screen, so
+one-off labels on a drifted screen are the highest-risk group -- they have a
+single twin, no contradicting evidence, and nothing but the audit file to catch
+them. Read es_twin_audit.csv, not just the nav buttons.
 
 Nothing but the es-MX column is modified. Column E (en-US*) is the read-only
 reference column TIA ignores on import; column F (en-US) is left alone so the
@@ -106,6 +115,30 @@ COL_CATEGORY, COL_PATH, COL_ID = 'A', 'B', 'C'
 COL_EN_REF, COL_EN, COL_ES = 'E', 'F', 'G'
 
 VERBATIM_RE = re.compile(r'^[\W\d_]+$', re.UNICODE)   # digits / punctuation only
+
+# --------------------------------------------------------------------------- #
+# FORCE_ES -- corrections that outrank every automatic rule.
+#
+# Why this table has to exist: the glossary is harvested from ENG/MEX twin pairs
+# (see the harvest below), and a pair taken from a drifted screen is a positional
+# guess. Once harvested it resolves via the GLOSSARY rule, which -- unlike TWIN --
+# writes no audit row, so a wrong pair used to land silently. Found on the machine
+# 2026-08-12: ENG_Manual_Manage 'Text field_5'/'_6' are Tool Slot 1/2 ID, but
+# MEX_Manual_Manage 'Text field_5'/'_6' are 'POTENCIA'/'ACTIVAR' -- a different
+# screen layout entirely. 'Tool Slot 3 ID' escaped only because MEX has no
+# 'Text field_10' to mis-pair with.
+#
+# Keyed by the English text, which is unique project-wide for every entry here.
+# Applies to the ENG tree only -- MEX rows keep their own en-US wording so those
+# screens stay readable until the tree is deleted.
+# --------------------------------------------------------------------------- #
+FORCE_ES = {
+    'Tool Slot 1 ID': 'ID ranura herramienta 1',   # was 'POTENCIA'  (twin = Power)
+    'Tool Slot 2 ID': 'ID ranura herramienta 2',   # was 'ACTIVAR'   (twin = Enable)
+    'Bypass Spindle': 'Anular husillo',            # was 'Eje X'     (twin = Axis X)
+    'STEP':           'PASO',                      # was 'PUSH'      -- not even Spanish
+    'Last Duration:': 'Última duración:',          # was 'Duración máxima:' (= maximum)
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -417,6 +450,12 @@ def main():
     pairs += load_hmi_csv(HMI_CSV)
     exact, lower, conflicts = build_glossary(pairs)
 
+    # English strings the glossary saw exactly once. A single sighting has no
+    # majority to vote with, so if that one sighting is a drifted twin the
+    # glossary is just the twin wearing a different hat.
+    single_source = {a: True for a, n in collections.Counter(
+        a for a, _b in pairs).items() if n == 1}
+
     # Screens where the two trees disagree about object names. A twin pair taken
     # from one of these is a positional guess, not a fact.
     drifted = set()
@@ -441,8 +480,13 @@ def main():
         decision, value = None, None
 
         hand = manual.get((d.get(COL_ID) or '').strip())
+        forced = FORCE_ES.get(en.strip()) if (k and k[0] == 'Eng') else None
         if hand:
             decision, value = 'CSV', hand
+        elif forced:
+            # Outranks KEEP as well: if these were re-exported from a project that
+            # already imported the wrong value, KEEP would otherwise preserve it.
+            decision, value = 'FORCE', forced
         # Anything already there that is not the "Text" placeholder is kept, even
         # when it is identical to the English. Some entries legitimately match
         # ('ERROR', 'Monitor'); clearing them would blank a working label.
@@ -473,6 +517,14 @@ def main():
                               on_drifted))
             elif hit:
                 decision, value = 'GLOSSARY', hit
+                if on_drifted and hit == twin_en and single_source.get(en.strip()):
+                    # The glossary agrees with the twin only because the twin IS
+                    # the glossary's single source, and it came off a drifted
+                    # screen. No independent evidence -- audit it. This is the hole
+                    # that let 'Tool Slot 1 ID' -> 'POTENCIA' through silently.
+                    audit.append((k, en, twin_en, hit,
+                                  'glossary sourced only from this drifted twin',
+                                  True))
             elif twin_en and twin_en != en.strip():
                 decision, value = 'TWIN', twin_en
                 if on_drifted:
@@ -508,8 +560,8 @@ def main():
             new_es[row] = value
 
     # ---- report ---------------------------------------------------------- #
-    order = ['CSV', 'CSV-EN', 'KEEP', 'TWIN', 'GLOSSARY', 'SAME', 'VERBATIM',
-             'MEXTREE', 'BLANK-EN', 'TODO-EN', 'TODO']
+    order = ['CSV', 'FORCE', 'CSV-EN', 'KEEP', 'TWIN', 'GLOSSARY', 'SAME',
+             'VERBATIM', 'MEXTREE', 'BLANK-EN', 'TODO-EN', 'TODO']
     print('Source : %s' % args.src)
     print('Rows   : %d data rows' % len(data))
     print('Glossary: %d pairs from the project + %d from hmi_texts.csv'
@@ -519,6 +571,7 @@ def main():
     print('  ---------  -----  -------------------------------------------------')
     meaning = {
         'CSV':      'taken from the es column of es_to_translate.csv',
+        'FORCE':    'FORCE_ES correction - overrides a bad automatic match',
         'CSV-EN':   'same English text translated on the work sheet elsewhere',
         'KEEP':     'already translated by hand - untouched',
         'TWIN':     'Spanish lifted from the MEX twin screen',

@@ -1,4 +1,30 @@
 ﻿screen,object,property,en,twin_said,used,why,screen_has_drift
+Automatic,Text field_5,Text,Current Line:,Línea actual:,Línea actual:,glossary sourced only from this drifted twin,yes
+Automatic,Text field_10,Text,Elapsed time:,Tiempo transcurrido:,Tiempo transcurrido:,glossary sourced only from this drifted twin,yes
+Automatic,Text field_7,Text,Progress:,Avances:,Avances:,glossary sourced only from this drifted twin,yes
+Automatic,Text field_6,Text,Total Line:,Total de la línea:,Total de la línea:,glossary sourced only from this drifted twin,yes
 Manual_Cyl,Button_12,Text OFF,Cylinder,Posicionamiento,Cilindro,twin overridden by majority,yes
+Manual_Cyl,Text field_4,Text,EXTEND,AMPLIAR,AMPLIAR,glossary sourced only from this drifted twin,yes
 Manual_Cyl,Button_11,Text OFF,Manage,Trote,Gestionar,twin overridden by majority,yes
 Manual_Cyl,Button_10,Text OFF,Positioning,Habilitar,Posicionamiento,twin overridden by majority,yes
+Manual_Cyl,Text field_8,Text,RETRACT,RETRAER,RETRAER,glossary sourced only from this drifted twin,yes
+Manual_Cyl,Text field_10,Text,RETRACT A,RETRAER A,RETRAER A,glossary sourced only from this drifted twin,yes
+Manual_Cyl,Text field_3,Text,Type,Tipo,Tipo,glossary sourced only from this drifted twin,yes
+Manual_Home,Text field_2,Text,0 = Passive,0 = Pasivo,0 = Pasivo,glossary sourced only from this drifted twin,yes
+Manual_Home,Text field_3,Text,3 = Active,3 = Activo,3 = Activo,glossary sourced only from this drifted twin,yes
+Manual_Home,Button_4,Text OFF,Home Axis ALL,Inicio Axis TODO,Inicio Axis TODO,glossary sourced only from this drifted twin,yes
+Manual_Home,Button_3,Text OFF,Home Axis ToolHead,Inicio Eje T,Inicio Eje T,glossary sourced only from this drifted twin,yes
+Manual_Home,Button_1,Text OFF,Home Axis X,Inicio Eje X,Inicio Eje X,glossary sourced only from this drifted twin,yes
+Manual_Home,Button_10,Text OFF,Home Axis Z,Inicio Eje Z,Inicio Eje Z,glossary sourced only from this drifted twin,yes
+Manual_Home,Text field_1,Text,Select Homing Mode,Seleccionar modo de retorno al punto de origen,Seleccionar modo de retorno al punto de origen,glossary sourced only from this drifted twin,yes
+Manual_Jog,Button_3,Text OFF,START,INICIO,INICIO,glossary sourced only from this drifted twin,yes
+Manual_Jog,Button_8,Text OFF,TOGGLE,CAMBIAR,CAMBIAR,glossary sourced only from this drifted twin,yes
+Manual_Manage,Button_1,Text OFF,Acknowledge Errors,Reconocer los errores,Reconocer los errores,glossary sourced only from this drifted twin,yes
+Manual_Manage,Button_2,Text OFF,Restart,Reiniciar,Reiniciar,glossary sourced only from this drifted twin,yes
+Manual_Manage,Text field_3,Text,SoftLimit_MaxX,Límite suave_MaxX,Límite suave_MaxX,glossary sourced only from this drifted twin,yes
+Manual_Manage,Text field_4,Text,SoftLimit_MaxZ,Límite suave_MaxZ,Límite suave_MaxZ,glossary sourced only from this drifted twin,yes
+Manual_Manage,Text field_1,Text,SoftLimit_MinX,Límite suave_MinX,Límite suave_MinX,glossary sourced only from this drifted twin,yes
+Manual_Manage,Text field_2,Text,SoftLimit_MinZ,Límite suave_MinZ,Límite suave_MinZ,glossary sourced only from this drifted twin,yes
+Manual_Pos,Text field_1,Text,AXIS,EJE,EJE,glossary sourced only from this drifted twin,yes
+Manual_Pos,Text field_6,Text,SET POS,Conjunto POS,Conjunto POS,glossary sourced only from this drifted twin,yes
+Manual_Pos,Text field_5,Text,SET VEL,Conjunto VEL,Conjunto VEL,glossary sourced only from this drifted twin,yes
