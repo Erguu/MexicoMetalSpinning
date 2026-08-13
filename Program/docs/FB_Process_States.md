@@ -1,7 +1,9 @@
 # FB_Process State Machine Reference
 
 **Source file:** `Program/06_MainProcess.scl`
-**Last updated:** 2026-08-13 — **RECIPE_LOAD(11): the `.Lines` copy is now verified, not trusted.**
+**Last updated:** 2026-08-13 (second revision) — **RECIPE_LOAD(11) transfers the recipe in 10 chunks of 100 lines.** A single 12 KB `READ_DBL` lands partially on the real CPU with `RET_VAL = 0`; the holes are scattered and differ between attempts. Each chunk is now pulled into `DB_RecipeChunk`, verified line by line against a `16#FF` poison (complete coverage), retried up to 3 times, and only then copied into `DB_SelectedRecipe`. Failure = `16#0314` with `ErrorChunk`. Not compiled, not commissioned.
+
+**Previously, 2026-08-13:** **the `.Lines` copy is verified, not trusted.**
 `FB_RecipeLoader.ST_WAIT_LINES` no longer accepts `BUSY = FALSE` + `RET_VAL = 0` as proof of arrival;
 it requires the recipe's mandatory END marker (`Lines[LineCount-1].CMD = 99`) and re-issues the
 transfer up to 3 times, failing with new error **`16#0314`** (`ErrorPhase = 3`) if it never lands.

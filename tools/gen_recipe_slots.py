@@ -87,6 +87,26 @@ LINES_PER_RECIPE = 1000
 BYTES_PER_LINE = 12
 HEADER_BYTES = 48
 
+# -- chunking (2026-08-13) ----------------------------------------------------
+# The recipe Lines array is NOT transferred in one READ_DBL any more. On the real
+# 1214C a 12 KB load-memory read lands PARTIALLY -- scattered regions arrive, the
+# rest stays zero, and RET_VAL is 0 with no error. Field observation: data present
+# after line ~850 on one attempt and around line ~200 on another.
+#
+# So each recipe declares CHUNK_COUNT arrays of CHUNK_LINES lines, and the loader
+# pulls them one at a time into a small staging DB, verifying each one completely
+# before copying it into DB_SelectedRecipe.
+#
+# CHUNK_LINES is a COST/SAFETY knob:
+#   smaller -> more READ_DBL call sites (~117 B of work memory each, per slot)
+#              and a smaller, fully verifiable staging buffer
+#   larger  -> fewer call sites, but closer to the size that already fails
+# 100 lines = 1200 B per transfer, 11 call sites per slot (10 chunks + Header).
+# At 5 slots that is ~6.4 KB of call sites + 1.2 KB staging.
+CHUNK_LINES = 100
+CHUNK_COUNT = LINES_PER_RECIPE // CHUNK_LINES
+assert CHUNK_LINES * CHUNK_COUNT == LINES_PER_RECIPE, "chunks must tile the array exactly"
+
 REPO = pathlib.Path(__file__).resolve().parent.parent
 F_02B = REPO / "Program" / "02b_RecipePrograms.scl"
 F_LOADER = REPO / "Program" / "05_RecipeHandler.scl"
@@ -185,6 +205,25 @@ def header_02b(n: int) -> str:
 """
 
 
+def chunk_decls() -> str:
+    """Lines1..LinesN declarations, one per chunk.
+
+    Each is a separate NAMED member because that is the only kind of sub-range a
+    READ_DBL SRCBLK can point at: the S7-1200 resolves VARIANT references at
+    compile time, so an array slice or a variable index is not expressible.
+    """
+    out = []
+    for c in range(1, CHUNK_COUNT + 1):
+        first = (c - 1) * CHUNK_LINES
+        last = c * CHUNK_LINES - 1
+        name = f"Lines{c}".ljust(7)
+        out.append(
+            f"        {name}: Array[0..{CHUNK_LINES - 1}] of \"RecipeLine\";"
+            f" // global lines {first}..{last}\n"
+        )
+    return "".join(out)
+
+
 def db_block(i: int) -> str:
     return f"""
 // -----------------------------------------------------------------------------
@@ -192,12 +231,42 @@ def db_block(i: int) -> str:
 // -----------------------------------------------------------------------------
 DATA_BLOCK "DB_RecipeProgram{i}"
 {{ S7_Optimized_Access := 'FALSE' }}
-VERSION : 0.2
+VERSION : 0.3
 UNLINKED
 NON_RETAIN
     VAR
         Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
-        Lines  : Array[0..{LINES_PER_RECIPE - 1}] of "RecipeLine"; // {LINES_PER_RECIPE} lines max
+{chunk_decls()}    END_VAR
+BEGIN
+END_DATA_BLOCK
+"""
+
+
+def staging_block() -> str:
+    """The one work-memory landing area every chunk transfer writes into.
+
+    Standard access is mandatory: READ_DBL refuses an optimized DSTBLK. It is
+    NOT retentive and needs no reset -- FB_RecipeLoader poisons it before every
+    transfer and refuses to use it unless every line came back overwritten.
+    """
+    return f"""
+// -----------------------------------------------------------------------------
+// DB_RecipeChunk - staging area for ONE chunk of a recipe ({CHUNK_LINES} lines)
+//
+// Chunked transfer (2026-08-13): a single 12 KB READ_DBL out of load memory
+// lands only partially on this CPU, with RET_VAL = 0 and no error. Each chunk is
+// now pulled into this buffer, verified line by line, and only then copied into
+// DB_SelectedRecipe. {CHUNK_LINES} lines is small enough that EVERY line can be
+// checked rather than sampled -- there is no hole this can miss.
+//
+// Cost: {CHUNK_LINES * BYTES_PER_LINE} bytes of work memory, once, regardless of slot count.
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeChunk"
+{{ S7_Optimized_Access := 'FALSE' }}
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        Lines : Array[0..{CHUNK_LINES - 1}] of "RecipeLine";
     END_VAR
 BEGIN
 END_DATA_BLOCK
@@ -205,7 +274,9 @@ END_DATA_BLOCK
 
 
 def build_02b(n: int) -> str:
-    body = header_02b(n) + "".join(db_block(i) for i in range(1, n + 1))
+    body = (header_02b(n)
+            + staging_block()
+            + "".join(db_block(i) for i in range(1, n + 1)))
     return body.replace("\r\n", "\n").replace("\n", EOL)
 
 
@@ -219,31 +290,38 @@ def build_program_count(n: int) -> str:
 
 
 def build_loader_case(n: int) -> str:
-    """The CASE that picks the source DB.
+    """The CASE that picks the source DB and the chunk within it.
 
-    Two calls per branch, .Lines and .Header, each in the exact sub-reference form
-    the gate test passed. Never collapse these into one whole-DB transfer -- that
-    is ITEM-44, and it fails with RET_VAL=0 and an empty Lines array.
+    Outer CASE = #selLatched (which recipe), inner CASE = #chunkPhase
+    (0 = Header, 1..CHUNK_COUNT = the Lines chunks). Every reference is a
+    compile-time constant, which is the whole reason the chunks have to exist as
+    separate declared members: the S7-1200 cannot take an array slice or a
+    variable index as a VARIANT.
 
-    Only ONE branch is reached per scan, so the slot count costs nothing at
-    runtime; it costs code size in load memory, which is the cheap resource.
+    NEVER collapse this back into one .Lines transfer. That is what fails on the
+    machine -- 12 KB out of load memory lands partially, RET_VAL = 0, no error
+    (ITEM-44, and again 2026-08-13 with the two-phase loader in place).
+
+    Exactly ONE call executes per scan whatever the slot count, so this costs
+    scan time nothing. It costs work memory ~117 B per call site.
     """
-    pad = " " * 39  # aligns BUSY under REQ in the wrapped call
+    pad = " " * 43  # aligns BUSY under REQ in the wrapped call
     out = ["    CASE #selLatched OF\n"]
     for i in range(1, n + 1):
         label = f"{i}:"
         label = label.ljust(4) if len(label) < 4 else label + " "
-        out.append(f"        {label}IF #phaseLines THEN\n")
+        out.append(f"        {label}CASE #chunkPhase OF\n")
         out.append(
-            f'                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram{i}".Lines,\n'
-            f'{pad}BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Lines);\n'
-        )
-        out.append("            ELSE\n")
-        out.append(
-            f'                #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram{i}".Header,\n'
+            f'                0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram{i}".Header,\n'
             f'{pad}BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);\n'
         )
-        out.append("            END_IF;\n")
+        for c in range(1, CHUNK_COUNT + 1):
+            lbl = f"{c}:".ljust(3)
+            out.append(
+                f'                {lbl}#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram{i}".Lines{c},\n'
+                f'{pad}BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);\n'
+            )
+        out.append("            END_CASE;\n")
     out.append("    END_CASE;\n")
     return "".join(out)
 
@@ -395,10 +473,16 @@ def main() -> int:
     for p in targets:
         print(f"  {'written ' if p in changed else 'no change'}  {p.relative_to(REPO)}")
     print(f"\nLoad memory: {n} x ~{kb:.0f} KB = ~{n * kb / 1024.0:.2f} MB of 4 MB.")
-    print(f"WORK memory: {2 * n} READ_DBL call sites of generated CODE. This is NOT free --")
-    print("  on the S7-1200 the 100 KB work memory holds code as well as data. 50 slots")
-    print("  compiled to 101% on 2026-08-10. Check the figure after every count change.")
-    print("Scan time: unchanged -- the CASE runs one branch per scan at any slot count.")
+    sites = n * (CHUNK_COUNT + 1)
+    print(f"WORK memory: {sites} READ_DBL call sites of generated CODE"
+          f" ({CHUNK_COUNT} chunks + 1 Header, x {n} slots)")
+    print(f"  at ~117 B each = ~{sites * 117 / 1024.0:.1f} KB, plus"
+          f" ~{CHUNK_LINES * BYTES_PER_LINE / 1024.0:.1f} KB for DB_RecipeChunk (once).")
+    print("  This is NOT free -- on the S7-1200 the 100 KB work memory holds code as")
+    print("  well as data. 50 slots compiled to 101% on 2026-08-10. Check after every")
+    print(f"  change to the slot count OR to CHUNK_LINES (currently {CHUNK_LINES}).")
+    print("Scan time: unchanged -- one call executes per scan at any slot or chunk count.")
+    print(f"Load time: {CHUNK_COUNT} chunks x (prep + req + wait + copy) scans, once, standing still.")
     if args.loader_only:
         print("\nRe-import ONLY 05_RecipeHandler.scl and 06_MainProcess.scl. 02b was not")
         print("touched, so no recipe data is at risk and no gcodes re-import is needed.")

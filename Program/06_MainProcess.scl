@@ -1277,7 +1277,7 @@ BEGIN
         #activeProgram := "DB_HMI".ProductSelect;
         IF #activeProgram < 1 THEN #activeProgram := 1; END_IF;
         // <<< GENERATED:PROGRAM_CLAMP -- do not hand-edit; run tools/gen_recipe_slots.py >>>
-        IF #activeProgram > 10 THEN #activeProgram := 10; END_IF;  // 10 recipe slots
+        IF #activeProgram > 5 THEN #activeProgram := 5; END_IF;  // 5 recipe slots
         // <<< END GENERATED:PROGRAM_CLAMP >>>
     END_IF;
 
@@ -2135,19 +2135,26 @@ BEGIN
                 // failure, so this must stay visible.
                 IF #fbRecipeLoader.ErrorPhase = 3 THEN
                     // Phase 3 is NOT a READ_DBL error: every call returned RET_VAL = 0
-                    // and the END marker still never arrived, on every retry. Separate
-                    // code so the operator is not sent looking for a transfer fault --
-                    // the recipe DB in the CPU is the thing to check first.
+                    // and the chunk still came back with holes, on every retry. Separate
+                    // code so the operator is not sent looking for a transfer fault.
+                    // ErrorChunk is the diagnostic that matters: WHICH chunk refuses to
+                    // arrive tells us whether the fault is positional (always the same
+                    // chunk -> suspect that region of the source DB) or random (-> the
+                    // transfer mechanism itself). 0 = the assembled buffer failed its
+                    // END-marker cross-check rather than any single chunk.
                     #newErrorCode := 16#0314;
-                    "DB_Diagnostic".Error_Text :=
-                        'Recipe Lines copy never landed (RET_VAL=0, no END marker after retries)';
+                    "DB_Diagnostic".Error_Text := CONCAT(
+                        IN1 := 'Recipe chunk never arrived intact (RET_VAL=0), chunk ',
+                        IN2 := INT_TO_STRING(#fbRecipeLoader.ErrorChunk));
                 ELSE
                     #newErrorCode := 16#0312;   // Recipe load from load memory failed
                     "DB_Diagnostic".Error_Text := CONCAT(
                         IN1 := CONCAT(IN1 := 'Recipe load failed, phase ',
                                       IN2 := INT_TO_STRING(#fbRecipeLoader.ErrorPhase)),
-                        IN2 := CONCAT(IN1 := ' (1=Header 2=Lines), RET_VAL=',
-                                      IN2 := INT_TO_STRING(WORD_TO_INT(#fbRecipeLoader.ErrorCode))));
+                        IN2 := CONCAT(IN1 := CONCAT(IN1 := ' (1=Header 2=chunk ',
+                                                    IN2 := INT_TO_STRING(#fbRecipeLoader.ErrorChunk)),
+                                      IN2 := CONCAT(IN1 := '), RET_VAL=',
+                                                    IN2 := INT_TO_STRING(WORD_TO_INT(#fbRecipeLoader.ErrorCode)))));
                 END_IF;
                 #State := STATE_ERROR;
 
