@@ -129,7 +129,8 @@ NON_RETAIN
         // Key for the HMI's warning text list (ITEM-55). Written every scan next to
         // WarningText, so it needs no reset-path entry: the ELSE branch of the warning
         // block drives it to 0 unconditionally. 0 must stay "no warning".
-        //   1 = E-Stop bypass ON - auto start blocked
+        //   1 = DANGER: E-Stop bypassed - machine runs unguarded (auto run IS permitted
+        //       since 2026-08-12 -- this is the only on-screen sign of it)
         //   2 = Insert sheet, then press both start buttons
         WarningID : Int;
         WarningText : String[70];   // Warning message text -- English (E-Stop bypass or operator prompts only)
@@ -153,6 +154,11 @@ NON_RETAIN
         // ⚠️ All bypasses reset to FALSE on restart (FC_LoadConfig).
         // All must be FALSE in production.
         // ===========================================================
+        // ⚠️ Bypass_EStop PERMITS AUTO RUN since 2026-08-12 (it used to block it).
+        // The machine will execute a recipe with the E-Stop circuit defeated.
+        // Protect this tag with a WinCC user authorization (service login only) --
+        // the PLC deliberately no longer second-guesses it. Still forced FALSE by
+        // FC_LoadConfig on every power-up, so it cannot survive a restart.
         Bypass_EStop        : Bool := FALSE;  // Used in FB_SafetyMonitor ✅
         Bypass_Door         : Bool := TRUE;  // Used in FB_SafetyMonitor ✅
         Bypass_AirPressure  : Bool := TRUE;  // Used in FB_SafetyMonitor ✅

@@ -1,0 +1,6 @@
+# Vendor manuals. Multi-MB binaries git can never forget once committed, and
+# they are re-downloadable from the vendor. Keep them locally in Program/docs/.
+Program/docs/*.pdf
+
+# Scratch screenshots. Commit an image only when a doc actually references it.
+images/

@@ -380,7 +380,12 @@ BEGIN
     //
     //  (A) SAFETY bypasses -- commissioning/testing ONLY. Verify FALSE before
     //      production. Each disables a safety-monitor interlock:
-    //        Bypass_EStop       : Ignore physical E-Stop circuit
+    //        Bypass_EStop       : Ignore physical E-Stop circuit. Since 2026-08-12 this
+    //                             also PERMITS AUTO RUN (it used to block it), so the
+    //                             machine can execute a recipe with the E-Stop loop
+    //                             defeated. Keep the HMI switch behind a WinCC service
+    //                             login. The FALSE below is what stops it surviving a
+    //                             power cycle -- do not remove it.
     //        Bypass_Door        : Ignore safety door sensor
     //        Bypass_AirPressure : Ignore air pressure sensor
     //        Bypass_Drives      : Ignore drive ready signal

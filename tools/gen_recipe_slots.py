@@ -333,6 +333,30 @@ def build_program_clamp(n: int) -> str:
     )
 
 
+def build_chunk_geometry() -> str:
+    """The loader's copy of the chunk geometry.
+
+    Generated rather than hand-kept because it has to agree with the Lines1..N
+    declarations in 02b and with the CASE, and a disagreement is not a compile
+    error -- it is a loader that transfers the wrong number of chunks and a
+    recipe with a silent gap at the end.
+    """
+    return (
+        f"        CHUNK_LINES    : Int := {CHUNK_LINES};\n"
+        f"        CHUNK_COUNT    : Int := {CHUNK_COUNT};\n"
+        f"        LINES_MAX      : Int := {LINES_PER_RECIPE};"
+        f" // = CHUNK_LINES * CHUNK_COUNT, and the bound of\n"
+        f"                                      // DB_SelectedRecipe.Lines"
+        f" + the pre-scan guard\n"
+    )
+
+
+def current_chunk_lines() -> int:
+    """Chunk size the LOADER is compiled against (not this file's constant)."""
+    m = re.search(r"CHUNK_LINES\s+: Int := (\d+);", read(F_LOADER))
+    return int(m.group(1)) if m else 0
+
+
 # -- marker surgery -----------------------------------------------------------
 
 def replace_region(text: str, name: str, body: str, path: pathlib.Path) -> str:
@@ -378,7 +402,201 @@ def declared_slots() -> int:
     cost load memory only and the clamp makes them unreachable."""
     if not F_02B.exists():
         return 0
-    return len(re.findall(r"^DATA_BLOCK ", read(F_02B), re.MULTILINE))
+    # Count RECIPE blocks only. 02b also declares DB_RecipeChunk (the chunk
+    # staging area), and counting that as a slot made the tool report one more
+    # slot than exists -- which reads as a harmless surplus and would have
+    # quietly suppressed the shortfall warning that stops the project from
+    # being generated against DBs it does not have.
+    return len(re.findall(r'^DATA_BLOCK "DB_RecipeProgram\d+"', read(F_02B), re.MULTILINE))
+
+
+def build_targets(n: int, loader_only: bool) -> dict:
+    """Every file this tool owns, rendered for slot count n."""
+    loader = read(F_LOADER)
+    loader = replace_region(loader, "PROGRAM_COUNT", build_program_count(n), F_LOADER)
+    loader = replace_region(loader, "CHUNK_GEOMETRY", build_chunk_geometry(), F_LOADER)
+    loader = replace_region(loader, "LOADER_CASE", build_loader_case(n), F_LOADER)
+    out = {
+        F_LOADER: loader,
+        F_PROCESS: replace_region(read(F_PROCESS), "PROGRAM_CLAMP",
+                                  build_program_clamp(n), F_PROCESS),
+    }
+    if not loader_only:
+        out[F_02B] = build_02b(n)
+    return out
+
+
+# -- interactive mode ---------------------------------------------------------
+#
+# Run with no arguments and you get this instead of a wall of flags. The flags
+# still work and are still what a script should use; the menu is for the case
+# this tool is actually used in -- standing at the machine, deciding whether the
+# chunk size or the slot count is what needs to move, with the consequences of
+# each spelled out before anything is written.
+
+def _cost(n: int) -> str:
+    sites = n * (CHUNK_COUNT + 1)
+    return (f"{sites} call sites ~{sites * 117 / 1024.0:.1f} KB"
+            f" + {CHUNK_LINES * BYTES_PER_LINE / 1024.0:.1f} KB staging")
+
+
+def _ask(prompt: str, default: str = "") -> str:
+    try:
+        answer = input(prompt).strip()
+    except EOFError:
+        return default
+    return answer or default
+
+
+def _confirm(prompt: str) -> bool:
+    return _ask(f"{prompt} [y/N]: ").lower() in ("y", "yes")
+
+
+def show_state(n_loader: int, n_02b: int, chunk_scl: int) -> None:
+    print()
+    print("  Recipe transfer -- current state")
+    print("  " + "-" * 56)
+    print(f"    loader reaches      : {n_loader} slots")
+    print(f"    02b declares        : {n_02b} DATA_BLOCKs"
+          + ("  (surplus -- harmless, load memory only)" if n_02b > n_loader else "")
+          + ("  <-- SHORTFALL, will not compile" if 0 < n_02b < n_loader else ""))
+    print(f"    chunk geometry      : {CHUNK_COUNT} x {CHUNK_LINES} lines"
+          f" = {LINES_PER_RECIPE} lines, {CHUNK_LINES * BYTES_PER_LINE} B per transfer")
+    if chunk_scl and chunk_scl != CHUNK_LINES:
+        print(f"    !! the loader SCL says CHUNK_LINES = {chunk_scl}, this tool says"
+              f" {CHUNK_LINES} -- regenerate to fix")
+    print(f"    work memory cost    : {_cost(n_loader)}")
+    print()
+
+
+def interactive() -> int:
+    global CHUNK_LINES, CHUNK_COUNT
+
+    n_loader = current_slots()
+    n_02b = declared_slots()
+    show_state(n_loader, n_02b, current_chunk_lines())
+
+    n = n_loader
+    loader_only = False
+
+    while True:
+        print("  What do you want to do?")
+        print("    1) change the SLOT COUNT      -- how many recipes an operator can select")
+        print("    2) change the CHUNK SIZE      -- do this if 16#0314 keeps firing")
+        print("    3) check for drift            -- report only, write nothing")
+        print("    4) regenerate with current settings")
+        print("    q) quit without writing anything")
+        choice = _ask("  > ").lower()
+
+        if choice in ("q", "quit", ""):
+            print("  Nothing written.")
+            return 0
+
+        if choice == "1":
+            print(f"\n  Slots cost work memory: {CHUNK_COUNT + 1} READ_DBL call sites each")
+            print(f"  (~{(CHUNK_COUNT + 1) * 117 / 1024.0:.1f} KB per slot at the current chunk size).")
+            print("  The recipe DBs themselves are free -- they live in load memory.")
+            raw = _ask(f"  New slot count [{n}]: ", str(n))
+            if not raw.isdigit() or int(raw) < 1:
+                print("  Not a slot count. Ignored.\n")
+                continue
+            n = int(raw)
+            if n <= n_02b:
+                print(f"\n  {n} <= {n_02b} declared, so 02b does not need to grow.")
+                loader_only = _confirm("  Leave 02b alone? (keeps recipe data safe, no re-import)")
+            else:
+                loader_only = False
+                print(f"\n  {n} > {n_02b} declared -- 02b MUST be rewritten and re-imported,")
+                print("  which wipes every recipe in the CPU until you re-import them all.")
+            print(f"  -> {n} slots, {_cost(n)}\n")
+
+        elif choice == "2":
+            print("\n  Chunk size is the safety knob. A chunk is one READ_DBL transfer, and")
+            print("  the fault this design works around is a transfer that lands with holes.")
+            print("  Smaller chunks = more call sites (work memory) but less to lose per")
+            print("  transfer. Halve it whenever 16#0314 fires with a DIFFERENT ErrorChunk")
+            print("  each time; that means the mechanism, not one recipe, is the problem.\n")
+            for c in (250, 200, 125, 100, 50, 25):
+                if LINES_PER_RECIPE % c:
+                    continue
+                cnt = LINES_PER_RECIPE // c
+                sites = n * (cnt + 1)
+                mark = "  <-- current" if c == CHUNK_LINES else ""
+                print(f"    {c:4d} lines x {cnt:2d} chunks = {c * BYTES_PER_LINE:5d} B/transfer,"
+                      f" {sites:3d} sites ~{sites * 117 / 1024.0:4.1f} KB{mark}")
+            raw = _ask(f"\n  Lines per chunk [{CHUNK_LINES}]: ", str(CHUNK_LINES))
+            if not raw.isdigit() or int(raw) < 1 or LINES_PER_RECIPE % int(raw):
+                print(f"  Chunks must tile {LINES_PER_RECIPE} lines exactly. Ignored.\n")
+                continue
+            CHUNK_LINES = int(raw)
+            CHUNK_COUNT = LINES_PER_RECIPE // CHUNK_LINES
+            loader_only = False   # 02b declares the chunk arrays, so it must be rewritten
+            print(f"\n  -> {CHUNK_COUNT} x {CHUNK_LINES} lines, {_cost(n)}")
+            print("  02b and EVERY recipe file must be regenerated for this:")
+            print(f"     python tools/split_recipe_db.py gcodes/DB_RecipeProgram*.scl")
+            print("  (re-export from CAM first -- the split script will not un-chunk an")
+            print("   already-chunked file, and the chunk arrays are named per size.)\n")
+
+        elif choice == "3":
+            targets = build_targets(n, loader_only)
+            drift = [p for p, new in targets.items() if not p.exists() or read(p) != new]
+            print()
+            for p in targets:
+                print(f"    {'WOULD CHANGE' if p in drift else 'up to date  '}"
+                      f"  {p.relative_to(REPO)}")
+            print(f"\n  {len(drift)} file(s) differ from the current settings.\n")
+
+        elif choice == "4":
+            targets = build_targets(n, loader_only)
+            drift = [p for p, new in targets.items() if not p.exists() or read(p) != new]
+            if not drift:
+                print("  Everything already matches. Nothing to do.\n")
+                continue
+
+            print(f"\n  About to write {len(drift)} file(s):")
+            for p in drift:
+                print(f"    {p.relative_to(REPO)}")
+            print(f"\n  Settings: {n} slots, {CHUNK_COUNT} x {CHUNK_LINES} lines, {_cost(n)}")
+
+            if F_02B in drift:
+                if declared_slots() > n and not _confirm(
+                        f"\n  02b would SHRINK from {declared_slots()} to {n} DATA_BLOCKs,"
+                        f" deleting slots {n + 1}..{declared_slots()}.\n  Continue?"):
+                    print("  Nothing written.\n")
+                    continue
+                print("\n  *** IMPORTING 02b WIPES EVERY RECIPE IN THE CPU ***")
+                print("  Its BEGIN blocks are empty. After importing it you MUST re-import")
+                print("  every gcodes/DB_RecipeProgramN.scl, or the first cycle start fails")
+                print("  pre-scan with 16#0310 / 16#0313. The DBs are UNLINKED, so you")
+                print("  cannot see the wipe online -- there is no warning before that stop.")
+
+            if not _confirm("\n  Write?"):
+                print("  Nothing written.\n")
+                continue
+
+            for p in targets:
+                write(p, targets[p])
+            print()
+            for p in targets:
+                print(f"    {'written  ' if p in drift else 'unchanged'}  {p.relative_to(REPO)}")
+            print_import_order(loader_only)
+            return 0
+
+        else:
+            print("  Not an option.\n")
+
+
+def print_import_order(loader_only: bool) -> None:
+    print()
+    if loader_only:
+        print("  TIA: re-import 05_RecipeHandler.scl and 06_MainProcess.scl only.")
+        print("  02b untouched -> no recipe data at risk, no gcodes re-import.")
+    else:
+        print("  TIA IMPORT ORDER -- getting this wrong wipes every recipe:")
+        print("    1. Program/02b_RecipePrograms.scl")
+        print("    2. Program/05_RecipeHandler.scl, Program/06_MainProcess.scl")
+        print("    3. EVERY gcodes/DB_RecipeProgramN.scl")
+    print("  Then check the compile percentage before downloading.\n")
 
 
 # -- main ---------------------------------------------------------------------
@@ -399,7 +617,30 @@ def main() -> int:
                     help="permit REDUCING the number of DATA_BLOCKs in 02b. Refused by "
                          "default: importing a shrunk 02b wipes recipe data AND deletes "
                          "the surplus declarations. You almost never want this.")
+    ap.add_argument("--chunk-lines", type=int, default=None,
+                    help=f"lines per READ_DBL transfer (default {CHUNK_LINES}). Must divide "
+                         f"{LINES_PER_RECIPE} exactly. Halve it if 16#0314 fires with a "
+                         "different ErrorChunk each time. Forces a 02b rewrite and a "
+                         "re-run of tools/split_recipe_db.py over every recipe.")
+    ap.add_argument("--batch", action="store_true",
+                    help="never prompt, even with no other arguments (for scripts/CI)")
     args = ap.parse_args()
+
+    if args.chunk_lines is not None:
+        if args.chunk_lines < 1 or LINES_PER_RECIPE % args.chunk_lines:
+            sys.stderr.write(
+                f"ERROR: --chunk-lines must divide {LINES_PER_RECIPE} exactly "
+                f"(got {args.chunk_lines})\n")
+            return 2
+        globals()["CHUNK_LINES"] = args.chunk_lines
+        globals()["CHUNK_COUNT"] = LINES_PER_RECIPE // args.chunk_lines
+
+    # No arguments at all, and a human on the other end -> menu. Anything else
+    # behaves exactly as it always has, so scripts and habits keep working.
+    if (not args.batch and args.slots is None and args.chunk_lines is None
+            and not args.check and not args.loader_only and not args.shrink_02b
+            and sys.stdin.isatty()):
+        return interactive()
 
     now = current_slots()
     have02b = declared_slots()
@@ -408,15 +649,7 @@ def main() -> int:
         sys.stderr.write("ERROR: --slots must be >= 1\n")
         return 2
 
-    targets = {
-        F_LOADER: replace_region(
-            replace_region(read(F_LOADER), "PROGRAM_COUNT", build_program_count(n), F_LOADER),
-            "LOADER_CASE", build_loader_case(n), F_LOADER),
-        F_PROCESS: replace_region(
-            read(F_PROCESS), "PROGRAM_CLAMP", build_program_clamp(n), F_PROCESS),
-    }
-    if not args.loader_only:
-        targets[F_02B] = build_02b(n)
+    targets = build_targets(n, args.loader_only)
 
     changed = [p for p, new in targets.items() if not p.exists() or read(p) != new]
 

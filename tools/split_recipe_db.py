@@ -58,9 +58,15 @@ import sys
 # Must match tools/gen_recipe_slots.py. Changing either alone puts the loader and
 # the recipe data out of step, which the chunk verify will catch as 16#0314 -- but
 # only after a stop on the machine, so keep them together.
-LINES_PER_RECIPE = 1000
-CHUNK_LINES = 100
-CHUNK_COUNT = LINES_PER_RECIPE // CHUNK_LINES
+# Imported, not copied: the chunk geometry has to agree with the loader CASE and
+# the 02b declarations, and gen_recipe_slots.py owns those. A second copy of the
+# number here would drift the first time someone retunes the chunk size, and the
+# symptom would be a recipe file whose arrays the loader never reads.
+try:
+    from gen_recipe_slots import LINES_PER_RECIPE, CHUNK_LINES, CHUNK_COUNT
+except ImportError:  # run from another directory
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    from gen_recipe_slots import LINES_PER_RECIPE, CHUNK_LINES, CHUNK_COUNT
 
 EOL = "\r\n"
 
