@@ -148,10 +148,12 @@ VERSION : 0.3
         // Chunk geometry. COUPLED to tools/gen_recipe_slots.py (CHUNK_LINES /
         // CHUNK_COUNT) and to the DB_RecipeProgram*.Lines1..N declarations it
         // emits. Change them together or the transfers go out of step.
+        // <<< GENERATED:CHUNK_GEOMETRY -- do not hand-edit; run tools/gen_recipe_slots.py >>>
         CHUNK_LINES    : Int := 100;
         CHUNK_COUNT    : Int := 10;
         LINES_MAX      : Int := 1000; // = CHUNK_LINES * CHUNK_COUNT, and the bound of
                                       // DB_SelectedRecipe.Lines + the pre-scan guard
+        // <<< END GENERATED:CHUNK_GEOMETRY >>>
         // <<< GENERATED:PROGRAM_COUNT -- do not hand-edit; run tools/gen_recipe_slots.py >>>
         PROGRAM_COUNT : Int := 5;  // Slot count. Generated -- must match the DB_RecipeProgram* count.
         // <<< END GENERATED:PROGRAM_COUNT >>>
