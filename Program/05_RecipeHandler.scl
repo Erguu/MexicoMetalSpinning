@@ -93,6 +93,14 @@ VERSION : 0.3
                                     // 3 = chunk verify (RET_VAL said OK, data did not arrive)
         ErrorChunk    : Int;        // Which chunk failed (1..CHUNK_COUNT), 0 = Header or
                                     // the assembled-buffer end-marker check
+        RetryTotal    : Int;        // Re-issued transfers across the WHOLE load, cleared
+                                    // at ST_LATCH. This is the margin gauge: a load that
+                                    // succeeds with RetryTotal = 0 is comfortable; one
+                                    // that succeeds with RetryTotal > 0 got there on
+                                    // second attempts and CHUNK_LINES is too close to
+                                    // whatever this CPU can actually deliver. Watch it on
+                                    // the first hardware run -- a clean Done tells you
+                                    // nothing on its own.
         LoadedProgram : Int;        // Which recipe is in the buffer (0 = none/invalid)
     END_VAR
     VAR
@@ -167,6 +175,7 @@ BEGIN
         #ErrorChunk := 0;
         #chunkPhase := 0;           // idle on the Header branch, REQ low
         #chunkRetry := 0;
+        #RetryTotal := 0;
         #LoadedProgram := 0;        // Buffer is no longer trusted -> forces a re-load
     END_IF;
 
@@ -335,6 +344,7 @@ BEGIN
             #ErrorCode := 16#0000;
             #ErrorPhase := 0;
             #ErrorChunk := 0;
+            #RetryTotal := 0;               // margin gauge, per load
             #LoadedProgram := 0;            // buffer invalid until the copy lands
             // POISON (2026-08-06): a failed load must leave a buffer that CANNOT
             // pass pre-scan. DB_SelectedRecipe survives delta downloads and failed
@@ -418,6 +428,7 @@ BEGIN
                         #state := ST_CHUNK_COPY;
                     ELSIF #chunkRetry < CHUNK_RETRY_MAX THEN
                         #chunkRetry := #chunkRetry + 1;
+                        #RetryTotal := #RetryTotal + 1;
                         #state := ST_CHUNK_PREP;    // re-poison and re-issue THIS chunk
                     ELSE
                         // Out of attempts on this chunk. Not a READ_DBL failure --

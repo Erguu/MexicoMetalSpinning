@@ -324,6 +324,27 @@ the END marker is therefore not enough** — state 50 poisons five probes across
 unexplained; "front missing, tail present" fits neither a simple prefix copy nor an abandoned job,
 and it is the strongest argument yet for chunking `.Lines` rather than trusting one 12 KB call.
 
+### Chunked transfer (2026-08-13) -- CURRENT DESIGN, PLCSIM ONLY
+
+The single 12 KB `.Lines` transfer is retired. Each recipe declares `Lines1..Lines10`
+(`Array[0..99]`), the loader pulls one chunk at a time into `DB_RecipeChunk`, poisons every
+staging line's `CMD` with `16#FF` beforehand and requires every one overwritten afterwards,
+then copies the verified chunk into `DB_SelectedRecipe.Lines` with a `FOR` loop. Retry budget
+3 per chunk, then `16#0314` with `ErrorChunk`.
+
+**Status: PLCSIM only, 2026-08-13.** A full 999-line program loaded with `Done = TRUE`,
+`ErrorCode = 0`, and the operator verified the buffer at the chunk seams (99/100, 199/200,
+899/900) against the source file. That proves the sequencing, the index arithmetic and the
+reassembly. **It does not prove the fix.** PLCSIM's load memory is host RAM -- the 12 KB call
+this replaces also passed there (G5), twice, and still failed on the machine. Nothing about
+load-memory behaviour is established until it runs on the physical 1214C.
+
+**What to read on the first hardware run:** `RetryTotal` (added for exactly this). `Done` with
+`RetryTotal = 0` means 1200-byte transfers land first time and there is margin. `Done` with
+`RetryTotal > 0` means it only got there on re-attempts and `CHUNK_LINES` is too close to what
+this CPU delivers -- halve it. `16#0314` means read `ErrorChunk`: the same chunk every time
+implicates that region of the source DB, a different chunk each time implicates the mechanism.
+
 **The verify in state 50 (added 2026-08-13, after the second field failure).** `BUSY = FALSE` with
 `RET_VAL = 0` means the instruction accepted and closed the job — it does **not** mean 12 KB of flash
 reached the buffer. Twice now the machine has reported exactly that over an all-zero `Lines` array,
