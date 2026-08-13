@@ -34,10 +34,32 @@
 //  proven with the SUB-REFERENCE form (SRCBLK := "...".Lines). Production ran the
 //  one combination -- whole DB at 12 KB -- that no test covered.
 //  So: Header and Lines are now copied in two sequential calls, each in the exact
-//  form the gate test passed. A sub-reference copy cannot half-succeed the way a
-//  whole-DB copy did: a length or type mismatch on Lines now surfaces as a
+//  form the gate test passed. A length or type mismatch on Lines surfaces as a
 //  non-zero RET_VAL instead of a silently empty buffer.
-//  ErrorPhase says which of the two failed (1 = Header, 2 = Lines).
+//
+//  THE SPLIT WAS NOT ENOUGH (2026-08-13, second field failure, same signature).
+//  The claim that a sub-reference copy "cannot half-succeed" was wrong. On the
+//  machine the .Lines call again returned RET_VAL = 0 with BUSY = FALSE while the
+//  array stayed zero -- pre-scan caught it as 16#0313. RET_VAL/BUSY report that the
+//  instruction accepted and closed the job, not that 12 KB of flash arrived, and
+//  the moment this FB left ST_WAIT_LINES it dropped REQ and abandoned whatever was
+//  still in flight. PLCSIM never reproduced it (host RAM, copy done in one call).
+//  ST_WAIT_LINES therefore no longer trusts BUSY alone: it VERIFIES the copy and
+//  re-issues the transfer up to LINES_RETRY_MAX times before failing. Do not
+//  "simplify" that check away -- it is the only thing standing between a silent
+//  partial copy and a machined part.
+//
+//  WHY THE VERIFY PROBES THE WHOLE ARRAY AND NOT JUST THE END MARKER.
+//  Same day, with a 999-line recipe: the operator found DB_SelectedRecipe zero up
+//  to roughly line 900 and CORRECT after it. The copy is not all-or-nothing, it is
+//  PARTIAL -- and the part that landed is where the END marker lives, so a
+//  marker-only test would have passed that buffer and the machine would have run
+//  ~900 zero lines (X=0, Z=0) with the HMI counting up. That is exactly what
+//  happened before this check existed. Hence five poison probes across the array,
+//  all of which must come back overwritten, AND the END marker. The 38-line case
+//  is the same fault seen from the other end: there the marker sits at index 37,
+//  in the region that did NOT land, so pre-scan caught it as 16#0313.
+//  ErrorPhase says what failed: 1 = Header, 2 = Lines, 3 = Lines verify.
 //
 //  THE SELECTION LATCH -- the one genuinely dangerous thing in this block.
 //  READ_DBL is asynchronous and spans several scans with REQ held. SRCBLK is a
@@ -63,9 +85,13 @@ VERSION : 0.1
     VAR_OUTPUT
         Done          : Bool;       // Copy complete, DB_SelectedRecipe is valid
         Busy          : Bool;       // Transfer in flight
-        Error         : Bool;       // Copy failed -- FB_Process raises 16#0312
-        ErrorCode     : Word;       // READ_DBL RET_VAL, latched (16#FFFF = timeout)
-        ErrorPhase    : Int;        // Which transfer failed: 1 = Header, 2 = Lines
+        Error         : Bool;       // Copy failed -- FB_Process raises 16#0312 (phase 1/2)
+                                    // or 16#0314 (phase 3, verify)
+        ErrorCode     : Word;       // READ_DBL RET_VAL, latched. Two sentinels that are
+                                    // NOT RET_VAL values: 16#FFFF = watchdog timeout,
+                                    // 16#0314 = Lines verify failed (see ErrorPhase 3)
+        ErrorPhase    : Int;        // Which transfer failed: 1 = Header, 2 = Lines,
+                                    // 3 = Lines verify (RET_VAL said OK, data never arrived)
         LoadedProgram : Int;        // Which recipe is in the buffer (0 = none/invalid)
     END_VAR
     VAR
@@ -81,6 +107,11 @@ VERSION : 0.1
         reqActive   : Bool;         // REQ level, derived from state every scan
         busyRaw     : Bool;         // READ_DBL BUSY
         retValRaw   : Int;          // READ_DBL return value (raw, every scan)
+        linesRetry  : Int;          // Lines transfers already re-issued in THIS load.
+                                    // Cleared at ST_LATCH and on Reset.
+        hdrLines    : Int;          // Header.LineCount, read once for the content verify
+        probesOK    : Bool;         // all five poison probes were overwritten
+        markerOK    : Bool;         // END marker sits where the header says it should
         prevExecute : Bool;
         rtExecute   : Bool;
     END_VAR
@@ -93,8 +124,29 @@ VERSION : 0.1
                                     // its job closed before the branch switches
         ST_REQ_LINES  : Int := 40;  // Phase 2: Lines (the 12 KB one)
         ST_WAIT_LINES : Int := 50;
+        ST_LINES_RETRY: Int := 55;  // One scan with REQ low between Lines attempts, so
+                                    // the retry is a fresh job and the watchdog restarts
         ST_DONE       : Int := 60;
         ST_ERROR      : Int := 90;
+        LINES_RETRY_MAX : Int := 3; // Lines transfers re-issued before giving up (16#0314).
+                                    // Each attempt is bounded by RecipeLoadTimeout, so the
+                                    // worst case a failing load can cost is 4x that timer.
+        LINES_MAX     : Int := 1000;// Upper bound of DB_SelectedRecipe.Lines (Array[0..999]).
+                                    // COUPLED: same bound as the pre-scan guard in
+                                    // 06_MainProcess.scl and LINES_PER_RECIPE in
+                                    // tools/gen_recipe_slots.py -- change all three together.
+        CMD_PROGRAM_END : Int := 99;// Mandatory last-line marker (PLC_Recipe_Format_Spec.md)
+        // Probe positions for the partial-copy detector -- one per quarter of the
+        // array plus both ends. Poisoned at ST_LATCH, all five must come back
+        // overwritten. PROBE_E is the last array slot (999), which the CAM never
+        // writes for a shorter recipe -- a correct copy still clears it, because
+        // the SOURCE DB's unused lines are zeros. Keep them inside 0..LINES_MAX-1.
+        PROBE_A       : Int := 0;
+        PROBE_B       : Int := 249;
+        PROBE_C       : Int := 499;
+        PROBE_D       : Int := 749;
+        PROBE_E       : Int := 999;
+        POISON_CMD    : Int := 255; // 16#FF -- no recipe CMD can be this value
         // <<< GENERATED:PROGRAM_COUNT -- do not hand-edit; run tools/gen_recipe_slots.py >>>
         PROGRAM_COUNT : Int := 50;  // Slot count. Generated -- must match the DB_RecipeProgram* count.
         // <<< END GENERATED:PROGRAM_COUNT >>>
@@ -116,6 +168,7 @@ BEGIN
         #ErrorCode := 16#0000;
         #ErrorPhase := 0;
         #phaseLines := FALSE;       // idle on the Header branch, REQ low
+        #linesRetry := 0;           // no attempt is owed to a load that was abandoned
         #LoadedProgram := 0;        // Buffer is no longer trusted -> forces a re-load
     END_IF;
 
@@ -512,6 +565,7 @@ BEGIN
             #Error := FALSE;
             #ErrorCode := 16#0000;
             #ErrorPhase := 0;
+            #linesRetry := 0;               // fresh retry budget for this load
             #LoadedProgram := 0;            // buffer invalid until the copy lands
             // POISON (2026-08-06): a failed load must leave a buffer that CANNOT
             // pass pre-scan. DB_SelectedRecipe survives delta downloads and failed
@@ -524,7 +578,22 @@ BEGIN
             "DB_SelectedRecipe".Header.LineCount := 0;
             "DB_SelectedRecipe".Header.sName := '';
             "DB_SelectedRecipe".Header.Valid := FALSE;
-            "DB_SelectedRecipe".Lines[0].CMD := 16#FF;   // poison first line too
+            // PROBE POISON (2026-08-13, replaces the single Lines[0] poison).
+            // The field failure is a PARTIAL copy, not an absent one: with a
+            // 999-line recipe the operator found the buffer zero up to ~line 900
+            // and correct after it. An END-marker test alone would have passed
+            // that buffer, because the END marker is exactly where the data DID
+            // land. So the whole array is probed: 16#FF is a value the recipe
+            // format can never produce (CMD is 0/1/10/20/21/40/41/99), and every
+            // probe must come back overwritten. Indices are ARRAY positions, not
+            // line numbers -- they do not depend on Header.LineCount, which is not
+            // known yet at latch time. A correct copy overwrites all five even for
+            // a 38-line recipe, because the source DB's unused lines are zeros.
+            "DB_SelectedRecipe".Lines[PROBE_A].CMD := 16#FF;
+            "DB_SelectedRecipe".Lines[PROBE_B].CMD := 16#FF;
+            "DB_SelectedRecipe".Lines[PROBE_C].CMD := 16#FF;
+            "DB_SelectedRecipe".Lines[PROBE_D].CMD := 16#FF;
+            "DB_SelectedRecipe".Lines[PROBE_E].CMD := 16#FF;
             #state := ST_REQ_HDR;
 
         // === ST_REQ_HDR (20) -- first scan with REQ high, Header branch ===
@@ -562,22 +631,87 @@ BEGIN
             #state := ST_WAIT_LINES;
 
         // === ST_WAIT_LINES (50) -- the 12 KB transfer ===
+        // COMPLETION IS PROVEN BY DATA, NOT BY BUSY (2026-08-13).
+        // BUSY = FALSE with RET_VAL = 0 is necessary but NOT sufficient: on the
+        // machine this state accepted it while the Lines array was still entirely
+        // zero, the loader reported Done, the next state dropped REQ, and pre-scan
+        // rejected the buffer with 16#0313 ("no END marker"). It never showed in
+        // PLCSIM, where load memory is host RAM and the copy finishes inside the
+        // first call (gate test G4, "timing NOT ANSWERED -- real hardware needed").
+        // On a real 1214C the source is internal flash and the read is genuinely
+        // asynchronous, so an early BUSY = FALSE abandons the transfer.
+        // The recipe format guarantees the last line is CMD = 99, so the buffer can
+        // prove its own arrival. Verify it here; if it is missing, re-issue the
+        // whole Lines transfer instead of handing a half-empty buffer downstream.
         ST_WAIT_LINES:
             IF #tonWatch.Q THEN
                 #ErrorCode := 16#FFFF;
                 #ErrorPhase := 2;
                 #state := ST_ERROR;
             ELSIF NOT #busyRaw THEN
-                IF #retValRaw = 0 THEN
-                    #LoadedProgram := #selLatched;
-                    #Done := TRUE;
-                    #state := ST_DONE;
-                ELSE
+                IF #retValRaw <> 0 THEN
                     #ErrorCode := INT_TO_WORD(#retValRaw);
                     #ErrorPhase := 2;
                     #state := ST_ERROR;
+                ELSE
+                    // Content verify, two independent tests -- BOTH must hold.
+                    //
+                    //  1. PROBES: all five poison bytes overwritten => every quarter
+                    //     of the array was written. This is the test that catches the
+                    //     partial copy seen on 2026-08-13 (front zero, tail correct).
+                    //  2. END MARKER at Header.LineCount-1 => the copy is not just
+                    //     present but is THIS recipe, ending where the header says.
+                    //
+                    // LineCount comes from the Header transfer that already succeeded.
+                    // If it is out of range the marker cannot be located -- the probes
+                    // still apply, and PRE_SCAN(12) reports the bad header as 16#0310,
+                    // which is the accurate error for that case.
+                    #probesOK :=
+                        BYTE_TO_INT("DB_SelectedRecipe".Lines[PROBE_A].CMD) <> POISON_CMD
+                        AND BYTE_TO_INT("DB_SelectedRecipe".Lines[PROBE_B].CMD) <> POISON_CMD
+                        AND BYTE_TO_INT("DB_SelectedRecipe".Lines[PROBE_C].CMD) <> POISON_CMD
+                        AND BYTE_TO_INT("DB_SelectedRecipe".Lines[PROBE_D].CMD) <> POISON_CMD
+                        AND BYTE_TO_INT("DB_SelectedRecipe".Lines[PROBE_E].CMD) <> POISON_CMD;
+
+                    #hdrLines := "DB_SelectedRecipe".Header.LineCount;
+                    #markerOK := #hdrLines < 1 OR #hdrLines > LINES_MAX
+                                 OR BYTE_TO_INT("DB_SelectedRecipe".Lines[#hdrLines - 1].CMD) = CMD_PROGRAM_END;
+
+                    IF NOT (#probesOK AND #markerOK) THEN
+                        IF #linesRetry < LINES_RETRY_MAX THEN
+                            #linesRetry := #linesRetry + 1;
+                            #state := ST_LINES_RETRY;
+                        ELSE
+                            // Out of attempts. This is NOT a READ_DBL failure -- the
+                            // instruction claimed success every time -- so it gets its
+                            // own code (16#0314) and phase (3) rather than 16#0312.
+                            #ErrorCode := 16#0314;
+                            #ErrorPhase := 3;
+                            #state := ST_ERROR;
+                        END_IF;
+                    ELSE
+                        #LoadedProgram := #selLatched;
+                        #Done := TRUE;
+                        #state := ST_DONE;
+                    END_IF;
                 END_IF;
             END_IF;
+
+        // === ST_LINES_RETRY (55) -- one scan with REQ low, then try Lines again ===
+        // Same trick as ST_HDR_SETTLE: #reqActive excludes this state, so the Lines
+        // call gets one call with REQ = FALSE (closing the previous job) and the
+        // watchdog TON resets before the next attempt starts. #phaseLines stays TRUE
+        // -- only the Lines transfer is repeated, never the Header.
+        ST_LINES_RETRY:
+            // Re-poison so the next attempt is judged on its OWN result. Without
+            // this, probes cleared by a partial copy would stay cleared and the
+            // retry could pass on the previous attempt's leftovers.
+            "DB_SelectedRecipe".Lines[PROBE_A].CMD := 16#FF;
+            "DB_SelectedRecipe".Lines[PROBE_B].CMD := 16#FF;
+            "DB_SelectedRecipe".Lines[PROBE_C].CMD := 16#FF;
+            "DB_SelectedRecipe".Lines[PROBE_D].CMD := 16#FF;
+            "DB_SelectedRecipe".Lines[PROBE_E].CMD := 16#FF;
+            #state := ST_REQ_LINES;
 
         // === ST_DONE (60) ===
         // Done stays TRUE so FB_Process can move on. A new rising edge re-loads,

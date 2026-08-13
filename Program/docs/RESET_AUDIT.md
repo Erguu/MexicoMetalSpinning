@@ -491,6 +491,17 @@ Additional:
   `PT = DB_MachineConfig.RecipeLoadTimeout` (T#10S). Expiry latches `ErrorCode = 16#FFFF` → `16#0312`.
 - **`ErrorCode` is latched at the moment `BUSY` drops**, not mirrored every scan: once `REQ` falls the
   next `READ_DBL` call returns its idle value and would wipe the real result before anything read it.
+- **Lines verify + retry (2026-08-13):** `linesRetry` counts re-issued `.Lines` transfers. It is set
+  to 0 by `Reset` **and** by `ST_LATCH`, so an aborted load never leaves a spent budget behind and a
+  retry can never be inherited by the next load. `ST_LINES_RETRY(55)` is excluded from `reqActive`
+  like `ST_HDR_SETTLE`, so the retry path also leaves `REQ` low for one scan and resets `tonWatch` —
+  every attempt gets a full fresh `RecipeLoadTimeout`. Worst case for a failing load is 4 × T#10S
+  with the machine standing still, then `16#0314`. `hdrLines`, `probesOK` and `markerOK` are scratch
+  values, recomputed before each use, and need no reset.
+- **The probe poison writes into `DB_SelectedRecipe`** (`Lines[0/249/499/749/999].CMD := 16#FF`) at
+  `ST_LATCH` and again at `ST_LINES_RETRY`. It is data, not an output: no actuator depends on it, and
+  a buffer left poisoned by an aborted load is *the safe state* — pre-scan rejects it. Nothing else
+  in the project writes `DB_SelectedRecipe.Lines`, so no reset path has to undo it.
 - **No new physical outputs.** `DB_SelectedRecipe` is data only; nothing in OB1 changes.
 - **State 11 safety treatment** matches PRE_SCAN(12) — included in the drive-fault bypass (7 sites),
   the soft-limit `SafeToRun` bypass, and excluded from the `FB_LimitMonitor` fault guard. No motion

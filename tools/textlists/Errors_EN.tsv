@@ -46,6 +46,7 @@
 785	Recipe has no tool table - regenerate in CAM
 786	Recipe load from load memory failed
 787	Recipe data empty/corrupt - no END marker
+788	Recipe copy did not land - re-import recipe DB
 1025	EMERGENCY STOP ACTIVE!
 1026	Safety door is open
 1027	Drives not ready

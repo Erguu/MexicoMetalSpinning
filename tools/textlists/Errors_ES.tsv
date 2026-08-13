@@ -46,6 +46,7 @@ Receta no cargada - revisar TotalLines
 Receta sin tabla de herramientas - regenerar en CAM
 Fallo al cargar la receta desde memoria de carga
 Datos de receta vacios/corruptos - falta marca de fin
+Copia de receta no completada - reimporte el DB de receta
 PARO DE EMERGENCIA ACTIVO!
 Puerta de seguridad abierta
 Variadores no listos

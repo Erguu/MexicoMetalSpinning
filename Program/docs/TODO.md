@@ -1675,7 +1675,7 @@ Extend check #4 with a lower bound and a new code:
 | Detail | Value |
 |--------|-------|
 | Condition | `CMD = 20 AND Param = 0` |
-| Error code | **`16#0314`** (next free in the recipe range; 0x0300–0x0313 are taken) |
+| Error code | **`16#0315`** (next free in the recipe range; 0x0300–0x0314 are taken. Was 0x0314 in this proposal until 2026-08-13, when the loader's Lines-verify failure took that code) |
 | `ErrorDesc` | `'Spindle ON with 0 RPM (line n) - use Bypass_Spindle for a dry run'` |
 | Severity | 2 (project) — consistent with the other pre-scan rejections |
 | Where | `FB_RecipePreScan`, alongside the existing `> MaxSpeed` test |
@@ -1684,7 +1684,7 @@ Also decide whether to reject or warn. Rejection is the safer default and matche
 pre-scan violation behaves; a warning would let the zeroed program run, which is the situation this
 item exists to prevent.
 
-**Follow-on:** `AlarmWord_Recipe` maps `0x0301–0x0308` only, so `0x0314` will not raise a Discrete
+**Follow-on:** `AlarmWord_Recipe` maps `0x0301–0x0308` only, so `0x0315` will not raise a Discrete
 Alarm View bit on the HMI — same pre-existing gap noted under ITEM-26. It will still reach
 `ErrorText` and `DB_AlarmHistory`.
 

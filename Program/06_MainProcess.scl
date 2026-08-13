@@ -326,6 +326,7 @@ BEGIN
                 16#0311: #ActiveErrorText := 'Recipe has no tool table - regenerate in CAM';
                 16#0312: #ActiveErrorText := 'Recipe load from load memory failed';
                 16#0313: #ActiveErrorText := 'Recipe data empty/corrupt - no END marker';
+                16#0314: #ActiveErrorText := 'Recipe copy did not land - re-import recipe DB';
                 // Safety Errors
                 16#0401: #ActiveErrorText := 'EMERGENCY STOP ACTIVE!';
                 16#0402: #ActiveErrorText := 'Safety door is open';
@@ -374,8 +375,8 @@ BEGIN
             #ActiveSeverity := 3; #ActiveSource := 'Tool';      // tool motion faults (rotation fail/timeout)
         ELSIF #ActiveErrorCode >= 16#0200 AND #ActiveErrorCode < 16#0210 THEN
             #ActiveSeverity := 2; #ActiveSource := 'Tool';      // tool configuration (invalid/out of range)
-        ELSIF #ActiveErrorCode >= 16#0300 AND #ActiveErrorCode <= 16#0313 THEN
-            #ActiveSeverity := 2; #ActiveSource := 'Recipe';    // <= includes 16#0310..16#0313
+        ELSIF #ActiveErrorCode >= 16#0300 AND #ActiveErrorCode <= 16#0314 THEN
+            #ActiveSeverity := 2; #ActiveSource := 'Recipe';    // <= includes 16#0310..16#0314
         ELSIF #ActiveErrorCode >= 16#0500 AND #ActiveErrorCode < 16#0510 THEN
             #ActiveSeverity := 3; #ActiveSource := 'Spindle';   // spindle motion faults
         ELSE
@@ -1615,9 +1616,13 @@ BEGIN
     "DB_HMI".HasError := (#State = STATE_ERROR);
 
     // Warning: only E-Stop bypass is shown on HMI (Door/Air/Drive bypasses silently permitted for setup)
+    // Since 2026-08-12 the bypass no longer blocks auto start, so this banner is the
+    // ONLY indication that the machine will run with the E-Stop circuit defeated.
+    // WarningID stays 1 (WinCC text list key); the wording changed -- keep
+    // tools/hmi_texts.csv row 'warning,1' in step with this string.
     "DB_HMI".HasWarning := "DB_HMI".Bypass_EStop;
     IF "DB_HMI".Bypass_EStop THEN
-        "DB_HMI".WarningText    := 'E-Stop bypass ON - auto start blocked';
+        "DB_HMI".WarningText    := 'DANGER: E-Stop bypassed - machine runs unguarded';
         "DB_HMI".WarningID      := 1;
     ELSE
         "DB_HMI".WarningText    := '';
@@ -1895,7 +1900,16 @@ BEGIN
 
             IF "DB_Manual".ManualModeActive AND #fbSafetyMonitor.SafeToJog THEN
                 #State := STATE_MANUAL;
-            ELSIF #fbInputs.Cmd_Start AND #SafeToRun AND NOT "DB_HMI".Bypass_EStop THEN
+            ELSIF #fbInputs.Cmd_Start AND #SafeToRun THEN
+                // Bypass_EStop no longer blocks auto start (2026-08-12). It used to,
+                // which made commissioning a running machine without the E-Stop loop
+                // impossible. Access control moved to the HMI: the Bypass_EStop switch
+                // sits behind a WinCC user authorization, so only a logged-in service
+                // user can set it -- the customer's operator account cannot. Do not
+                // re-add a NOT Bypass_EStop term here; that would defeat the switch
+                // for the service user too. The HasWarning banner stays on the whole
+                // time the bypass is set (see the warning block after the CASE).
+                //
                 // Start pre-scan before running.
                 // Always reset fbRecipeHandler here: after any stop or error the handler
                 // ends up in STATE_DONE (Done=TRUE). Without this reset, the first scan
@@ -2079,8 +2093,9 @@ BEGIN
                 #prevBtnCmd41AtmoOff           := "DB_Manual".Btn_Cmd41_AtmoOff;
                 #prevBtnCmd41AtmoOn            := "DB_Manual".Btn_Cmd41_AtmoOn;
                 #State := 0;
-            ELSIF #fbInputs.Cmd_Start AND #SafeToRun AND NOT "DB_HMI".Bypass_EStop THEN
-                // Bypass_EStop blocks transition to auto: must be cleared before running
+            ELSIF #fbInputs.Cmd_Start AND #SafeToRun THEN
+                // Bypass_EStop no longer blocks the manual -> auto transition either
+                // (2026-08-12) -- same reasoning as the STATE_STOPPED Start handler.
                 "DB_Manual".ManualModeActive := FALSE;
                 #bResetRecipe := TRUE;  // Same as STATE_STOPPED Cmd_Start handler (see comment there)
                 #State := STATE_RECIPE_LOAD;   // load recipe out of load memory, then PRE_SCAN
@@ -2112,18 +2127,28 @@ BEGIN
                 // READ_DBL refused the transfer, or it never completed.
                 #bRecipeLoadExec := FALSE;
                 #newErrorFlag := TRUE;
-                #newErrorCode := 16#0312;   // Recipe load from load memory failed
                 // Same pattern as the 16#0310 / 16#0311 sites next door: context goes
                 // to DB_Diagnostic.Error_Text, never to DB_HMI.ErrorText (single-writer
                 // rule). 16#FFFF here means the watchdog fired, not a READ_DBL code.
-                // ErrorPhase (1 = Header, 2 = Lines) says WHICH of the two
-                // transfers failed -- the 2026-08-06 field fault was a silent
-                // Lines failure, so this must stay visible.
-                "DB_Diagnostic".Error_Text := CONCAT(
-                    IN1 := CONCAT(IN1 := 'Recipe load failed, phase ',
-                                  IN2 := INT_TO_STRING(#fbRecipeLoader.ErrorPhase)),
-                    IN2 := CONCAT(IN1 := ' (1=Header 2=Lines), RET_VAL=',
-                                  IN2 := INT_TO_STRING(WORD_TO_INT(#fbRecipeLoader.ErrorCode))));
+                // ErrorPhase (1 = Header, 2 = Lines, 3 = Lines verify) says WHICH
+                // transfer failed -- the 2026-08-06 field fault was a silent Lines
+                // failure, so this must stay visible.
+                IF #fbRecipeLoader.ErrorPhase = 3 THEN
+                    // Phase 3 is NOT a READ_DBL error: every call returned RET_VAL = 0
+                    // and the END marker still never arrived, on every retry. Separate
+                    // code so the operator is not sent looking for a transfer fault --
+                    // the recipe DB in the CPU is the thing to check first.
+                    #newErrorCode := 16#0314;
+                    "DB_Diagnostic".Error_Text :=
+                        'Recipe Lines copy never landed (RET_VAL=0, no END marker after retries)';
+                ELSE
+                    #newErrorCode := 16#0312;   // Recipe load from load memory failed
+                    "DB_Diagnostic".Error_Text := CONCAT(
+                        IN1 := CONCAT(IN1 := 'Recipe load failed, phase ',
+                                      IN2 := INT_TO_STRING(#fbRecipeLoader.ErrorPhase)),
+                        IN2 := CONCAT(IN1 := ' (1=Header 2=Lines), RET_VAL=',
+                                      IN2 := INT_TO_STRING(WORD_TO_INT(#fbRecipeLoader.ErrorCode))));
+                END_IF;
                 #State := STATE_ERROR;
 
             ELSIF #fbRecipeLoader.Done THEN

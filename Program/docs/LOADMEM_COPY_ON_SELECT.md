@@ -16,6 +16,16 @@ faults were found and fixed on the way; both are recorded in §7.2 (retraction n
    proven. Never revert to the whole-DB form.
 Two guards now make any recurrence loud: the loader poisons `Header.LineCount/sName/Valid` at latch
 time, and pre-scan enforces the CMD=99 END marker (`16#0313`).
+
+**IT RECURRED — 2026-08-13.** Program 1 (re-exported from CAM the same day, `LineCount = 38`,
+`Lines[37].CMD = 99` verified in the source file) failed a cycle start with `16#0313`,
+`last CMD = 0`: `Header` arrived, `Lines` stayed zero, *with the two-phase sub-reference loader in
+place*. So the whole-DB call form was never the whole story — the split fixed a real bug but the
+failure mode survives it, and the note in §7.2 claiming a sub-reference copy "cannot fail silently"
+was wrong. The loader no longer accepts `BUSY`/`RET_VAL` as proof of arrival; it verifies the END
+marker itself and retries (§7.3, state 50). Root cause on the CPU is still unproven — the leading
+candidate is that on real flash the read is asynchronous past the first call, so `BUSY = FALSE` on
+that call abandoned the transfer. See §7.3 for what to do if `16#0314` now fires repeatedly.
 **Still open:** G4 timing numbers, G6 work-memory measurement, re-export of programs 2..5,
 full acceptance part (test 3).
 **Created:** 2026-08-04
@@ -284,7 +294,7 @@ overwrites the result before anything can read it.
 | `Done` | OUT Bool | copy complete and verified |
 | `Busy` | OUT Bool | transfer in flight |
 | `Error` | OUT Bool / `ErrorCode` OUT Word | `RET_VAL <> 0` or bad `ProgramNo` |
-| `ErrorPhase` | OUT Int | which transfer failed: 1 = Header, 2 = Lines |
+| `ErrorPhase` | OUT Int | which transfer failed: 1 = Header, 2 = Lines, 3 = Lines **verify** (2026-08-13) |
 | `LoadedProgram` | OUT Int | which program is in `DB_SelectedRecipe` (0 = none) |
 
 | State | Behaviour |
@@ -295,12 +305,40 @@ overwrites the result before anything can read it.
 | 30 WAIT_HDR | hold `REQ`, same branch, wait `Busy = FALSE`. `RET_VAL = 0` → 35, else → 90 (`ErrorPhase := 1`) |
 | 35 HDR_SETTLE | `REQ` low for one scan (closes the Header job, resets the watchdog), `phaseLines := TRUE` → 40 |
 | 40 REQ_LINES | `REQ := TRUE` on the **Lines** branch (the 12 KB one) → 50 |
-| 50 WAIT_LINES | as 30. `RET_VAL = 0` → 60, else → 90 (`ErrorPhase := 2`) |
+| 50 WAIT_LINES | `RET_VAL <> 0` → 90 (`ErrorPhase := 2`). `RET_VAL = 0` → **verify** (below): marker present → 60; missing and retries left → 55; missing and out of retries → 90 (`ErrorPhase := 3`, `ErrorCode := 16#0314`) |
+| 55 LINES_RETRY | `REQ` low for one scan (closes the abandoned job, resets the watchdog), `phaseLines` stays TRUE → 40. **Only the Lines transfer repeats; the Header is never re-read** |
 | 60 DONE | `REQ := FALSE`, `Done := TRUE`, `LoadedProgram := selLatched` |
 | 90 ERROR | `REQ := FALSE`, error code + phase, cleared only by `Reset` |
 
 `phaseLines` is a latch with the same discipline as `selLatched`: it changes only in state 35, where
 `REQ` is already low, so neither the recipe nor the phase can move under a transfer in flight.
+
+**The copy is PARTIAL, not absent (2026-08-13, second observation, same day).** With a 999-line
+recipe the operator found `DB_SelectedRecipe` **zero up to roughly line 900 and correct after it** —
+`RET_VAL = 0`, loader `Done`, pre-scan passed, and the machine ran ~900 zero-length moves at X=0/Z=0
+with the HMI line counter advancing. That is the same fault as the 38-line `16#0313` case seen from
+the other end: the region that lands contains the END marker when the recipe is ~1000 lines, and does
+not when the recipe is short. So the tail arrives and the front does not. **A verify that only checks
+the END marker is therefore not enough** — state 50 poisons five probes across the array
+(0, 249, 499, 749, 999) and requires all of them overwritten as well. Mechanism on the CPU is still
+unexplained; "front missing, tail present" fits neither a simple prefix copy nor an abandoned job,
+and it is the strongest argument yet for chunking `.Lines` rather than trusting one 12 KB call.
+
+**The verify in state 50 (added 2026-08-13, after the second field failure).** `BUSY = FALSE` with
+`RET_VAL = 0` means the instruction accepted and closed the job — it does **not** mean 12 KB of flash
+reached the buffer. Twice now the machine has reported exactly that over an all-zero `Lines` array,
+and the moment state 50 moved on, `REQ` dropped and whatever was still in flight was abandoned. So
+completion is proven by the data instead: the recipe format guarantees the last line is `CMD = 99`
+(`PLC_Recipe_Format_Spec.md`), so state 50 accepts the transfer only when
+`Lines[Header.LineCount-1].CMD = 99`. If `Header.LineCount` is itself out of range (1..1000) the
+check is skipped — the buffer cannot be verified, and PRE_SCAN's `16#0310` is the accurate error for
+that case. Retry budget `LINES_RETRY_MAX = 3`, each attempt bounded by `RecipeLoadTimeout`, so a
+failing load costs at most 4 × that timer with the machine standing still.
+
+This closes the last silent-failure path in the loader. It does **not** explain the underlying
+`READ_DBL` behaviour on flash (G4 is still unmeasured) — if `16#0314` fires repeatedly on hardware,
+the next step is the size question G5 raised: chunk `.Lines` into several named sub-arrays, or cap
+the buffer at a size that lands in one call.
 
 ### 7.4 State machine — new `STATE_RECIPE_LOAD (11)`
 

@@ -47,6 +47,7 @@ error,0x0310,784,Recipe not loaded - check TotalLines,Receta no cargada - revisa
 error,0x0311,785,Recipe has no tool table - regenerate in CAM,Receta sin tabla de herramientas - regenerar en CAM
 error,0x0312,786,Recipe load from load memory failed,Fallo al cargar la receta desde memoria de carga
 error,0x0313,787,Recipe data empty/corrupt - no END marker,Datos de receta vacios/corruptos - falta marca de fin
+error,0x0314,788,Recipe copy did not land - re-import recipe DB,Copia de receta no completada - reimporte el DB de receta
 error,0x0401,1025,EMERGENCY STOP ACTIVE!,PARO DE EMERGENCIA ACTIVO!
 error,0x0402,1026,Safety door is open,Puerta de seguridad abierta
 error,0x0403,1027,Drives not ready,Variadores no listos
@@ -84,5 +85,5 @@ mdi,3,3,CMD40: use Param 0 or 1,CMD40: use Param 0 o 1
 mdi,4,4,CMD40 cylinder error,CMD40 error cilindro
 mdi,5,5,CMD40 done,CMD40 completado
 mdi,6,6,"CMD41: use Param 1,2,3","CMD41: use Param 1,2,3"
-warning,1,1,E-Stop bypass ON - auto start blocked,Paro de emergencia desactivado - inicio automatico bloqueado
+warning,1,1,DANGER: E-Stop bypassed - machine runs unguarded,PELIGRO: paro de emergencia anulado - la maquina funciona sin proteccion
 warning,2,2,"Insert sheet, then press both start buttons",Inserte la lamina y presione ambos botones de inicio

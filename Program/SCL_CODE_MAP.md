@@ -703,7 +703,7 @@ higher**; same or lower tier goes to history only. All errors always go to histo
 |------|---------|-------------|
 | 4 | Safety interlock | 0x04xx (E-Stop, door, air, drives), 0x0111–0x011F (HW limit) |
 | 3 | Motion / TO fault | 0x0001–0x002F (axis/homing/power/TO poller), 0x0101–0x0104 (soft limit), 0x0121–0x0124 (PNP), 0x0203–0x0206 (tool motion), 0x05xx (spindle) |
-| 2 | Project error | 0x0300–0x0313 (recipe, incl. 0x0311 missing tool table, 0x0312 load failure, 0x0313 empty/corrupt buffer), 0x0201–0x0202 (tool config) |
+| 2 | Project error | 0x0300–0x0314 (recipe, incl. 0x0311 missing tool table, 0x0312 load failure, 0x0313 empty/corrupt buffer, 0x0314 copy never landed), 0x0201–0x0202 (tool config) |
 | 1 | Warning / info | 0x0010 (user STOP), unknown codes |
 
 ### Single-Writer Rule for DB_HMI.ErrorText (2026-07-02)
@@ -746,6 +746,7 @@ text; the queue path (`FC_ReportError`) shows its `Details` string as the EN tex
 | 0x0310 | FB_Process | Recipe not loaded (TotalLines invalid) |
 | 0x0311 | FB_Process | Recipe has no tool table (Header.ProvidesToolConfig=FALSE) — regenerate in CAM |
 | 0x0312 | FB_Process | Recipe load from load memory failed (STATE_RECIPE_LOAD(11), `READ_DBL`). `DB_Diagnostic.Error_Text` carries phase (1=Header, 2=Lines) + RET_VAL; 16#FFFF = watchdog, transfer never completed |
+| 0x0314 | FB_Process | Recipe `.Lines` copy never landed: `FB_RecipeLoader` re-issued the transfer `LINES_RETRY_MAX` (3) times and the END marker was still missing, with `RET_VAL = 0` every time (`ErrorPhase = 3`). Added 2026-08-13 after the second field occurrence of the silent partial copy — this is the loader catching what 0x0313 previously caught one state later. If it fires, suspect the recipe DB in the CPU (re-import `gcodes/DB_RecipeProgramN.scl`) before suspecting `READ_DBL` |
 | 0x0313 | FB_Process | Recipe buffer empty/corrupt after load: `Lines[LineCount-1].CMD <> 99` in STATE_PRE_SCAN(12). The END marker (CMD=99) is mandatory (PLC_Recipe_Format_Spec.md); its absence means the Lines array did not arrive. Added 2026-08-06 after a field fault where an all-zero Lines array ran as a silent no-op program |
 | 0x0401 | SafetyMonitor | E-Stop active |
 | 0x0402 | SafetyMonitor | Safety door open |

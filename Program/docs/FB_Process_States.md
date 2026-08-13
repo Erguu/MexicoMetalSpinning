@@ -1,7 +1,25 @@
 # FB_Process State Machine Reference
 
 **Source file:** `Program/06_MainProcess.scl`
-**Last updated:** 2026-08-09 — **Idle-state cylinder and drive-power fixes.** Branch
+**Last updated:** 2026-08-13 — **RECIPE_LOAD(11): the `.Lines` copy is now verified, not trusted.**
+`FB_RecipeLoader.ST_WAIT_LINES` no longer accepts `BUSY = FALSE` + `RET_VAL = 0` as proof of arrival;
+it requires the recipe's mandatory END marker (`Lines[LineCount-1].CMD = 99`) and re-issues the
+transfer up to 3 times, failing with new error **`16#0314`** (`ErrorPhase = 3`) if it never lands.
+This is the second occurrence of the same silent partial copy — the first (2026-08-06) was blamed on
+the whole-DB call form and only caught one state later, by PRE_SCAN's `16#0313`. Not compiled, not
+commissioned. See STATE 11 below.
+
+**Previously, 2026-08-12:** **E-Stop bypass no longer blocks auto start.** The two Start
+transitions (STATE_STOPPED and STATE_MANUAL) dropped their `AND NOT "DB_HMI".Bypass_EStop` term,
+so a machine with the E-Stop loop bypassed can now run a recipe in auto. This is deliberate:
+the protection moved from the PLC to HMI access control — the `Bypass_EStop` switch lives behind
+a WinCC user authorization that only a service login has. `FC_LoadConfig` still forces
+`Bypass_EStop := FALSE` at every power-up, so the bypass can never be inherited across a restart,
+and `DB_HMI.HasWarning` / `WarningText` (WarningID 1, wording changed — `tools/hmi_texts.csv`
+updated to match) are asserted continuously while it is set. See STATE 0 and STATE 5 below.
+Not compiled, not commissioned.
+
+**Previously:** 2026-08-09 — **Idle-state cylinder and drive-power fixes.** Branch
 `fix/cylinder-idle-and-drive-power`, not compiled, not commissioned. Four changes:
 
 1. **SheetHolder `Cmd_Extend` now has a single writer** at the bottom of FB_Process:
@@ -412,9 +430,16 @@ homed while fast cycle mode was enabled.
 | Condition | Next State |
 |-----------|-----------|
 | `ManualModeActive = TRUE` AND `SafeToJog = TRUE` | **5** MANUAL |
-| `Cmd_Start` AND `SafeToRun` AND NOT `Bypass_EStop` | **12** PRE_SCAN |
+| `Cmd_Start` AND `SafeToRun` | **11** RECIPE_LOAD → **12** PRE_SCAN |
 
-> `Bypass_EStop` blocks auto start — E-Stop bypass is for manual mode only.
+> **2026-08-12:** `Bypass_EStop` no longer blocks auto start. It used to (`... AND NOT Bypass_EStop`),
+> which made it impossible to commission a *running* machine with the E-Stop loop defeated.
+> Access control moved to the HMI: the `Bypass_EStop` switch sits behind a WinCC user
+> authorization, so only a logged-in service user can set it — the customer's operator
+> account cannot reach it. The PLC no longer second-guesses the switch. `DB_HMI.HasWarning`
+> / `WarningText` (WarningID 1) stay asserted the whole time the bypass is set and are now
+> the only indication that the machine will run unguarded. Do not re-add a
+> `NOT Bypass_EStop` term to either Start transition.
 
 ---
 
@@ -548,7 +573,9 @@ longer held, the handler simply rests in `STATE_IDLE`.
 | Condition | Next State |
 |-----------|-----------|
 | `ManualModeActive = FALSE` | Clears all contactor/enable HMI buttons + MDI status/edge → **0** STOPPED |
-| `Cmd_Start` AND `SafeToRun` AND NOT `Bypass_EStop` | Sets `ManualModeActive = FALSE` → **12** PRE_SCAN |
+| `Cmd_Start` AND `SafeToRun` | Sets `ManualModeActive = FALSE` → **11** RECIPE_LOAD → **12** PRE_SCAN |
+
+> `Bypass_EStop` no longer blocks this transition either (2026-08-12) — see the note under STATE 0.
 
 ---
 
@@ -568,14 +595,26 @@ load-memory recipe change — see `Program/docs/LOADMEM_COPY_ON_SELECT.md`.
   (changed 2026-08-06; a single whole-DB call was the first design, see the loader's header comment
   and `LOADMEM_COPY_ON_SELECT.md` §7.2 for the field failure that retired it).
 - At its `ST_LATCH` step the loader **poisons the buffer** (`Header.LineCount := 0`, `sName := ''`,
-  `Valid := FALSE`): a load that fails or silently no-ops leaves a buffer that PRE_SCAN(12) rejects
-  with `16#0310`, and stale data from a previous load can never masquerade as fresh.
+  `Valid := FALSE`, and `Lines[0/249/499/749/999].CMD := 16#FF`): a load that fails or silently
+  no-ops leaves a buffer that PRE_SCAN(12) rejects with `16#0310`, and stale data from a previous
+  load can never masquerade as fresh. The probes are also the field diagnostic: a `16#FF` still
+  sitting at a probe proves that quarter of the array was **never written**, while `0` means it was
+  written with zeros.
+- **The `.Lines` transfer is verified, not trusted (2026-08-13).** `BUSY = FALSE` with `RET_VAL = 0`
+  says the instruction closed the job, not that 12 KB of flash arrived. `ST_WAIT_LINES` now requires
+  **both** — all five probes overwritten (the array was written end to end) **and** the mandatory END
+  marker at `Lines[LineCount-1].CMD = 99` — before reporting `Done`, and re-issues the whole `.Lines`
+  transfer (re-poisoning first) up to `LINES_RETRY_MAX` (3) times. Each attempt is bounded by
+  `RecipeLoadTimeout`. The probes exist because the observed failure is **partial**, not absent: a
+  999-line recipe arrived zero to ~line 900 and correct after it, which a marker-only test would
+  have passed while the machine ran 900 zero-length moves.
 
 **Exits:**
 | Condition | Goes to |
 |---|---|
 | `fbRecipeLoader.Done` | PRE_SCAN (12), writes `DB_Diagnostic.Recipe_LoadedProgram` |
-| `fbRecipeLoader.Error` | ERROR (999) with `16#0312`; `DB_Diagnostic.Error_Text` carries `ErrorPhase` (1 = Header, 2 = Lines) + `READ_DBL` RET_VAL (16#FFFF = watchdog) |
+| `fbRecipeLoader.Error`, `ErrorPhase` 1/2 | ERROR (999) with `16#0312`; `DB_Diagnostic.Error_Text` carries `ErrorPhase` (1 = Header, 2 = Lines) + `READ_DBL` RET_VAL (16#FFFF = watchdog) |
+| `fbRecipeLoader.Error`, `ErrorPhase` 3 | ERROR (999) with `16#0314` — every transfer returned `RET_VAL = 0` and the END marker never arrived, `LINES_RETRY_MAX` times over. Not a `READ_DBL` fault: check that the recipe DB in the CPU actually holds data (re-import `gcodes/DB_RecipeProgramN.scl`) |
 
 **Why it runs on every cycle start.** It is tempting to skip the copy when the same program is already
 in the buffer. Do not. A recipe re-downloaded from CAM changes load memory while `DB_SelectedRecipe`
