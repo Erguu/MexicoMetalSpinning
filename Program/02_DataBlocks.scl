@@ -1144,7 +1144,7 @@ NON_RETAIN
         // (LINES_PER_RECIPE in tools/gen_recipe_slots.py), the pre-scan guard
         // (06_MainProcess.scl, activeLineCount > 1000) and the SpinningCam output must
         // all move together, or READ_DBL fails on a length mismatch.
-        Lines  : Array[0..999] of "RecipeLine"; // Copy of the selected recipe's lines
+        Lines  : Array[0..349] of "RecipeLine"; // Copy of the selected recipe's lines
     END_VAR
 BEGIN
 END_DATA_BLOCK

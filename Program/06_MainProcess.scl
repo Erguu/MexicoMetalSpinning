@@ -2191,7 +2191,7 @@ BEGIN
             // 999 against an Array[0..349], so a header claiming 400+ lines read past
             // the end of the array. Closed by construction: the guard and the array
             // are both 1000 now. Keep them in step if the array size ever changes.
-            IF #activeLineCount <= 0 OR #activeLineCount > 1000 THEN
+            IF #activeLineCount <= 0 OR #activeLineCount > 350 THEN
                 #newErrorFlag := TRUE;     // BUG FIX: was missing -- alarm manager never latched 16#0310,
                                            // so HMI showed ERROR state with empty text and no history entry
                 #newErrorCode := 16#0310;  // Recipe: invalid line count (not loaded?)

@@ -1,224 +1,112 @@
 // =============================================================================
 // 02b_RecipePrograms.scl
-// Recipe program data blocks (DB_RecipeProgram1..5)
+// Recipe program data blocks (DB_RecipeProgram1..5) -- WORK MEMORY (PLAN B)
 //
 // *** GENERATED FILE -- do not hand-edit. ***
-// Produced by tools/gen_recipe_slots.py --slots 5
-// To change the slot count, run that script; do not add declarations by hand.
+// Produced by tools/gen_workmem_recipes.py --recipes 5 --lines 350
 //
-// Kept separate from 02_DataBlocks.scl so real recipe data is not overwritten
-// when 02_DataBlocks.scl is regenerated.
-// Depends on: 01_DataTypes.scl (RecipeHeader, RecipeLine UDTs)
+// =============================================================================
+// THIS IS THE FALLBACK DESIGN. NO LOAD MEMORY, NO READ_DBL.
+// =============================================================================
+// These DBs are ordinary work-memory blocks. There is no UNLINKED attribute and
+// no READ_DBL anywhere in the project on this branch. FB_RecipeLoader copies the
+// selected recipe into DB_SelectedRecipe with a plain array loop: one scan,
+// synchronous, nothing asynchronous to half-complete.
 //
-// *** IMPORTING THIS FILE INTO TIA WIPES ALL RECIPE DATA ***
-// (warning added 2026-08-06, field commissioning)
-// The BEGIN blocks below are EMPTY -- these declarations exist only so the
-// project compiles before any CAM file arrives. The real recipe data lives in
-// the CAM-generated files (gcodes/DB_RecipeProgramN.scl), which declare the
-// SAME block names and overwrite these when imported. Importing THIS file after
-// a CAM import therefore replaces every recipe with all-zero data -- and because
-// the DBs are UNLINKED (load memory only, not monitorable online), the wipe is
-// invisible until a cycle start copies zeros into DB_SelectedRecipe. Pre-scan
-// catches that as 16#0313 (missing END marker), but the recipes are still gone.
+// That is the entire point. On the load-memory design a 12 KB READ_DBL out of
+// load memory returned RET_VAL = 0, BUSY = FALSE and delivered an array with
+// scattered holes -- twice on the machine, differently each time. Here the
+// mechanism does not exist.
 //
-// So the import order is not optional:
-//     1. this file        (structure)
+// COST: 5 x ~4.2 KB = ~20.9 KB of work memory, resident, plus the same
+// again for DB_SelectedRecipe. On the load-memory design these DBs were free.
+// This is the trade, and it is why 350 lines and not 1000.
+//
+// STILL MANDATORY IN THE CAM EXPORT:
+//   { S7_Optimized_Access := 'FALSE' }   -- keeps the layout predictable and
+//   matches DB_SelectedRecipe. A mismatch here is a silent source of trouble.
+//   Array[0..349]                   -- must equal DB_SelectedRecipe.Lines
+//
+// NO LONGER REQUIRED:
+//   UNLINKED     -- remove it. With it the DB goes back to load memory and the
+//                   direct copy in FB_RecipeLoader cannot address it at all.
+//   Lines1..N    -- the chunked layout belongs to the other branch. Recipes here
+//                   use one flat Lines array. tools/split_recipe_db.py output is
+//                   NOT importable on this branch.
+//
+// IMPORT ORDER -- unchanged, and still not optional:
+//     1. this file        (structure, empty BEGIN blocks)
 //     2. EVERY gcodes/DB_RecipeProgramN.scl   (data)
-// Never step 1 without step 2.
-//
-// =============================================================================
-// LOAD-MEMORY RECIPES (2026-08-04) -- read this before editing the generator
-// =============================================================================
-// These DBs live in LOAD MEMORY ONLY. They cost zero work memory. FB_Process
-// copies the selected one into "DB_SelectedRecipe" (work memory) with READ_DBL
-// in STATE_RECIPE_LOAD(11), and everything downstream runs from that buffer.
-// Design + gate-test evidence: Program/docs/LOADMEM_COPY_ON_SELECT.md
-//
-// THREE THINGS THE CAM POST-PROCESSOR MUST EMIT, EXACTLY:
-//
-//   1. { S7_Optimized_Access := 'FALSE' }   -- standard access.
-//      READ_DBL requires source and destination to have the SAME access type,
-//      and an optimized DB may not contain a STRUCT (RecipeLine is a UDT).
-//      An optimized recipe DB is REFUSED by READ_DBL at runtime.
-//
-//   2. UNLINKED  -- and it MUST come BEFORE NON_RETAIN.
-//      Verified on TIA V17 / S7-1214C 2026-08-04: NON_RETAIN then UNLINKED
-//      will NOT generate blocks from the source. The order below is the one
-//      that works.
-//
-//      *** OMITTING UNLINKED FAILS SILENTLY. ***
-//      The recipe then sits in work memory, READ_DBL still succeeds (it reads
-//      the DB's start values either way), every test still passes, and the
-//      only symptom is that ~12 KB of work memory per recipe is quietly
-//      consumed again. It will not surface until the CPU runs out. Wrong
-//      ORDER is loud (nothing generates); a MISSING line is silent.
-//
-//   3. Array[0..999] -- 1000 lines. Must match DB_SelectedRecipe exactly.
-//      Header.LineCount is validated against 1..1000 in STATE_PRE_SCAN(12).
-//
-// A load-memory-only DB CANNOT be monitored online -- that is expected, and is
-// the quickest proof the attribute took effect. To inspect recipe data, run a
-// cycle and look at DB_SelectedRecipe instead.
-//
-// Slot count does NOT affect scan time: FB_RecipeLoader's CASE executes exactly
-// one branch per scan regardless of how many slots exist, and unselected recipes
-// are never touched.
-//
-// It DOES cost work memory, which is the constraint that bites. These DBs are free
-// (UNLINKED, load memory), but the loader CASE is two READ_DBL call sites per slot
-// and on the S7-1200 compiled code lives in the same 100 KB work memory as the DB
-// data. 50 slots compiled to 101% on 2026-08-10 and would not download.
-//
-// *** THE COUNT HERE MAY DELIBERATELY EXCEED THE LOADER'S COUNT. ***
-// FB_RecipeLoader's PROGRAM_COUNT and the activeProgram clamp may be LOWER than
-// the number of DATA_BLOCKs below, while the work-memory budget is being tuned
-// with gen_recipe_slots.py --loader-only. Surplus declarations are harmless: they
-// cost load memory (plenty spare) and the clamp makes them unreachable. The
-// LOADER's count is the number of slots an operator can actually select -- not the
-// number of DATA_BLOCKs in this file. The generator refuses to shrink this file
-// without --shrink-02b, because importing a shrunk 02b wipes recipe data as well
-// as removing declarations.
-//
-// Load memory cost: 5 x ~12 KB = ~0.06 MB of the 1214C's 4 MB.
+// Importing 1 without 2 leaves every recipe zeroed. Unlike the load-memory
+// design you CAN see that online here -- these DBs are monitorable.
 // =============================================================================
 
 // -----------------------------------------------------------------------------
-// DB_RecipeChunk - staging area for ONE chunk of a recipe (100 lines)
-//
-// Chunked transfer (2026-08-13): a single 12 KB READ_DBL out of load memory
-// lands only partially on this CPU, with RET_VAL = 0 and no error. Each chunk is
-// now pulled into this buffer, verified line by line, and only then copied into
-// DB_SelectedRecipe. 100 lines is small enough that EVERY line can be
-// checked rather than sampled -- there is no hole this can miss.
-//
-// Cost: 1200 bytes of work memory, once, regardless of slot count.
-// -----------------------------------------------------------------------------
-DATA_BLOCK "DB_RecipeChunk"
-{ S7_Optimized_Access := 'FALSE' }
-VERSION : 0.1
-NON_RETAIN
-    VAR
-        Lines : Array[0..99] of "RecipeLine";
-    END_VAR
-BEGIN
-END_DATA_BLOCK
-
-// -----------------------------------------------------------------------------
-// DB_RecipeProgram1 - Recipe data for Program 1
+// DB_RecipeProgram1 - Recipe data for Program 1  (work memory)
 // -----------------------------------------------------------------------------
 DATA_BLOCK "DB_RecipeProgram1"
 { S7_Optimized_Access := 'FALSE' }
-VERSION : 0.3
-UNLINKED
+VERSION : 1.0
 NON_RETAIN
     VAR
         Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
-        Lines1 : Array[0..99] of "RecipeLine"; // global lines 0..99
-        Lines2 : Array[0..99] of "RecipeLine"; // global lines 100..199
-        Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
-        Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
-        Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
-        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
-        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
-        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
-        Lines9 : Array[0..99] of "RecipeLine"; // global lines 800..899
-        Lines10: Array[0..99] of "RecipeLine"; // global lines 900..999
+        Lines  : Array[0..349] of "RecipeLine";  // 350 lines max
     END_VAR
 BEGIN
 END_DATA_BLOCK
 
 // -----------------------------------------------------------------------------
-// DB_RecipeProgram2 - Recipe data for Program 2
+// DB_RecipeProgram2 - Recipe data for Program 2  (work memory)
 // -----------------------------------------------------------------------------
 DATA_BLOCK "DB_RecipeProgram2"
 { S7_Optimized_Access := 'FALSE' }
-VERSION : 0.3
-UNLINKED
+VERSION : 1.0
 NON_RETAIN
     VAR
         Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
-        Lines1 : Array[0..99] of "RecipeLine"; // global lines 0..99
-        Lines2 : Array[0..99] of "RecipeLine"; // global lines 100..199
-        Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
-        Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
-        Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
-        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
-        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
-        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
-        Lines9 : Array[0..99] of "RecipeLine"; // global lines 800..899
-        Lines10: Array[0..99] of "RecipeLine"; // global lines 900..999
+        Lines  : Array[0..349] of "RecipeLine";  // 350 lines max
     END_VAR
 BEGIN
 END_DATA_BLOCK
 
 // -----------------------------------------------------------------------------
-// DB_RecipeProgram3 - Recipe data for Program 3
+// DB_RecipeProgram3 - Recipe data for Program 3  (work memory)
 // -----------------------------------------------------------------------------
 DATA_BLOCK "DB_RecipeProgram3"
 { S7_Optimized_Access := 'FALSE' }
-VERSION : 0.3
-UNLINKED
+VERSION : 1.0
 NON_RETAIN
     VAR
         Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
-        Lines1 : Array[0..99] of "RecipeLine"; // global lines 0..99
-        Lines2 : Array[0..99] of "RecipeLine"; // global lines 100..199
-        Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
-        Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
-        Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
-        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
-        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
-        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
-        Lines9 : Array[0..99] of "RecipeLine"; // global lines 800..899
-        Lines10: Array[0..99] of "RecipeLine"; // global lines 900..999
+        Lines  : Array[0..349] of "RecipeLine";  // 350 lines max
     END_VAR
 BEGIN
 END_DATA_BLOCK
 
 // -----------------------------------------------------------------------------
-// DB_RecipeProgram4 - Recipe data for Program 4
+// DB_RecipeProgram4 - Recipe data for Program 4  (work memory)
 // -----------------------------------------------------------------------------
 DATA_BLOCK "DB_RecipeProgram4"
 { S7_Optimized_Access := 'FALSE' }
-VERSION : 0.3
-UNLINKED
+VERSION : 1.0
 NON_RETAIN
     VAR
         Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
-        Lines1 : Array[0..99] of "RecipeLine"; // global lines 0..99
-        Lines2 : Array[0..99] of "RecipeLine"; // global lines 100..199
-        Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
-        Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
-        Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
-        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
-        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
-        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
-        Lines9 : Array[0..99] of "RecipeLine"; // global lines 800..899
-        Lines10: Array[0..99] of "RecipeLine"; // global lines 900..999
+        Lines  : Array[0..349] of "RecipeLine";  // 350 lines max
     END_VAR
 BEGIN
 END_DATA_BLOCK
 
 // -----------------------------------------------------------------------------
-// DB_RecipeProgram5 - Recipe data for Program 5
+// DB_RecipeProgram5 - Recipe data for Program 5  (work memory)
 // -----------------------------------------------------------------------------
 DATA_BLOCK "DB_RecipeProgram5"
 { S7_Optimized_Access := 'FALSE' }
-VERSION : 0.3
-UNLINKED
+VERSION : 1.0
 NON_RETAIN
     VAR
         Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
-        Lines1 : Array[0..99] of "RecipeLine"; // global lines 0..99
-        Lines2 : Array[0..99] of "RecipeLine"; // global lines 100..199
-        Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
-        Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
-        Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
-        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
-        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
-        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
-        Lines9 : Array[0..99] of "RecipeLine"; // global lines 800..899
-        Lines10: Array[0..99] of "RecipeLine"; // global lines 900..999
+        Lines  : Array[0..349] of "RecipeLine";  // 350 lines max
     END_VAR
 BEGIN
 END_DATA_BLOCK

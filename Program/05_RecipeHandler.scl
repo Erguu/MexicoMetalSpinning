@@ -5,327 +5,126 @@
 // =============================================================================
 
 // -----------------------------------------------------------------------------
-// FB_RecipeLoader - Copy the selected recipe from LOAD memory into work memory
+// FB_RecipeLoader - Copy the selected recipe into the run buffer (PLAN B)
 // DOC:
-//  purpose: DB_RecipeProgram1..PROGRAM_COUNT live in load memory (UNLINKED) and cannot be
-//           read by the program directly. This FB copies the selected one into
-//           "DB_SelectedRecipe" using TWO sequential READ_DBL sub-reference
-//           transfers -- .Header first, then .Lines. Never the whole-DB form;
-//           see "TWO TRANSFERS, NOT ONE" below for what that cost on the machine.
-//           Runs once per cycle start, in STATE_RECIPE_LOAD(11), before the
-//           pre-scan -- the machine is stationary and nothing else is pending.
+//  purpose: DB_RecipeProgram1..PROGRAM_COUNT are ordinary WORK-memory blocks on
+//           this branch. This FB copies the selected one into "DB_SelectedRecipe"
+//           with a plain array loop -- one scan, synchronous, no READ_DBL.
 //  inputs:  Execute (rising edge), ProgramNo (1..PROGRAM_COUNT), Reset (level)
-//  outputs: Done, Busy, Error + ErrorCode, LoadedProgram
-//  design:  Program/docs/LOADMEM_COPY_ON_SELECT.md  (gate-tested 2026-08-04)
+//  outputs: Done, Busy, Error + ErrorCode/ErrorPhase/ErrorChunk/RetryTotal,
+//           LoadedProgram. Busy/ErrorChunk/RetryTotal exist only so that
+//           FB_Process is identical on both branches -- they are always 0/FALSE.
+//  generator: tools/gen_workmem_recipes.py owns PROGRAM_COUNT, LINES_PER_RECIPE
+//           and the LOADER_CASE region. Do not hand-edit those.
 //
-//  READ_DBL call form -- both of these cost a build if you get them wrong:
-//    * READ_DBL is an INSTANCE-LESS system function (SFC 83 heritage). Declaring
-//      it as a multi-instance gives "Data type READ_DBL is unknown".
-//    * RET_VAL is the FUNCTION RETURN VALUE, not an output parameter. Passing
-//      it as RET_VAL => x gives "The formal parameter 'RET_VAL' is invalid".
+//  WHY THIS BRANCH EXISTS
+//  The load-memory design (feat/recipe-slots-and-batching) reads recipes with
+//  READ_DBL out of DBs marked UNLINKED, which costs zero work memory and is the
+//  better design on paper. On this 1214C it does not deliver: a 12 KB transfer
+//  returns RET_VAL = 0 and BUSY = FALSE while leaving scattered holes in the
+//  destination -- 2026-08-13, twice, with different holes each time, once
+//  producing a "successful" load that ran ~900 zero-length moves. Chunking the
+//  transfer is the attempt to live with that. THIS branch removes the mechanism:
+//  no load memory, no READ_DBL, no asynchronous job anywhere in the project.
 //
-//  TWO TRANSFERS, NOT ONE (changed 2026-08-06 after a field failure).
-//  The first version copied the WHOLE DB in one call (SRCBLK := "DB_RecipeProgramN").
-//  On the machine that delivered the Header correctly and left Lines completely
-//  zero, with no error anywhere -- a structured copy that matched the first
-//  member and gave up on the second. Re-reading the gate-test results
-//  (loadmem_gatetest/result.md) shows why it was never caught: whole-DB mode was
-//  only ever proven at 350 lines / 4.3 KB, while the 12 KB / 1000-line case was
-//  proven with the SUB-REFERENCE form (SRCBLK := "...".Lines). Production ran the
-//  one combination -- whole DB at 12 KB -- that no test covered.
-//  So: Header and Lines are now copied in two sequential calls, each in the exact
-//  form the gate test passed. A length or type mismatch on Lines surfaces as a
-//  non-zero RET_VAL instead of a silently empty buffer.
+//  WHAT IT COSTS
+//  Every recipe is resident in work memory (PROGRAM_COUNT x LINES_MAX x 12 B)
+//  plus the same again for the buffer, on a CPU with 100 KB that also holds the
+//  compiled code. That is why LINES_MAX is 350 here and 1000 there.
 //
-//  THE SPLIT WAS NOT ENOUGH (2026-08-13, second field failure, same signature).
-//  The claim that a sub-reference copy "cannot half-succeed" was wrong. On the
-//  machine the .Lines call again returned RET_VAL = 0 with BUSY = FALSE while the
-//  array stayed zero -- pre-scan caught it as 16#0313. RET_VAL/BUSY report that the
-//  instruction accepted and closed the job, not that 12 KB of flash arrived, and
-//  the moment this FB left ST_WAIT_LINES it dropped REQ and abandoned whatever was
-//  still in flight. PLCSIM never reproduced it (host RAM, copy done in one call).
-//  ST_WAIT_LINES therefore no longer trusts BUSY alone: it VERIFIES the copy and
-//  re-issues the transfer up to LINES_RETRY_MAX times before failing. Do not
-//  "simplify" that check away -- it is the only thing standing between a silent
-//  partial copy and a machined part.
-//
-//  WHY THE VERIFY PROBES THE WHOLE ARRAY AND NOT JUST THE END MARKER.
-//  Same day, with a 999-line recipe: the operator found DB_SelectedRecipe zero up
-//  to roughly line 900 and CORRECT after it. The copy is not all-or-nothing, it is
-//  PARTIAL -- and the part that landed is where the END marker lives, so a
-//  marker-only test would have passed that buffer and the machine would have run
-//  ~900 zero lines (X=0, Z=0) with the HMI counting up. That is exactly what
-//  happened before this check existed. Hence five poison probes across the array,
-//  all of which must come back overwritten, AND the END marker. The 38-line case
-//  is the same fault seen from the other end: there the marker sits at index 37,
-//  in the region that did NOT land, so pre-scan caught it as 16#0313.
-//  ErrorPhase says what failed: 1 = Header, 2 = Lines, 3 = Lines verify.
-//
-//  THE SELECTION LATCH -- the one genuinely dangerous thing in this block.
-//  READ_DBL is asynchronous and spans several scans with REQ held. SRCBLK is a
-//  VARIANT and the S7-1200 cannot index a DB dynamically, so the source is
-//  chosen by a CASE. If that CASE branch changed mid-transfer, the buffer would
-//  receive the front of one recipe and the tail of another -- with RET_VAL = 0
-//  and no error anywhere. The operator would machine a part that exists in no
-//  recipe. Hence #selLatched: the branch is frozen at ST_LATCH and the live
-//  ProgramNo input is ignored until the transfer completes.
-//
-//  Reset path: REQ is derived from the state EVERY scan and is never latched
-//  independently, so there is no way for a transfer to stay in flight across a
-//  reset, an E-Stop or an error acknowledge.
+//  WHAT CANNOT HAPPEN HERE
+//  Partial copies. The transfer is a FOR loop between two work-memory DBs inside
+//  one scan: it either runs or the scan does not complete. There is no REQ, no
+//  BUSY, no watchdog, no retry, and no verify beyond the END-marker sanity check
+//  in ST_CHECK -- because there is nothing left to catch.
 // -----------------------------------------------------------------------------
 FUNCTION_BLOCK "FB_RecipeLoader"
 { S7_Optimized_Access := 'TRUE' }
-VERSION : 0.3
+VERSION : 1.0
     VAR_INPUT
         Execute   : Bool;           // Rising edge starts the copy
         ProgramNo : Int;            // 1..PROGRAM_COUNT -- which recipe to load
         Reset     : Bool;           // Level: abort, clear error, invalidate buffer
     END_VAR
     VAR_OUTPUT
-        Done          : Bool;       // Copy complete AND verified, DB_SelectedRecipe is valid
-        Busy          : Bool;       // Transfer in flight
-        Error         : Bool;       // Copy failed -- FB_Process raises 16#0312 or 16#0314
-        ErrorCode     : Word;       // READ_DBL RET_VAL, latched. Two sentinels that are
-                                    // NOT RET_VAL values: 16#FFFF = watchdog timeout,
-                                    // 16#0314 = a chunk never arrived intact
-        ErrorPhase    : Int;        // 1 = Header transfer, 2 = chunk transfer (RET_VAL),
-                                    // 3 = chunk verify (RET_VAL said OK, data did not arrive)
-        ErrorChunk    : Int;        // Which chunk failed (1..CHUNK_COUNT), 0 = Header or
-                                    // the assembled-buffer end-marker check
-        RetryTotal    : Int;        // Re-issued transfers across the WHOLE load, cleared
-                                    // at ST_LATCH. This is the margin gauge: a load that
-                                    // succeeds with RetryTotal = 0 is comfortable; one
-                                    // that succeeds with RetryTotal > 0 got there on
-                                    // second attempts and CHUNK_LINES is too close to
-                                    // whatever this CPU can actually deliver. Watch it on
-                                    // the first hardware run -- a clean Done tells you
-                                    // nothing on its own.
+        Done          : Bool;       // Copy complete and verified
+        Busy          : Bool;       // Always FALSE here -- the copy is synchronous.
+                                    // Kept so FB_Process needs no change between branches.
+        Error         : Bool;       // Copy failed -- FB_Process raises 16#0314
+        ErrorCode     : Word;       // 16#0314 = END marker missing (the only failure left)
+        ErrorPhase    : Int;        // 3 = verify. 1/2 (transfer faults) cannot occur here.
+        ErrorChunk    : Int;        // Always 0 -- there are no chunks. Kept for interface parity.
+        RetryTotal    : Int;        // Always 0 -- nothing to retry. Kept for interface parity.
         LoadedProgram : Int;        // Which recipe is in the buffer (0 = none/invalid)
     END_VAR
     VAR
-        // READ_DBL is NOT declared here -- see the note above.
-        tonWatch    : TON;          // Hang watchdog (RecipeLoadTimeout), per transfer
-        state       : Int;          // see the ST_* constants below
-        selLatched  : Int := 1;     // Frozen program number for the whole load.
-                                    // Never cleared: keeps the instruction being
-                                    // called with REQ=FALSE so it resets cleanly.
-        chunkPhase  : Int;          // 0 = Header is the live call, 1..CHUNK_COUNT = that
-                                    // chunk. Latched like selLatched: only ever changed
-                                    // where REQ is already low, never mid-transfer.
-        chunkRetry  : Int;          // Attempts already re-issued for the CURRENT chunk
-        reqActive   : Bool;         // REQ level, derived from state every scan
-        busyRaw     : Bool;         // READ_DBL BUSY
-        retValRaw   : Int;          // READ_DBL return value (raw, every scan)
-        chunkOK     : Bool;         // every line of the staging buffer came back written
-        hdrLines    : Int;          // Header.LineCount, for the END-marker check
-        dstBase     : Int;          // first DB_SelectedRecipe index of the current chunk
+        state       : Int;
+        selLatched  : Int := 1;
+        hdrLines    : Int;
         prevExecute : Bool;
         rtExecute   : Bool;
     END_VAR
     VAR_TEMP
-        i           : Int;          // loop index (poison / verify / copy)
+        i           : Int;
     END_VAR
     CONST
-        ST_IDLE        : Int := 0;
-        ST_LATCH       : Int := 10;
-        ST_REQ_HDR     : Int := 20;  // Header transfer
-        ST_WAIT_HDR    : Int := 30;
-        ST_HDR_SETTLE  : Int := 35;  // One scan with REQ low so the Header call sees
-                                     // its job closed before the CASE switches
-        ST_CHUNK_PREP  : Int := 38;  // REQ low: poison the staging buffer, then request.
-                                     // Also the settle scan BETWEEN chunks and the
-                                     // re-poison step before a retry.
-        ST_REQ_CHUNK   : Int := 40;
-        ST_WAIT_CHUNK  : Int := 50;
-        ST_CHUNK_COPY  : Int := 57;  // staging -> DB_SelectedRecipe (work memory, sync)
-        ST_DONE        : Int := 60;
-        ST_ERROR       : Int := 90;
-        CHUNK_RETRY_MAX : Int := 3;  // re-issues per chunk before 16#0314. Each attempt
-                                     // is bounded by RecipeLoadTimeout.
-        CMD_PROGRAM_END : Int := 99; // Mandatory last-line marker (PLC_Recipe_Format_Spec.md)
-        POISON_CMD     : Int := 255; // 16#FF -- no recipe CMD can be this value
-        // Chunk geometry. COUPLED to tools/gen_recipe_slots.py (CHUNK_LINES /
-        // CHUNK_COUNT) and to the DB_RecipeProgram*.Lines1..N declarations it
-        // emits. Change them together or the transfers go out of step.
-        CHUNK_LINES    : Int := 100;
-        CHUNK_COUNT    : Int := 10;
-        LINES_MAX      : Int := 1000; // = CHUNK_LINES * CHUNK_COUNT, and the bound of
-                                      // DB_SelectedRecipe.Lines + the pre-scan guard
-        // <<< GENERATED:PROGRAM_COUNT -- do not hand-edit; run tools/gen_recipe_slots.py >>>
+        ST_IDLE  : Int := 0;
+        ST_LATCH : Int := 10;
+        ST_COPY  : Int := 20;
+        ST_CHECK : Int := 30;
+        ST_DONE  : Int := 60;
+        ST_ERROR : Int := 90;
+        CMD_PROGRAM_END : Int := 99;
+        // <<< GENERATED:LINES_PER_RECIPE -- do not hand-edit; run tools/gen_workmem_recipes.py >>>
+        LINES_MAX : Int := 350;  // Generated -- must match DB_RecipeProgram*/DB_SelectedRecipe
+        // <<< END GENERATED:LINES_PER_RECIPE >>>
+        // <<< GENERATED:PROGRAM_COUNT -- do not hand-edit; run tools/gen_workmem_recipes.py >>>
         PROGRAM_COUNT : Int := 5;  // Slot count. Generated -- must match the DB_RecipeProgram* count.
         // <<< END GENERATED:PROGRAM_COUNT >>>
     END_CONST
 BEGIN
-    // -------------------------------------------------------------------------
-    // Rising edge on Execute
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // PLAN B -- RECIPES IN WORK MEMORY, SYNCHRONOUS COPY. NO READ_DBL ANYWHERE.
+    //
+    // This is the fallback for the load-memory design. It exists because
+    // READ_DBL does not reliably deliver a recipe out of load memory on this
+    // 1214C: a 12 KB transfer returns RET_VAL = 0, BUSY = FALSE and leaves
+    // scattered holes in the destination (observed 2026-08-13 -- data past line
+    // ~850 on one attempt, around line ~200 on another). The chunked loader on
+    // branch feat/recipe-slots-and-batching is the attempt to live with that.
+    // THIS branch removes the mechanism instead.
+    //
+    // The recipe DBs are ordinary work-memory blocks here, so the program can
+    // address them directly and the copy is a plain array assignment: one scan,
+    // synchronous, no job, no BUSY, no watchdog, nothing that can half-succeed.
+    // The entire class of fault this project has been chasing cannot occur.
+    //
+    // The price is work memory: PROGRAM_COUNT x LINES_MAX x 12 bytes resident,
+    // which is why LINES_MAX is 350 and not 1000. See the branch README.
+    //
+    // INTERFACE PARITY IS DELIBERATE. Every output the chunked loader has is
+    // still here, even the ones that can no longer be set (Busy, ErrorChunk,
+    // RetryTotal). FB_Process calls this FB identically on both branches, so
+    // swapping between them is an import of 02b/05/06 and nothing else.
+    // =========================================================================
     #rtExecute := #Execute AND NOT #prevExecute;
     #prevExecute := #Execute;
 
-    // -------------------------------------------------------------------------
-    // Reset -- always honoured. Drives REQ low via the state on the next line.
-    // -------------------------------------------------------------------------
     IF #Reset THEN
         #state := ST_IDLE;
         #Done := FALSE;
         #Error := FALSE;
         #ErrorCode := 16#0000;
         #ErrorPhase := 0;
-        #ErrorChunk := 0;
-        #chunkPhase := 0;           // idle on the Header branch, REQ low
-        #chunkRetry := 0;
-        #RetryTotal := 0;
-        #LoadedProgram := 0;        // Buffer is no longer trusted -> forces a re-load
+        #LoadedProgram := 0;
     END_IF;
 
-    // -------------------------------------------------------------------------
-    // REQ is derived from state EVERY SCAN -- never latched on its own.
-    // ST_CHUNK_PREP is deliberately excluded: that is the scan where the previous
-    // job is closed, the staging buffer is poisoned and the watchdog resets.
-    // -------------------------------------------------------------------------
-    #reqActive := (#state = ST_REQ_HDR) OR (#state = ST_WAIT_HDR)
-                  OR (#state = ST_REQ_CHUNK) OR (#state = ST_WAIT_CHUNK);
+    // Parity outputs -- never set on this branch, driven every scan so a stale
+    // value from a delta download cannot be mistaken for a real reading.
+    #Busy := FALSE;
+    #ErrorChunk := 0;
+    #RetryTotal := 0;
 
-    // -------------------------------------------------------------------------
-    // THE READ_DBL CALL BLOCK
-    // Outer CASE = which recipe (#selLatched), inner CASE = which transfer
-    // (#chunkPhase: 0 = Header, 1..CHUNK_COUNT = Lines chunks). Exactly ONE call
-    // executes per scan. Both selectors are latched, never the live inputs.
-    // -------------------------------------------------------------------------
-    // <<< GENERATED:LOADER_CASE -- do not hand-edit; run tools/gen_recipe_slots.py >>>
-    CASE #selLatched OF
-        1:  CASE #chunkPhase OF
-                0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Header,
-                                           BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
-                1: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines1,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                2: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines2,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines3,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines4,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines10,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-            END_CASE;
-        2:  CASE #chunkPhase OF
-                0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Header,
-                                           BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
-                1: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines1,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                2: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines2,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines3,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines4,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines10,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-            END_CASE;
-        3:  CASE #chunkPhase OF
-                0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Header,
-                                           BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
-                1: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines1,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                2: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines2,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines3,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines4,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines10,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-            END_CASE;
-        4:  CASE #chunkPhase OF
-                0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Header,
-                                           BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
-                1: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines1,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                2: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines2,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines3,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines4,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines10,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-            END_CASE;
-        5:  CASE #chunkPhase OF
-                0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Header,
-                                           BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
-                1: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines1,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                2: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines2,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines3,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines4,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines10,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-            END_CASE;
-    END_CASE;
-    // <<< END GENERATED:LOADER_CASE >>>
-
-    // -------------------------------------------------------------------------
-    // Hang watchdog -- only runs while a transfer is in flight
-    // -------------------------------------------------------------------------
-    #tonWatch(IN := #reqActive, PT := "DB_MachineConfig".RecipeLoadTimeout);
-
-    // -------------------------------------------------------------------------
-    // State machine
-    // -------------------------------------------------------------------------
     CASE #state OF
 
         // === ST_IDLE (0) ===
@@ -334,148 +133,79 @@ BEGIN
                 #state := ST_LATCH;
             END_IF;
 
-        // === ST_LATCH (10) -- freeze the selection, poison the header ===
+        // === ST_LATCH (10) -- freeze the selection, poison the buffer ===
+        // The poison is kept even though a synchronous copy cannot fail halfway:
+        // it also covers the case where this state is reached and the copy state
+        // never runs (a Reset landing between the two scans), and it keeps the
+        // "blank means not loaded" contract that DB_HMI.LoadedProgramName relies on.
         ST_LATCH:
-            #selLatched := #ProgramNo;      // the latch. Everything downstream uses this.
-            #chunkPhase := 0;               // always start with the Header transfer
-            #chunkRetry := 0;
+            #selLatched := #ProgramNo;
             #Done := FALSE;
             #Error := FALSE;
             #ErrorCode := 16#0000;
             #ErrorPhase := 0;
-            #ErrorChunk := 0;
-            #RetryTotal := 0;               // margin gauge, per load
-            #LoadedProgram := 0;            // buffer invalid until the copy lands
-            // POISON (2026-08-06): a failed load must leave a buffer that CANNOT
-            // pass pre-scan. DB_SelectedRecipe survives delta downloads and failed
-            // transfers, so header data from an OLD copy would otherwise sit there
-            // looking like evidence that "the copy worked". The Lines array needs
-            // no poison of its own any more -- every chunk is verified in the
-            // staging buffer BEFORE it is allowed into DB_SelectedRecipe.
+            #LoadedProgram := 0;
             "DB_SelectedRecipe".Header.LineCount := 0;
             "DB_SelectedRecipe".Header.sName := '';
             "DB_SelectedRecipe".Header.Valid := FALSE;
-            #state := ST_REQ_HDR;
+            #state := ST_COPY;
 
-        // === ST_REQ_HDR (20) -- first scan with REQ high, Header branch ===
-        ST_REQ_HDR:
-            #state := ST_WAIT_HDR;
-
-        // === ST_WAIT_HDR (30) -- hold REQ on the SAME branch until BUSY drops ===
-        // ErrorCode is LATCHED here, not mirrored every scan: once REQ falls the
-        // next call returns its idle value and would wipe the real result.
-        ST_WAIT_HDR:
-            IF #tonWatch.Q THEN
-                #ErrorCode := 16#FFFF;      // watchdog: BUSY never cleared
-                #ErrorPhase := 1;
-                #state := ST_ERROR;
-            ELSIF NOT #busyRaw THEN
-                IF #retValRaw = 0 THEN
-                    #state := ST_HDR_SETTLE;
-                ELSE
-                    #ErrorCode := INT_TO_WORD(#retValRaw);
-                    #ErrorPhase := 1;
-                    #state := ST_ERROR;
-                END_IF;
-            END_IF;
-
-        // === ST_HDR_SETTLE (35) -- one scan with REQ low, then start chunk 1 ===
-        ST_HDR_SETTLE:
-            #chunkPhase := 1;
-            #chunkRetry := 0;
-            #state := ST_CHUNK_PREP;
-
-        // === ST_CHUNK_PREP (38) -- REQ low: poison the staging buffer ===
-        // Every line gets 16#FF in its CMD byte. After the transfer, ANY line
-        // still holding 16#FF proves that line was never written. At CHUNK_LINES
-        // = 100 this is complete coverage, not a sample: the scattered holes seen
-        // on the machine (data around line 200 on one attempt, past 850 on
-        // another) cannot slip through it.
-        ST_CHUNK_PREP:
-            FOR #i := 0 TO CHUNK_LINES - 1 DO
-                "DB_RecipeChunk".Lines[#i].CMD := 16#FF;
-            END_FOR;
-            #state := ST_REQ_CHUNK;
-
-        // === ST_REQ_CHUNK (40) -- first scan with REQ high on this chunk ===
-        ST_REQ_CHUNK:
-            #state := ST_WAIT_CHUNK;
-
-        // === ST_WAIT_CHUNK (50) -- wait, then VERIFY before believing it ===
-        // BUSY = FALSE with RET_VAL = 0 reports that the instruction closed the
-        // job, NOT that the bytes arrived. That distinction is the entire bug.
-        ST_WAIT_CHUNK:
-            IF #tonWatch.Q THEN
-                #ErrorCode := 16#FFFF;
-                #ErrorPhase := 2;
-                #ErrorChunk := #chunkPhase;
-                #state := ST_ERROR;
-            ELSIF NOT #busyRaw THEN
-                IF #retValRaw <> 0 THEN
-                    #ErrorCode := INT_TO_WORD(#retValRaw);
-                    #ErrorPhase := 2;
-                    #ErrorChunk := #chunkPhase;
-                    #state := ST_ERROR;
-                ELSE
-                    #chunkOK := TRUE;
-                    FOR #i := 0 TO CHUNK_LINES - 1 DO
-                        IF BYTE_TO_INT("DB_RecipeChunk".Lines[#i].CMD) = POISON_CMD THEN
-                            #chunkOK := FALSE;
-                        END_IF;
+        // === ST_COPY (20) -- the whole recipe, in one scan ===
+        // Header is a struct assignment; Lines is an element loop rather than a
+        // whole-array assignment because the loop is the form already proven to
+        // compile in this project. LINES_MAX x 12 B is a few KB of block move --
+        // irrelevant next to a scan, and the machine is standing still anyway.
+        ST_COPY:
+            // <<< GENERATED:LOADER_CASE -- do not hand-edit; run tools/gen_workmem_recipes.py >>>
+            CASE #selLatched OF
+                1:  "DB_SelectedRecipe".Header := "DB_RecipeProgram1".Header;
+                    FOR #i := 0 TO LINES_MAX - 1 DO
+                        "DB_SelectedRecipe".Lines[#i] := "DB_RecipeProgram1".Lines[#i];
                     END_FOR;
+                2:  "DB_SelectedRecipe".Header := "DB_RecipeProgram2".Header;
+                    FOR #i := 0 TO LINES_MAX - 1 DO
+                        "DB_SelectedRecipe".Lines[#i] := "DB_RecipeProgram2".Lines[#i];
+                    END_FOR;
+                3:  "DB_SelectedRecipe".Header := "DB_RecipeProgram3".Header;
+                    FOR #i := 0 TO LINES_MAX - 1 DO
+                        "DB_SelectedRecipe".Lines[#i] := "DB_RecipeProgram3".Lines[#i];
+                    END_FOR;
+                4:  "DB_SelectedRecipe".Header := "DB_RecipeProgram4".Header;
+                    FOR #i := 0 TO LINES_MAX - 1 DO
+                        "DB_SelectedRecipe".Lines[#i] := "DB_RecipeProgram4".Lines[#i];
+                    END_FOR;
+                5:  "DB_SelectedRecipe".Header := "DB_RecipeProgram5".Header;
+                    FOR #i := 0 TO LINES_MAX - 1 DO
+                        "DB_SelectedRecipe".Lines[#i] := "DB_RecipeProgram5".Lines[#i];
+                    END_FOR;
+            END_CASE;
+            // <<< END GENERATED:LOADER_CASE >>>
+            #state := ST_CHECK;
 
-                    IF #chunkOK THEN
-                        #state := ST_CHUNK_COPY;
-                    ELSIF #chunkRetry < CHUNK_RETRY_MAX THEN
-                        #chunkRetry := #chunkRetry + 1;
-                        #RetryTotal := #RetryTotal + 1;
-                        #state := ST_CHUNK_PREP;    // re-poison and re-issue THIS chunk
-                    ELSE
-                        // Out of attempts on this chunk. Not a READ_DBL failure --
-                        // it claimed success every time -- so it gets its own code.
-                        #ErrorCode := 16#0314;
-                        #ErrorPhase := 3;
-                        #ErrorChunk := #chunkPhase;
-                        #state := ST_ERROR;
-                    END_IF;
-                END_IF;
-            END_IF;
-
-        // === ST_CHUNK_COPY (57) -- staging -> DB_SelectedRecipe ===
-        // Work memory to work memory, synchronous, one scan. Variable indices are
-        // legal here; it is only the READ_DBL VARIANT that must be constant.
-        ST_CHUNK_COPY:
-            #dstBase := (#chunkPhase - 1) * CHUNK_LINES;
-            FOR #i := 0 TO CHUNK_LINES - 1 DO
-                "DB_SelectedRecipe".Lines[#dstBase + #i] := "DB_RecipeChunk".Lines[#i];
-            END_FOR;
-
-            IF #chunkPhase < CHUNK_COUNT THEN
-                #chunkPhase := #chunkPhase + 1;
-                #chunkRetry := 0;               // fresh budget for the next chunk
-                #state := ST_CHUNK_PREP;
+        // === ST_CHECK (30) -- the recipe must end where its header says ===
+        // The one check worth keeping from the load-memory design: it catches a
+        // recipe DB that was never imported (all zeros) or one whose LineCount
+        // disagrees with its data. Costs one comparison.
+        ST_CHECK:
+            #hdrLines := "DB_SelectedRecipe".Header.LineCount;
+            IF #hdrLines >= 1 AND #hdrLines <= LINES_MAX
+               AND BYTE_TO_INT("DB_SelectedRecipe".Lines[#hdrLines - 1].CMD) = CMD_PROGRAM_END THEN
+                #LoadedProgram := #selLatched;
+                #Done := TRUE;
+                #state := ST_DONE;
+            ELSIF #hdrLines < 1 OR #hdrLines > LINES_MAX THEN
+                // Header itself is unusable -- let PRE_SCAN(12) report 16#0310,
+                // which is the accurate error for that case.
+                #LoadedProgram := #selLatched;
+                #Done := TRUE;
+                #state := ST_DONE;
             ELSE
-                // Last chunk in. Final cross-check: the recipe format guarantees
-                // the last line is CMD = 99, so the assembled buffer must end
-                // where the Header says it does. Catches a Header and a Lines set
-                // that came from different states of the source DB.
-                #hdrLines := "DB_SelectedRecipe".Header.LineCount;
-                IF #hdrLines >= 1 AND #hdrLines <= LINES_MAX
-                   AND BYTE_TO_INT("DB_SelectedRecipe".Lines[#hdrLines - 1].CMD) <> CMD_PROGRAM_END THEN
-                    #ErrorCode := 16#0314;
-                    #ErrorPhase := 3;
-                    #ErrorChunk := 0;           // 0 = assembled buffer, not one chunk
-                    #state := ST_ERROR;
-                ELSE
-                    #LoadedProgram := #selLatched;
-                    #Done := TRUE;
-                    #state := ST_DONE;
-                END_IF;
+                #ErrorCode := 16#0314;
+                #ErrorPhase := 3;
+                #state := ST_ERROR;
             END_IF;
 
         // === ST_DONE (60) ===
-        // Done stays TRUE so FB_Process can move on. A new rising edge re-loads,
-        // which is what a program change or a restart must do.
         ST_DONE:
             #Done := TRUE;
             IF #rtExecute AND #ProgramNo >= 1 AND #ProgramNo <= PROGRAM_COUNT THEN
@@ -488,8 +218,6 @@ BEGIN
             #Done := FALSE;
             #LoadedProgram := 0;
     END_CASE;
-
-    #Busy := #reqActive AND #busyRaw;
 END_FUNCTION_BLOCK
 
 // -----------------------------------------------------------------------------
