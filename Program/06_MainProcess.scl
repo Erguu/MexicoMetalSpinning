@@ -1092,6 +1092,9 @@ VERSION : 4.0
         parkTargetZ    : Real;  // Clamped SheetLoadPos_Z used by the stop/park move (fbMoveZ_Stop)
         bJogBlockPlus      : Bool;  // Manual soft-limit jog gate: block jog+ (recomputed every scan)
         bJogBlockMinus     : Bool;  // Manual soft-limit jog gate: block jog- (recomputed every scan)
+        bToolLockEngaged   : Bool;  // ToolHeadLock is (or may be) holding the turret
+        bToolAxisBlocked   : Bool;  // Manual motion on the tool axis refused because of it
+                                    // Both recomputed every scan -- no reset path needed
         prevManualError : Bool;  // Edge detection: manual mode error
         prevMDIExec : Bool;      // Edge detection: manual MDI execute button (STATE_MANUAL)
         bMDI_Cmd40Extend : Bool; // Latch: MDI CMD=40 Param=1 holds BackSupport extended (Param=0 releases)
@@ -1620,10 +1623,21 @@ BEGIN
     // ONLY indication that the machine will run with the E-Stop circuit defeated.
     // WarningID stays 1 (WinCC text list key); the wording changed -- keep
     // tools/hmi_texts.csv row 'warning,1' in step with this string.
-    "DB_HMI".HasWarning := "DB_HMI".Bypass_EStop;
+    // Priority chain, highest first. E-Stop bypass is never suppressed by anything --
+    // it is the only sign that the machine will run unguarded, so it outranks a
+    // transient interlock message. A blocked tool jog therefore shows no banner while
+    // the bypass is on; the jog is still refused, which is the part that matters.
+    "DB_HMI".HasWarning := "DB_HMI".Bypass_EStop OR #bToolAxisBlocked;
     IF "DB_HMI".Bypass_EStop THEN
         "DB_HMI".WarningText    := 'DANGER: E-Stop bypassed - machine runs unguarded';
         "DB_HMI".WarningID      := 1;
+    ELSIF #bToolAxisBlocked THEN
+        // Shown as soon as the tool axis is selected with the lock engaged, not only
+        // after a button press: the operator learns why before pushing, and the
+        // message explains the refusal if they push anyway. No latch, no timer --
+        // it clears itself when the lock releases or another axis is selected.
+        "DB_HMI".WarningText    := 'Tool axis locked - ToolHeadLock is engaged';
+        "DB_HMI".WarningID      := 3;
     ELSE
         "DB_HMI".WarningText    := '';
         "DB_HMI".WarningID      := 0;
@@ -3547,16 +3561,53 @@ BEGIN
     // passes (same escape pattern as PNP below -- never fault, never trap the operator).
     // Un-homed axes are NOT gated: position is meaningless before the reference seek,
     // so soft limits cannot apply. Tool axis (SelectedAxis=2) is never gated here.
+    // TOOLHEADLOCK INTERLOCK (2026-08-14) -- the turret must not be driven while the
+    // lock is engaged. The lock is a pin into the turret: rotating against it damages
+    // the pin, the turret, or both, and nothing downstream would notice, because an
+    // open-loop stepper reports a completed move whether or not the shaft turned.
+    //
+    // "Engaged" is ANY of:
+    //   Sol_A       the PLC is commanding extend right now. Unambiguous, and it holds
+    //               even on a machine whose sensor is absent or bypassed.
+    //   AtSetpoint  the sensor says the pin is in (PositioningMode = 1, real switch on
+    //               this cylinder). Ignored when Bypass_ToolHeadLock is set, which is
+    //               how a machine with no sensor is commissioned -- otherwise a missing
+    //               switch would permanently forbid tool jogging.
+    //
+    // NOT tested: "the cylinder has not confirmed it is retracted". That would be the
+    // stricter interlock, but this cylinder has NO retract sensor -- OB1 wires only
+    // Sen_AtSetpoint, and FB_CylinderControl derives AtRetract from State 4, which is
+    // only entered when Sen_AtRetract is TRUE. AtRetract is therefore permanently FALSE
+    // here, and testing it would forbid tool jogging forever. The residual gap is a pin
+    // stuck mid-stroke with the coil off and the sensor not made: undetectable on this
+    // hardware. Wire In_Cyl_ToolHeadLock_AtRetract if that case matters, then add the
+    // term -- do not add it before the sensor exists.
+    //
+    // In MANUAL the lock should already be retracted (FB_Process only commands extend
+    // in states 17/20/25 and the 5/2 valve springs back), so this normally never fires.
+    // It exists for when that assumption is wrong: a stuck spool, a failed spring, a
+    // fault that left the machine in MANUAL with the pin still in.
+    #bToolLockEngaged :=
+        "DB_Cylinder_ToolHeadLock".Sol_A
+        OR (NOT "DB_HMI".Bypass_ToolHeadLock
+            AND "DB_Cylinder_ToolHeadLock".AtSetpoint);
+
+    // Only the TOOL axis is affected. X and Z are free to move with the lock engaged --
+    // that is a normal machining condition, not a fault.
+    #bToolAxisBlocked := #bToolLockEngaged AND "DB_Manual".SelectedAxis = 2;
+
     #bJogBlockPlus :=
         ("DB_Manual".SelectedAxis = 0 AND #Axis_X.StatusBits.HomingDone
          AND #Axis_X.ActualPosition >= "DB_MachineConfig".SoftLimit_MaxX) OR
         ("DB_Manual".SelectedAxis = 1 AND #Axis_Z.StatusBits.HomingDone
-         AND #Axis_Z.ActualPosition >= "DB_MachineConfig".SoftLimit_MaxZ);
+         AND #Axis_Z.ActualPosition >= "DB_MachineConfig".SoftLimit_MaxZ) OR
+        #bToolAxisBlocked;
     #bJogBlockMinus :=
         ("DB_Manual".SelectedAxis = 0 AND #Axis_X.StatusBits.HomingDone
          AND #Axis_X.ActualPosition <= "DB_MachineConfig".SoftLimit_MinX) OR
         ("DB_Manual".SelectedAxis = 1 AND #Axis_Z.StatusBits.HomingDone
-         AND #Axis_Z.ActualPosition <= "DB_MachineConfig".SoftLimit_MinZ);
+         AND #Axis_Z.ActualPosition <= "DB_MachineConfig".SoftLimit_MinZ) OR
+        #bToolAxisBlocked;
     // In STATE_PNP_HALT: additionally block jog direction that would drive the axis
     // deeper into the PNP zone. Jog toward the active PNP zone is blocked; jog away
     // (escape direction) is passed through.
@@ -3571,14 +3622,20 @@ BEGIN
         "DB_Manual".Jog_Plus  := "DB_Manual".Btn_JogPlus  AND NOT #bJogBlockPlus;
         "DB_Manual".Jog_Minus := "DB_Manual".Btn_JogMinus AND NOT #bJogBlockMinus;
     END_IF;
-    "DB_Manual".Btn_HomeAxis := "DB_Manual".Btn_Home;
+    // The interlock covers every manual command that can turn the turret, not just the
+    // jog buttons: a MoveAbsolute or a Home on the tool axis breaks the pin exactly as
+    // well as a jog does. HomeAll is gated on the lock alone, whatever axis is selected,
+    // because its step 3 homes the tool.
+    "DB_Manual".Btn_HomeAxis := "DB_Manual".Btn_Home AND NOT #bToolAxisBlocked;
 
     #fbManualMode(Enable := (#State = STATE_MANUAL OR #State = STATE_PNP_HALT),
                   SelectedAxis := "DB_Manual".SelectedAxis,
                   Jog_Plus := "DB_Manual".Jog_Plus, Jog_Minus := "DB_Manual".Jog_Minus, 
                   JogSpeed := "DB_Manual".JogSpeed,
-                  MoveAbsolute := "DB_Manual".Btn_MoveAbsolute, TargetPosition := "DB_Manual".MoveToPosition,
-                  HomeAxis := "DB_Manual".Btn_HomeAxis, HomeAll := "DB_Manual".Btn_HomeAll,
+                  MoveAbsolute := "DB_Manual".Btn_MoveAbsolute AND NOT #bToolAxisBlocked,
+                  TargetPosition := "DB_Manual".MoveToPosition,
+                  HomeAxis := "DB_Manual".Btn_HomeAxis,
+                  HomeAll := "DB_Manual".Btn_HomeAll AND NOT #bToolLockEngaged,
                   HomingMode := "DB_Manual".HomingMode, HomePosition := 0.0,
                   GoSafe := "DB_Manual".Btn_GoSafe, GoZero := "DB_Manual".Btn_GoZero,
                   SafeToJog := #fbSafetyMonitor.SafeToJog, Reset := #fbInputs.Cmd_Reset,

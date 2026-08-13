@@ -286,7 +286,7 @@ The largest file in the project. Contains multiple FBs.
 | `FB_LimitMonitor` | ~120–190 | Soft-limit position check — only for HOMED axes (Homed_X/Z inputs); un-homed axis never trips |
 | `FB_ManualMode` | ~130+ | Manual jog, homing, step, tool step, spindle manual. MoveAbsolute rejects targets outside soft limits (homed axes only) |
 | `FB_AlarmManager` | middle section | Consumes DB_SystemEvents queue, severity-priority latch on DB_Error (higher tier preempts display, same/lower tier → history only), updates DB_Error + DB_HMI_Errors |
-| `FB_Process` | last large block | Main state machine — orchestrates all modes. Includes TO fault poller (StatusBits.Error → 16#0021-0024) and manual soft-limit jog gating |
+| `FB_Process` | last large block | Main state machine — orchestrates all modes. Includes TO fault poller (StatusBits.Error → 16#0021-0024), manual soft-limit jog gating, and the ToolHeadLock interlock that refuses tool-axis jog/MoveAbsolute/Home (and HomeAll) while the lock is engaged → `WarningID = 3` |
 
 #### `FB_SafetyMonitor` — Safety Priority Order
 ```

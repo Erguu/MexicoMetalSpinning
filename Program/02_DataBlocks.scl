@@ -132,6 +132,8 @@ NON_RETAIN
         //   1 = DANGER: E-Stop bypassed - machine runs unguarded (auto run IS permitted
         //       since 2026-08-12 -- this is the only on-screen sign of it)
         //   2 = Insert sheet, then press both start buttons
+        //   3 = Tool axis locked - ToolHeadLock is engaged (manual jog/move/home
+        //       on the tool axis refused; see the interlock in FB_Process)
         WarningID : Int;
         WarningText : String[70];   // Warning message text -- English (E-Stop bypass or operator prompts only)
         ResumeLine : Int := -1;     // Saved recipe line for warm restart (-1 = none). Set in STATE_ERROR, cleared on Btn_Restart.

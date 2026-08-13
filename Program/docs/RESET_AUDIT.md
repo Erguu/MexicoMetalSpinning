@@ -8,6 +8,20 @@ a clean, safe, runnable state — regardless of where the machine was when it fa
 
 **Rule reference:** See "Reset-Path Rule" section in `CLAUDE.md` for the four mandatory checkpoints.
 
+## FB_Process — ToolHeadLock tool-axis interlock (2026-08-14) — CLEARED
+
+- **No reset path required, by construction.** `#bToolLockEngaged` and `#bToolAxisBlocked` are
+  recomputed unconditionally every scan from `DB_Cylinder_ToolHeadLock.Sol_A` / `.AtSetpoint` and
+  `DB_Manual.SelectedAxis`, exactly like `#bJogBlockPlus/Minus` beside them. No latch, no timer, so
+  nothing can survive a Reset, a Stop or an error acknowledgement.
+- **The warning clears itself.** `WarningID = 3` is written in the same every-scan if/else chain as
+  the E-Stop bypass banner, whose `ELSE` branch drives `HasWarning`/`WarningText`/`WarningID` to
+  FALSE/''/0. A blocked jog cannot leave a banner behind.
+- **No new physical output.** The interlock only withdraws permission from existing manual commands;
+  it never drives a coil.
+- **Fail-safe direction:** sensor stuck ON → tool jogging refused (safe, and escapable with
+  `Bypass_ToolHeadLock`). Sensor stuck OFF → the commanded case is still caught by `Sol_A`.
+
 **How to use this file:**
 Work through one file per AI session. Read only that file, fill in the findings, mark status.
 Do not try to audit all files in one session — token budget will not allow it.

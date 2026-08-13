@@ -1,7 +1,9 @@
 # FB_Process State Machine Reference
 
 **Source file:** `Program/06_MainProcess.scl`
-**Last updated:** 2026-08-13 (second revision) — **RECIPE_LOAD(11) transfers the recipe in 10 chunks of 100 lines.** A single 12 KB `READ_DBL` lands partially on the real CPU with `RET_VAL = 0`; the holes are scattered and differ between attempts. Each chunk is now pulled into `DB_RecipeChunk`, verified line by line against a `16#FF` poison (complete coverage), retried up to 3 times, and only then copied into `DB_SelectedRecipe`. Failure = `16#0314` with `ErrorChunk`. Not compiled, not commissioned.
+**Last updated:** 2026-08-14 — **MANUAL(5): tool-axis motion is interlocked against the ToolHeadLock.** Jog, MoveAbsolute and Home on the tool axis are refused while the lock is engaged, and HomeAll is refused outright (its step 3 homes the tool). New warning `WarningID = 3`. Not compiled. See STATE 5 below.
+
+**Previously, 2026-08-13 (second revision) — **RECIPE_LOAD(11) transfers the recipe in 10 chunks of 100 lines.** A single 12 KB `READ_DBL` lands partially on the real CPU with `RET_VAL = 0`; the holes are scattered and differ between attempts. Each chunk is now pulled into `DB_RecipeChunk`, verified line by line against a `16#FF` poison (complete coverage), retried up to 3 times, and only then copied into `DB_SelectedRecipe`. Failure = `16#0314` with `ErrorChunk`. Not compiled, not commissioned.
 
 **Previously, 2026-08-13:** **the `.Lines` copy is verified, not trusted.**
 `FB_RecipeLoader.ST_WAIT_LINES` no longer accepts `BUSY = FALSE` + `RET_VAL = 0` as proof of arrival;
@@ -580,6 +582,43 @@ longer held, the handler simply rests in `STATE_IDLE`.
 > `Bypass_EStop` no longer blocks this transition either (2026-08-12) — see the note under STATE 0.
 
 ---
+
+### ToolHeadLock interlock (2026-08-14)
+
+The turret must not be driven while the lock pin is in it: rotating against the pin damages the pin,
+the turret, or both, and nothing downstream notices — an open-loop stepper reports a completed move
+whether or not the shaft turned.
+
+`#bToolLockEngaged` is TRUE when **either** `DB_Cylinder_ToolHeadLock.Sol_A` (the PLC is commanding
+extend) **or** `AtSetpoint` (the sensor says the pin is in). The sensor half is suppressed by
+`DB_HMI.Bypass_ToolHeadLock`, so a machine commissioned without the switch is not permanently barred
+from jogging the turret. `#bToolAxisBlocked` narrows that to `SelectedAxis = 2` — X and Z move freely
+with the lock engaged, which is normal machining, not a fault.
+
+| Command | Blocked when |
+|---|---|
+| `Jog_Plus` / `Jog_Minus` | `#bToolAxisBlocked` (folded into `#bJogBlockPlus/Minus`, so the PNP branch inherits it) |
+| `MoveAbsolute` | `#bToolAxisBlocked` |
+| `Btn_HomeAxis` | `#bToolAxisBlocked` |
+| `HomeAll` | `#bToolLockEngaged` — whatever axis is selected, because step 3 homes the tool |
+
+Feedback is a **warning, not an error**: `DB_HMI.HasWarning` + `WarningID = 3`
+(*"Tool axis locked - ToolHeadLock is engaged"*). A refused jog should not demand a Reset. It appears
+as soon as the tool axis is selected with the lock engaged — before the operator presses anything —
+and clears itself when the lock releases or another axis is selected. No latch, no timer, so it needs
+no reset-path entry. It sits **below** the E-Stop bypass banner in the warning priority chain: that
+banner is never suppressed, so with the bypass on the jog is still refused but the reason is not
+displayed.
+
+**Residual gap, by design:** a pin stuck mid-stroke with the coil off and the sensor not made is not
+detected. This cylinder has no retract sensor — OB1 wires only `Sen_AtSetpoint`, and `AtRetract`
+comes from cylinder State 4, which is only entered when `Sen_AtRetract` is TRUE. Testing `NOT
+AtRetract` would therefore forbid tool jogging permanently. Wire `In_Cyl_ToolHeadLock_AtRetract`
+first if that case matters.
+
+In normal operation this interlock never fires: FB_Process commands extend only in states 17/20/25,
+and the 5/2 valve springs back everywhere else. It exists for when that assumption fails — a stuck
+spool, a failed spring, or a fault that left the machine in MANUAL with the pin still in.
 
 ## STATE 11 — RECIPE_LOAD
 
