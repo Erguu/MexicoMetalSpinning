@@ -1,9 +1,9 @@
 // =============================================================================
 // 02b_RecipePrograms.scl
-// Recipe program data blocks (DB_RecipeProgram1..5)
+// Recipe program data blocks (DB_RecipeProgram1..10)
 //
 // *** GENERATED FILE -- do not hand-edit. ***
-// Produced by tools/gen_recipe_slots.py --slots 5
+// Produced by tools/gen_recipe_slots.py --slots 10
 // To change the slot count, run that script; do not add declarations by hand.
 //
 // Kept separate from 02_DataBlocks.scl so real recipe data is not overwritten
@@ -79,7 +79,7 @@
 // without --shrink-02b, because importing a shrunk 02b wipes recipe data as well
 // as removing declarations.
 //
-// Load memory cost: 5 x ~12 KB = ~0.06 MB of the 1214C's 4 MB.
+// Load memory cost: 10 x ~12 KB = ~0.11 MB of the 1214C's 4 MB.
 // =============================================================================
 
 // -----------------------------------------------------------------------------
@@ -203,6 +203,126 @@ END_DATA_BLOCK
 // DB_RecipeProgram5 - Recipe data for Program 5
 // -----------------------------------------------------------------------------
 DATA_BLOCK "DB_RecipeProgram5"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.3
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines1 : Array[0..99] of "RecipeLine"; // global lines 0..99
+        Lines2 : Array[0..99] of "RecipeLine"; // global lines 100..199
+        Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
+        Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
+        Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
+        Lines9 : Array[0..99] of "RecipeLine"; // global lines 800..899
+        Lines10: Array[0..99] of "RecipeLine"; // global lines 900..999
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram6 - Recipe data for Program 6
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram6"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.3
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines1 : Array[0..99] of "RecipeLine"; // global lines 0..99
+        Lines2 : Array[0..99] of "RecipeLine"; // global lines 100..199
+        Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
+        Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
+        Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
+        Lines9 : Array[0..99] of "RecipeLine"; // global lines 800..899
+        Lines10: Array[0..99] of "RecipeLine"; // global lines 900..999
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram7 - Recipe data for Program 7
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram7"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.3
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines1 : Array[0..99] of "RecipeLine"; // global lines 0..99
+        Lines2 : Array[0..99] of "RecipeLine"; // global lines 100..199
+        Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
+        Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
+        Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
+        Lines9 : Array[0..99] of "RecipeLine"; // global lines 800..899
+        Lines10: Array[0..99] of "RecipeLine"; // global lines 900..999
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram8 - Recipe data for Program 8
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram8"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.3
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines1 : Array[0..99] of "RecipeLine"; // global lines 0..99
+        Lines2 : Array[0..99] of "RecipeLine"; // global lines 100..199
+        Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
+        Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
+        Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
+        Lines9 : Array[0..99] of "RecipeLine"; // global lines 800..899
+        Lines10: Array[0..99] of "RecipeLine"; // global lines 900..999
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram9 - Recipe data for Program 9
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram9"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.3
+UNLINKED
+NON_RETAIN
+    VAR
+        Header : "RecipeHeader";                // Program name, LineCount, Valid, bounding box, tool table
+        Lines1 : Array[0..99] of "RecipeLine"; // global lines 0..99
+        Lines2 : Array[0..99] of "RecipeLine"; // global lines 100..199
+        Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
+        Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
+        Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
+        Lines9 : Array[0..99] of "RecipeLine"; // global lines 800..899
+        Lines10: Array[0..99] of "RecipeLine"; // global lines 900..999
+    END_VAR
+BEGIN
+END_DATA_BLOCK
+
+// -----------------------------------------------------------------------------
+// DB_RecipeProgram10 - Recipe data for Program 10
+// -----------------------------------------------------------------------------
+DATA_BLOCK "DB_RecipeProgram10"
 { S7_Optimized_Access := 'FALSE' }
 VERSION : 0.3
 UNLINKED

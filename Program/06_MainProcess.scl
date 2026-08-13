@@ -1277,7 +1277,7 @@ BEGIN
         #activeProgram := "DB_HMI".ProductSelect;
         IF #activeProgram < 1 THEN #activeProgram := 1; END_IF;
         // <<< GENERATED:PROGRAM_CLAMP -- do not hand-edit; run tools/gen_recipe_slots.py >>>
-        IF #activeProgram > 5 THEN #activeProgram := 5; END_IF;  // 5 recipe slots
+        IF #activeProgram > 10 THEN #activeProgram := 10; END_IF;  // 10 recipe slots
         // <<< END GENERATED:PROGRAM_CLAMP >>>
     END_IF;
 

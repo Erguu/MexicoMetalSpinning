@@ -155,7 +155,7 @@ VERSION : 0.3
                                       // DB_SelectedRecipe.Lines + the pre-scan guard
         // <<< END GENERATED:CHUNK_GEOMETRY >>>
         // <<< GENERATED:PROGRAM_COUNT -- do not hand-edit; run tools/gen_recipe_slots.py >>>
-        PROGRAM_COUNT : Int := 5;  // Slot count. Generated -- must match the DB_RecipeProgram* count.
+        PROGRAM_COUNT : Int := 10;  // Slot count. Generated -- must match the DB_RecipeProgram* count.
         // <<< END GENERATED:PROGRAM_COUNT >>>
     END_CONST
 BEGIN
@@ -315,6 +315,126 @@ BEGIN
                 9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines9,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines10,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+            END_CASE;
+        6:  CASE #chunkPhase OF
+                0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Header,
+                                           BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+                1: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines1,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                2: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines2,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines3,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines4,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines8,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines9,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines10,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+            END_CASE;
+        7:  CASE #chunkPhase OF
+                0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Header,
+                                           BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+                1: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines1,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                2: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines2,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines3,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines4,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines8,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines9,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines10,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+            END_CASE;
+        8:  CASE #chunkPhase OF
+                0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Header,
+                                           BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+                1: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines1,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                2: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines2,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines3,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines4,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines8,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines9,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines10,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+            END_CASE;
+        9:  CASE #chunkPhase OF
+                0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Header,
+                                           BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+                1: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines1,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                2: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines2,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines3,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines4,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines8,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines9,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines10,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+            END_CASE;
+        10: CASE #chunkPhase OF
+                0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Header,
+                                           BUSY => #busyRaw, DSTBLK := "DB_SelectedRecipe".Header);
+                1: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines1,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                2: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines2,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines3,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines4,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines8,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines9,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines10,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
     END_CASE;
