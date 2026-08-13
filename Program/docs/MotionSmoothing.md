@@ -187,6 +187,9 @@ already buying this capability with the CODESYS machine.**
 CODESYS IPC with SoftMotion CNC gives G-code with look-ahead, corner blending and native arc
 interpolation — this problem is solved architecturally rather than by workaround.
 
+External pulse-output controllers for *this* machine (Syntec 6TB vs DDCS) are compared in
+`CNC_Controller_Options.md`; the inquiry itself is `letterforsyntec.md`.
+
 **Carry forward:** make chord tolerance a *parameter* of the CAM post now. It delivers item
 #2 today; on the CODESYS machine you either dial it back down or switch the post to arcs.
 
