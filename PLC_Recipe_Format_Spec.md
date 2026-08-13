@@ -278,6 +278,6 @@ END_TYPE
 
 ## File Naming
 
-For program N (**1-50**; 1-5 until 2026-08-04, 1-10 until 2026-08-10), generate: `DB_RecipeProgram[N].scl`
+For program N (**1-10**; 1-5 until 2026-08-04, 1-10 until 2026-08-10, 1-50 until the 2026-08-13 field workaround cut the loader back to 10), generate: `DB_RecipeProgram[N].scl`
 
 Example: `DB_RecipeProgram1.scl`, `DB_RecipeProgram2.scl`, etc.
