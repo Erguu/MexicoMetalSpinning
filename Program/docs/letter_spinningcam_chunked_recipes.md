@@ -4,6 +4,12 @@
 **Subject:** a change to the `DB_RecipeProgramN.scl` post-processor output
 **Date:** 2026-08-14
 **Status of our side:** implemented and running in simulation; hardware test pending
+**Status of their side (2026-08-14): DONE.** SpinningCam now emits `Lines1..Lines10`, the
+`// CHUNKS: 10 x 100` header, and a distinct `Header.sName`. Test file received and validated
+(`gcodes/DB_RecipeProgram2.scl`, 993 lines, END marker at `Lines10[92]`, chunk seams continuous).
+The remaining question is whether chunk size is a parameter on their side or fixed at 100 --
+it matters the day we retune the geometry. Keep this letter as the spec; it is now a record of
+what was agreed, not a request.
 
 ---
 

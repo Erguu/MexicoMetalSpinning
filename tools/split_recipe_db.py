@@ -81,6 +81,12 @@ CHUNK_REF_RE = re.compile(r"\bLines(\d+)\[(\d+)\]")
 LINECOUNT_RE = re.compile(r"Header\.LineCount[ \t]*:=[ \t]*(\d+)[ \t]*;")
 CMD_RE = re.compile(r"\bLines\[(\d+)\]\.CMD[ \t]*:=[ \t]*(\d+)[ \t]*;")
 CHUNK_CMD_RE = re.compile(r"\bLines(\d+)\[(\d+)\]\.CMD[ \t]*:=[ \t]*(\d+)[ \t]*;")
+# Declared geometry. SpinningCam emits this since 2026-08-14, at our request:
+#     // CHUNKS: 10 x 100
+# Checking it turns a mismatch from something inferred into something the file states
+# outright -- the difference between "this looks wrong" and "this says it is 8 x 125
+# and the PLC reads 10 x 100". Absent on files converted by this script, which is fine.
+CHUNKS_MARKER_RE = re.compile(r"^//[ \t]*CHUNKS:[ \t]*(\d+)[ \t]*[xX][ \t]*(\d+)[ \t]*$", re.M)
 
 FLAT, CHUNKED, BROKEN = "flat", "chunked", "broken"
 
@@ -133,6 +139,24 @@ def check_flat(text: str) -> int:
                           f" {cmds.get(line_count - 1)}, expected 99. The END marker is"
                           " mandatory -- without it the PLC stops with 16#0313")
     return line_count
+
+
+def check_marker(text: str) -> str:
+    """Validate the // CHUNKS: n x m header when the exporter wrote one.
+
+    Returns a short provenance note for the report.
+    """
+    m = CHUNKS_MARKER_RE.search(text)
+    if not m:
+        return "no CHUNKS marker"
+    count, lines = int(m.group(1)), int(m.group(2))
+    if (count, lines) != (CHUNK_COUNT, CHUNK_LINES):
+        raise RecipeError(
+            f"file declares CHUNKS: {count} x {lines}, the PLC is built for"
+            f" {CHUNK_COUNT} x {CHUNK_LINES}. Regenerate the export against the PLC's"
+            " geometry, or retune the PLC with tools/gen_recipe_slots.py -- but do not"
+            " change the two independently")
+    return f"CAM-declared {count} x {lines}"
 
 
 def check_chunked(text: str) -> int:
@@ -192,7 +216,8 @@ def inspect(path: pathlib.Path) -> tuple[str, int, str]:
     chunked = bool(ANY_CHUNK_DECL_RE.search(text))
     try:
         if chunked:
-            return CHUNKED, check_chunked(text), "geometry matches the PLC"
+            note = check_marker(text)
+            return CHUNKED, check_chunked(text), f"geometry matches the PLC, {note}"
         return FLAT, check_flat(text), "flat export, ready to convert"
     except RecipeError as exc:
         return BROKEN, 0, str(exc)
