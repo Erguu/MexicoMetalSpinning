@@ -176,13 +176,21 @@ def checksum_state(text: str, line_count: int) -> tuple[str, int]:
             " line data came from different exports, or the two implementations of"
             " the algorithm disagree. Do NOT import this")
 
-    # NOTE (2026-08-14): an earlier version of this warned when the literal carried no
-    # UDINT# prefix, on the theory that an untyped literal above 32767 is ambiguous
-    # against a UDInt target. It is NOT -- TIA types it from the assignment target.
-    # DB_RecipeProgram1 imported cleanly with a bare 340461202. The warning was
-    # removed rather than softened: a caution that fires on every CAM export is noise,
-    # and noise is what people learn to skip past. --stamp still writes the prefix
-    # because it is free and unambiguous, not because the bare form is a problem.
+    # UDINT# prefix. This warning was raised at the wrong threshold (32767), withdrawn
+    # when a bare 340461202 imported fine, then reinstated here at the RIGHT one.
+    #
+    # Checksum is a UDInt: 0..4294967295. A bare literal is typed from the assignment
+    # target, which is why the low range imports cleanly -- but above DInt max there
+    # is no signed 32-bit type left to widen from, and that is where TIA may balk.
+    # Both files tested so far (340461202, 9593624) sit below the line, so nothing
+    # observed so far says anything about the half above it.
+    #
+    # A checksum is effectively uniform over the 32-bit range, so ~50% of exports land
+    # there. That is not an edge case worth discovering at the machine, and the fix is
+    # free: --stamp rewrites the literal with the prefix, value unchanged.
+    if "UDINT#" not in m_sum.group(0) and stated > 2147483647:
+        return (f"checksum {computed} verified, but it exceeds DInt max and the literal"
+                f" carries no UDINT# prefix -- run --stamp before importing"), computed
     return f"checksum {computed} verified", computed
 
 

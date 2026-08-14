@@ -59,17 +59,35 @@ invariant across conversion. We verified that property rather than assuming it.
 
 ---
 
-## Withdrawing the `UDINT#` request — it was our error
+## The `UDINT#` prefix — we had the right request for the wrong reason
 
-The previous letter asked you to emit `Header.Checksum := UDINT#9593624;` rather than a bare
-`9593624`, on the grounds that an untyped literal above 32767 would be ambiguous against a `UDInt`
-target and could be rejected by TIA.
+The previous letter asked you to emit `UDINT#9593624` rather than a bare `9593624`, saying an
+untyped literal **above 32767** would be rejected by TIA. **That threshold was wrong**, and we
+should not have sent it: `DB_RecipeProgram1` imported cleanly with a bare `340461202`. TIA types the
+literal from the assignment target, so the low range is fine. Apologies for the noise.
 
-**That was wrong.** `DB_RecipeProgram1` imported cleanly with the bare literal — TIA types it from
-the assignment target. Please ignore that request; nothing needs to change in your emitter, and we
-are sorry for the detour.
+**The request stands anyway, at the real boundary.** `Checksum` is a `UDInt`, range 0 to
+**4,294,967,295**. `DInt` — the widest *signed* 32-bit type a bare literal can be read as — stops at
+**2,147,483,647**. Above that line there is no signed type left to widen from, and that is where a
+bare literal is genuinely on thin ice.
 
-Our validator accepts both forms and is now silent about it.
+Everything tested so far sits below it: `340461202` and your `9593624`. So the clean imports tell us
+the bottom half of the range works and tell us **nothing** about the top half.
+
+This is not a rare edge case. A checksum is effectively uniform over the 32-bit range, so **roughly
+one export in two** lands above `DInt` max. If the bare form does fail there, it would fail on about
+half of all recipes, apparently at random, with a TIA import error that points at the data block
+rather than at anything recognisable.
+
+We have not tested it, and we are not asking you to. We are asking for the prefix because it costs
+one string concatenation and removes the question entirely:
+
+```scl
+    Header.Checksum := UDINT#340461202;
+```
+
+Our own tooling writes it that way and warns only above `DInt` max, so nothing here depends on you
+acting quickly.
 
 ---
 
