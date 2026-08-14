@@ -1,0 +1,55 @@
+// =============================================================================
+// Test_UDInt_Literal.scl - does TIA accept a bare integer literal above DInt max
+//                          when the target is a UDInt?
+//
+// WHY THIS EXISTS (2026-08-14)
+// RecipeHeader.Checksum is a UDInt (0..4,294,967,295). SpinningCam writes it as a
+// bare literal:
+//     Header.Checksum := 340461202;
+// That imported cleanly. But 340461202 is below DInt max (2,147,483,647), so a
+// bare literal there can be read as a DInt and widened. ABOVE that line there is
+// no signed 32-bit type left to widen from, and nothing tested so far says what
+// TIA does. A checksum is effectively a uniform 32-bit number, so ~50% of future
+// exports land in the untested half -- and if it fails there, it fails on half of
+// all recipes, seemingly at random.
+//
+// This block is the cheapest possible answer: five UDInt values spanning the
+// boundary, assigned the same way a recipe assigns its checksum. Import it, and
+// TIA either accepts all five or names the ones it will not take.
+//
+// THE THIRD OUTCOME, WHICH IS THE DANGEROUS ONE: TIA accepts the literal and
+// stores the WRONG VALUE (wrap to a negative, or to 0). That would make every
+// high-checksum recipe fail verification at run time with 16#0316, with nothing
+// anywhere pointing at the literal. So do not stop at "it compiled" -- read the
+// start values back, per the procedure in README.md next to this file.
+//
+// Standard access and the assignment-in-BEGIN form deliberately mirror
+// DB_RecipeProgram*, so this tests the real mechanism and not an approximation.
+//
+// THROWAWAY. Delete the block and the external source after reading the result.
+// =============================================================================
+
+DATA_BLOCK "DB_UDIntLiteralTest"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+NON_RETAIN
+    VAR
+        A_Low       : UDInt;    // expect 340461202     - a real checksum, known good
+        B_DIntMax   : UDInt;    // expect 2147483647    - the boundary itself
+        C_OverBy1   : UDInt;    // expect 2147483648    - first value past it
+        D_UDIntMax  : UDInt;    // expect 4294967295    - the top of the range
+        E_Prefixed  : UDInt;    // expect 4294967295    - control: same value, UDINT#
+    END_VAR
+
+BEGIN
+    // Bare literals, exactly as SpinningCam emits them
+    A_Low      := 340461202;
+    B_DIntMax  := 2147483647;
+    C_OverBy1  := 2147483648;
+    D_UDIntMax := 4294967295;
+
+    // Control. If this one is accepted and D is not, the prefix is mandatory
+    // above DInt max and the CAM must emit it.
+    E_Prefixed := UDINT#4294967295;
+
+END_DATA_BLOCK
