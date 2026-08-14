@@ -59,35 +59,29 @@ invariant across conversion. We verified that property rather than assuming it.
 
 ---
 
-## The `UDINT#` prefix — we had the right request for the wrong reason
+## The `UDINT#` prefix — please disregard, we tested it and there is nothing here
 
-The previous letter asked you to emit `UDINT#9593624` rather than a bare `9593624`, saying an
-untyped literal **above 32767** would be rejected by TIA. **That threshold was wrong**, and we
-should not have sent it: `DB_RecipeProgram1` imported cleanly with a bare `340461202`. TIA types the
-literal from the assignment target, so the low range is fine. Apologies for the noise.
+The previous letter asked you to emit `UDINT#9593624` instead of a bare `9593624`, on the grounds
+that an untyped literal would be ambiguous against a `UDInt` target. **Withdraw that request
+entirely — your emitter is correct as it stands.**
 
-**The request stands anyway, at the real boundary.** `Checksum` is a `UDInt`, range 0 to
-**4,294,967,295**. `DInt` — the widest *signed* 32-bit type a bare literal can be read as — stops at
-**2,147,483,647**. Above that line there is no signed type left to widen from, and that is where a
-bare literal is genuinely on thin ice.
+Rather than send you a third opinion, we measured it. A throwaway data block with five `UDInt` tags
+spanning the whole range, assigned exactly the way you assign the checksum:
 
-Everything tested so far sits below it: `340461202` and your `9593624`. So the clean imports tell us
-the bottom half of the range works and tell us **nothing** about the top half.
+| Literal as written | TIA start value |
+|---|---|
+| `340461202` | 340,461,202 |
+| `2147483647` (`DInt` max) | 2,147,483,647 |
+| `2147483648` (one past it) | 2,147,483,648 |
+| `4294967295` (`UDInt` max) | 4,294,967,295 |
+| `UDINT#4294967295` (control) | 4,294,967,295 |
 
-This is not a rare edge case. A checksum is effectively uniform over the 32-bit range, so **roughly
-one export in two** lands above `DInt` max. If the bare form does fail there, it would fail on about
-half of all recipes, apparently at random, with a TIA import error that points at the data block
-rather than at anything recognisable.
+No rejection anywhere, no wraparound, and the bare form matches the prefixed control exactly. TIA
+types the literal from the assignment target across the full range.
 
-We have not tested it, and we are not asking you to. We are asking for the prefix because it costs
-one string concatenation and removes the question entirely:
-
-```scl
-    Header.Checksum := UDINT#340461202;
-```
-
-Our own tooling writes it that way and warns only above `DInt` max, so nothing here depends on you
-acting quickly.
+Our validator no longer mentions it. Apologies for two rounds of noise on a non-issue — the
+reasoning was plausible twice and wrong twice, which is a good argument for having tested it
+sooner.
 
 ---
 

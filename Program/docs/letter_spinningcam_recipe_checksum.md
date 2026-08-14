@@ -171,17 +171,12 @@ regardless. If this change lands before you regenerate them, it costs nothing ex
 Please add the fields **at the end of the struct**, after `ToolAngle_List`, and keep everything above
 untouched — that keeps the diff reviewable on our side.
 
-**One syntax detail — CORRECTED 2026-08-14.** This section originally claimed an untyped literal
-**above 32767** would not compile. That threshold was wrong; a bare `Header.Checksum := 340461202;`
-imports cleanly, because TIA types the literal from the assignment target. The real boundary is
-**`DInt` max, 2,147,483,647** — above it there is no signed 32-bit type left to widen from, and a
-`UDInt` value up to 4,294,967,295 has nowhere to come from. Untested; ~50% of checksums land there.
-So still please emit the prefix, just for the right reason:
-
-```scl
-    Header.ProvidesChecksum := TRUE;
-    Header.Checksum := UDINT#340461202;
-```
+**~~One syntax detail~~ — WITHDRAWN 2026-08-14, settled by test.** This section asked for a `UDINT#`
+prefix on the value, claiming a bare literal would not compile. It was wrong twice (first at a 32767
+threshold, then at `DInt` max) and is now disproven outright: a bare `2147483648` and a bare
+`4294967295` both import and store their exact values, identical to a `UDINT#` control.
+`Program/docs/udint_literal_test/` holds the block and the numbers. **A bare literal is fine at any
+magnitude — no change is needed in the exporter.**
 
 ---
 

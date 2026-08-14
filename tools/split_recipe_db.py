@@ -176,21 +176,16 @@ def checksum_state(text: str, line_count: int) -> tuple[str, int]:
             " line data came from different exports, or the two implementations of"
             " the algorithm disagree. Do NOT import this")
 
-    # UDINT# prefix. This warning was raised at the wrong threshold (32767), withdrawn
-    # when a bare 340461202 imported fine, then reinstated here at the RIGHT one.
+    # UDINT# prefix: SETTLED BY TEST 2026-08-14, no warning needed. Bare literals are
+    # safe at ANY magnitude -- TIA types them from the assignment target all the way to
+    # UDInt max. Measured with Program/docs/udint_literal_test/: a bare 2147483648 and
+    # a bare 4294967295 both imported and stored their exact values, no rejection and
+    # no wraparound, matching the UDINT#-prefixed control byte for byte.
     #
-    # Checksum is a UDInt: 0..4294967295. A bare literal is typed from the assignment
-    # target, which is why the low range imports cleanly -- but above DInt max there
-    # is no signed 32-bit type left to widen from, and that is where TIA may balk.
-    # Both files tested so far (340461202, 9593624) sit below the line, so nothing
-    # observed so far says anything about the half above it.
-    #
-    # A checksum is effectively uniform over the 32-bit range, so ~50% of exports land
-    # there. That is not an edge case worth discovering at the machine, and the fix is
-    # free: --stamp rewrites the literal with the prefix, value unchanged.
-    if "UDINT#" not in m_sum.group(0) and stated > 2147483647:
-        return (f"checksum {computed} verified, but it exceeds DInt max and the literal"
-                f" carries no UDINT# prefix -- run --stamp before importing"), computed
+    # This was warned about twice on reasoning alone -- first at the wrong threshold
+    # (32767), then at DInt max -- and neither survived contact with the CPU. Do not
+    # add it back on theory. --stamp still writes the prefix because it is unambiguous
+    # and free, NOT because the bare form is a problem.
     return f"checksum {computed} verified", computed
 
 

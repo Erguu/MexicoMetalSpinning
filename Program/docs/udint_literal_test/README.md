@@ -1,4 +1,32 @@
-# UDInt literal gate test — procedure
+# UDInt literal gate test — RESULT: bare literals are safe at any magnitude
+
+**Answered 2026-08-14 on the real TIA project. No action needed from anyone; the `UDINT#` prefix is
+optional.** Keep this directory as the evidence — it exists so nobody re-derives the question from
+first principles a third time.
+
+| Tag | Expected | TIA start value | |
+|---|---|---|---|
+| `A_Low` | 340461202 | `340_461_202` | ok |
+| `B_DIntMax` | 2147483647 | `2_147_483_647` | ok |
+| `C_OverBy1` | 2147483648 | `2_147_483_648` | **ok — past DInt max** |
+| `D_UDIntMax` | 4294967295 | `4_294_967_295` | **ok — top of UDInt** |
+| `E_Prefixed` | 4294967295 | `UDINT#4_294_967_295` | ok (control) |
+
+Offsets came out 0.0 / 4.0 / 8.0 / 12.0 / 16.0 — a real standard-access block, four bytes each.
+
+**No rejection and no wraparound.** TIA types a bare literal from the assignment target across the
+whole `UDInt` range, and the bare values match the prefixed control exactly. The concern was raised
+twice on reasoning alone — first at the wrong threshold (32767), then at `DInt` max — and neither
+survived the test. `--check` no longer mentions it; `--stamp` still writes the prefix because it is
+free and unambiguous, not because the bare form is a problem.
+
+The lesson worth keeping: two rounds of plausible reasoning about implicit conversion cost more than
+this five-tag block did. Anything of this shape is cheaper to measure than to argue about.
+
+---
+
+## Original procedure (kept for reference)
+
 
 **Question:** does TIA accept a bare integer literal **above `DInt` max (2,147,483,647)** when the
 target is a `UDInt`, and does it store the right value?
