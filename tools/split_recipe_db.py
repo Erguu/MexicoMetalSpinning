@@ -175,6 +175,16 @@ def checksum_state(text: str, line_count: int) -> tuple[str, int]:
             f" {computed}. The file is internally inconsistent -- the header and the"
             " line data came from different exports, or the two implementations of"
             " the algorithm disagree. Do NOT import this")
+
+    # An untyped literal above 32767 is ambiguous against a UDInt target and TIA can
+    # reject the block at IMPORT time -- far from the exporter that caused it. Not
+    # fatal here (the value is right, only its notation is risky) and not silent
+    # either: --stamp rewrites it in place with the prefix. Caught on a real CAM
+    # export 2026-08-14, where every value below 32768 would have compiled fine and
+    # every real recipe would not.
+    if "UDINT#" not in m_sum.group(0) and stated > 32767:
+        return (f"checksum {computed} verified, but the literal has no UDINT# prefix"
+                f" -- run --stamp before importing"), computed
     return f"checksum {computed} verified", computed
 
 
