@@ -3815,6 +3815,22 @@ BEGIN
     // loaded-slot is enough for an operator to catch a wrong selection before pressing Start.
     "DB_HMI".LoadedProgramName           := "DB_SelectedRecipe".Header.sName;
 
+    // Checksum pair, for the HMI (2026-08-14). Same continuous-mirror discipline as
+    // the name above: written every scan, in no reset path, always reporting what is
+    // actually in the buffer.
+    //
+    // WHY BOTH NUMBERS AND NOT JUST A MATCH FLAG: on a 16#0316 the question is not
+    // "did it match" -- the error already says it did not. It is WHICH SIDE IS WRONG.
+    // Three implementations of this algorithm exist (SpinningCam's, tools/
+    // split_recipe_db.py, and FB_RecipeLoader). The first two are cross-verified
+    // against each other; the SCL one is not verified against anything. So if these
+    // two numbers disagree, the operator can read both off the screen and say which,
+    // instead of assuming the recipe is bad and re-exporting a perfectly good file.
+    // A single boolean would hide exactly the information needed.
+    "DB_HMI".Checksum_Recipe             := "DB_SelectedRecipe".Header.Checksum;
+    "DB_HMI".Checksum_Calculated         := #fbRecipeLoader.ChecksumCalc;
+    "DB_HMI".Checksum_Verified           := #fbRecipeLoader.ChecksumOK;
+
     // =========================================================================
     // CONTACTOR CONTROL -- called as the last step of FB_Process.
     // FC_ContactorControl reads DB_HMI.Btn_Contactor_* and Bypass_EStop/HasError.

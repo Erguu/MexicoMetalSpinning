@@ -73,7 +73,30 @@ NON_RETAIN
         // every program -- ask SpinningCam for a distinct name per program or this reads
         // identically for all 50 slots.
         LoadedProgramName : String[20];
-        
+
+        // Recipe checksum pair, PLC-written, read-only for the HMI (2026-08-14).
+        // Continuous mirrors written next to LoadedProgramName at the bottom of
+        // FB_Process -- in no reset path by design, because they always report the
+        // buffer's true state. 9 bytes total.
+        //
+        // Display these two side by side on the diagnostics screen. They matter only
+        // when they DISAGREE, and then they answer the one question 16#0316 cannot:
+        // which side is wrong. Three implementations of the algorithm exist
+        // (SpinningCam's, tools/split_recipe_db.py, FB_RecipeLoader) and only the
+        // first two have ever been checked against each other. If _Calculated is a
+        // stable, repeatable number that simply is not _Recipe, suspect the SCL, not
+        // the recipe file -- re-exporting a good file will not help and wastes a trip.
+        // If _Calculated changes between attempts on the same recipe, the transfer is
+        // landing different data each time, which is the original fault.
+        //
+        // _Verified = TRUE means checked AND matched. FALSE also means "this recipe
+        // carries no checksum", so it is not a fault indicator on its own -- a blank
+        // _Recipe (0) with _Verified FALSE is a pre-2026-08-14 export loading normally.
+        Checksum_Recipe : UDInt;        // what the recipe file declares
+        Checksum_Calculated : UDInt;    // what the PLC computed after reassembly
+        Checksum_Verified : Bool;       // TRUE = checked and matched
+
+
         // Tool slot codes editable from HMI. Enter external codes like 101, 406 etc.
         // These are copied to DB_ToolConfig.ToolCode_List when operator presses Apply.
         ToolSlotCode : Array[1..4] of Int := [101, 102, 103, 104];

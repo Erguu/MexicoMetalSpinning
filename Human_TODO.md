@@ -27,13 +27,26 @@ source of truth.
       **every** `gcodes/DB_RecipeProgramN.scl`. `02b` was regenerated at 10 slots, so importing it
       zeroes every recipe until step 3 is done — and the DBs are `UNLINKED`, so you cannot see the
       wipe online. The first symptom would be `16#0310` / `16#0313` on a cycle start.
-- [ ] **Record the compile percentage.** Nothing has been compiled since chunking; every memory
-      number in the docs is now an estimate. 10 slots × 11 call sites ≈ 12.6 KB, plus 1.2 KB staging.
+- [ ] **STILL OPEN — record the free work memory.** The project compiled and downloaded on
+      2026-08-14, so it *fits*; the percentage was not read and nobody knows by how much. Every
+      memory figure in the docs is still an estimate (10 slots × 11 call sites ≈ 12.6 KB, plus
+      1.2 KB staging). This is not urgent, it is the number that decides whether more slots, or
+      recipe chaining, or any future feature is affordable — and the answer is one screen away in
+      TIA (Online & diagnostics → Memory). **Read it the next time you are connected.**
 - [ ] Download, select program 1, press start, then read:
 
       "fbProcess".fbRecipeLoader.RetryTotal      <- the number that matters
       "fbProcess".fbRecipeLoader.ErrorChunk      <- only meaningful on 16#0314
       DB_SelectedRecipe.Lines[6/99/100/200/900/998]
+
+      DB_HMI.Checksum_Recipe / Checksum_Calculated   <- now on the HMI, see below
+
+**Program 1 is a 15-line test program as of 2026-08-14 15:46** (checksum `12109`, verified, no
+zeroed RPM or feed). That is a fine first run — the loader transfers **all ten chunks regardless of
+`LineCount`**, so every 1200 B transfer and every poison verify is exercised exactly as it would be
+at 999 lines. What it does *not* exercise is the checksum beyond line 14. **Run a 999-line recipe
+before declaring the transfer fixed** — the original fault showed opposite symptoms at 38 lines and
+at 999, and only the long case runs the machine.
 
 | Result | Meaning | Next |
 |---|---|---|
