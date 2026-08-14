@@ -40,6 +40,19 @@ source of truth.
 | `Done`, `RetryTotal = 0` | 1200 B transfers land first time | Approved → merge the branch to master |
 | `Done`, `RetryTotal > 0` | Only got there on retries; the chunk size is close to this CPU's limit | Halve it: `python tools/gen_recipe_slots.py` → option 2 → 50 |
 | `16#0314` | A chunk never arrived intact | Read `ErrorChunk`: same chunk every time = that recipe; different each time = the mechanism, halve the chunk size |
+
+On a failure, `DB_SelectedRecipe.Lines[].CMD` is now a map of what got in (the loader poisons the
+whole array with `16#FF` before it starts). Scroll it online and read:
+
+| `CMD` value | Meaning |
+|---|---|
+| `16#FF` | That chunk never arrived — nothing was written there |
+| `0` | The chunk arrived; the source really is zero at that line |
+| A valid CMD (0–99) | The chunk arrived intact |
+
+Note the *pattern* — contiguous FF at the front, at the back, or scattered — and photograph it.
+That is the shape of the fault, and it is the one thing PLCSIM could never show.
+
 | `16#0314` on every chunk size | Load memory is unusable on this CPU | Switch to `fallback/work-memory-recipes` |
 
 ## 2. Recipes 2–5 are unusable and must be re-exported

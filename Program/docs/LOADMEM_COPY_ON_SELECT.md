@@ -332,6 +332,24 @@ staging line's `CMD` with `16#FF` beforehand and requires every one overwritten 
 then copies the verified chunk into `DB_SelectedRecipe.Lines` with a `FOR` loop. Retry budget
 3 per chunk, then `16#0314` with `ErrorChunk`.
 
+**The destination is poisoned too (2026-08-14).** `ST_LATCH` writes `16#FF` into the `CMD` of all
+1000 lines of `DB_SelectedRecipe.Lines` before the first transfer. Safety does not depend on it —
+every chunk is verified in staging before it is allowed in, and `CHUNK_LINES × CHUNK_COUNT` covers
+the whole array — but it buys two things:
+
+- **A failed load becomes readable.** Online, the buffer is a map of what got in: `16#FF` = that
+  chunk never arrived, `0` = it arrived and the source is genuinely zero there, a valid `CMD` = it
+  arrived intact. `ErrorChunk` names where it stopped; the poison shows what surrounds it.
+  **Clearing to zero instead would be actively worse** — a hole and a legitimately-zero line would
+  be indistinguishable, which is the exact ambiguity that made the 999-line failure hard to read.
+- **Full coverage stops being a silent assumption.** "Nothing stale survives" rests on
+  `CHUNK_LINES × CHUNK_COUNT = LINES_MAX`. Retune the geometry so it no longer covers the array and
+  the tail would quietly keep the *previous* recipe; with the poison it keeps `16#FF` and the
+  end-marker check trips instead.
+
+It must run once, in `ST_LATCH`, before the first transfer — never in the per-chunk path, where a
+retry would wipe chunks that already landed.
+
 **Status: PLCSIM only, 2026-08-13.** A full 999-line program loaded with `Done = TRUE`,
 `ErrorCode = 0`, and the operator verified the buffer at the chunk seams (99/100, 199/200,
 899/900) against the source file. That proves the sequencing, the index arithmetic and the

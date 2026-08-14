@@ -55,11 +55,19 @@
 //  PARTIAL -- and the part that landed is where the END marker lives, so a
 //  marker-only test would have passed that buffer and the machine would have run
 //  ~900 zero lines (X=0, Z=0) with the HMI counting up. That is exactly what
-//  happened before this check existed. Hence five poison probes across the array,
-//  all of which must come back overwritten, AND the END marker. The 38-line case
-//  is the same fault seen from the other end: there the marker sits at index 37,
-//  in the region that did NOT land, so pre-scan caught it as 16#0313.
-//  ErrorPhase says what failed: 1 = Header, 2 = Lines, 3 = Lines verify.
+//  happened before this check existed. Five sampled probes replaced the marker
+//  test, and chunking replaced the samples: at CHUNK_LINES = 100 EVERY line of the
+//  staging buffer is poisoned and checked, so coverage is complete rather than
+//  statistical. The 38-line case is the same fault seen from the other end: there
+//  the marker sits at index 37, in the region that did NOT land, so pre-scan
+//  caught it as 16#0313.
+//  ErrorPhase says what failed: 1 = Header, 2 = chunk transfer, 3 = chunk verify.
+//
+//  READING A FAILED LOAD (2026-08-14). ST_LATCH poisons every CMD in
+//  DB_SelectedRecipe.Lines with 16#FF before the first transfer, so after a
+//  failure the buffer says which chunks got in: 16#FF = never copied, 0 = copied
+//  and the source is zero there, valid CMD = copied intact. ErrorChunk names the
+//  chunk that ran out of retries; the poison shows what surrounds it.
 //
 //  THE SELECTION LATCH -- the one genuinely dangerous thing in this block.
 //  READ_DBL is asynchronous and spans several scans with REQ held. SRCBLK is a
@@ -471,12 +479,35 @@ BEGIN
             // POISON (2026-08-06): a failed load must leave a buffer that CANNOT
             // pass pre-scan. DB_SelectedRecipe survives delta downloads and failed
             // transfers, so header data from an OLD copy would otherwise sit there
-            // looking like evidence that "the copy worked". The Lines array needs
-            // no poison of its own any more -- every chunk is verified in the
-            // staging buffer BEFORE it is allowed into DB_SelectedRecipe.
+            // looking like evidence that "the copy worked".
             "DB_SelectedRecipe".Header.LineCount := 0;
             "DB_SelectedRecipe".Header.sName := '';
             "DB_SelectedRecipe".Header.Valid := FALSE;
+
+            // POISON THE DESTINATION TOO (2026-08-14). Not needed for safety --
+            // every chunk is verified in the staging buffer before it is allowed
+            // in here, and CHUNK_LINES * CHUNK_COUNT covers the whole array, so
+            // nothing stale can survive a COMPLETE load. It is here for the two
+            // cases where that is not enough:
+            //   * DIAGNOSIS. After a failed load the buffer is a map: 16#FF = that
+            //     chunk never arrived, 0 = it arrived and the source is genuinely
+            //     zero there, a valid CMD = it arrived intact. Clearing to ZERO
+            //     instead would destroy exactly that distinction -- a hole and a
+            //     legitimately-zero line would look identical, which is what made
+            //     the 999-line failure so hard to read in the first place.
+            //   * FULL-COVERAGE IS AN INVARIANT, NOT A GUARANTEE. "No stale data"
+            //     currently rests on CHUNK_LINES * CHUNK_COUNT = LINES_MAX. Retune
+            //     the geometry to something that does not cover the array and the
+            //     tail would quietly keep the PREVIOUS recipe. With this loop it
+            //     keeps 16#FF instead, and pre-scan/the end-marker check trip.
+            // ~1000 byte writes in one scan, at cycle start, machine stationary,
+            // nothing else pending -- measured against RecipeLoadTimeout, not the
+            // motion loop. Do not move it into the per-chunk path to "spread the
+            // cost": it must run ONCE, before the first transfer, or a retry would
+            // wipe chunks that already landed.
+            FOR #i := 0 TO LINES_MAX - 1 DO
+                "DB_SelectedRecipe".Lines[#i].CMD := 16#FF;
+            END_FOR;
             #state := ST_REQ_HDR;
 
         // === ST_REQ_HDR (20) -- first scan with REQ high, Header branch ===
