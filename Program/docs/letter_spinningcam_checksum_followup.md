@@ -1,4 +1,4 @@
-# To SpinningCam — checksum cross-verified on your test file; one emitter defect
+# To SpinningCam — checksum cross-verified on your test file; nothing needed from you
 
 **Date:** 2026-08-14
 **Answers:** `reply_spinningcam_recipe_checksum.md`
@@ -59,27 +59,17 @@ invariant across conversion. We verified that property rather than assuming it.
 
 ---
 
-## The one defect: the `UDINT#` prefix is missing
+## Withdrawing the `UDINT#` request — it was our error
 
-This was a question in the draft of this letter and the test file settled it — it is real:
+The previous letter asked you to emit `Header.Checksum := UDINT#9593624;` rather than a bare
+`9593624`, on the grounds that an untyped literal above 32767 would be ambiguous against a `UDInt`
+target and could be rejected by TIA.
 
-```scl
-    Header.Checksum := 9593624;        <- as emitted
-    Header.Checksum := UDINT#9593624;  <- as it needs to be
-```
+**That was wrong.** `DB_RecipeProgram1` imported cleanly with the bare literal — TIA types it from
+the assignment target. Please ignore that request; nothing needs to change in your emitter, and we
+are sorry for the detour.
 
-An untyped integer literal above 32767 is ambiguous under TIA's implicit-conversion rules against a
-`UDInt` target, and the data block can be rejected at compile time. The letter called this out; it
-looks like it did not survive into the emitter.
-
-**Why this one is worth fixing before you regenerate anything:** values below 32768 compile either
-way. A small test file can pass while every real recipe fails, and the failure appears at *import*
-time in TIA, far from the code that caused it. Roughly one export in 130,000 would slip under the
-threshold by chance, so in practice this fails always — but it would fail confusingly if anyone ever
-hand-built a tiny test case.
-
-Our validator accepts both forms on read and always writes the prefix, so this is the only place it
-matters. One-line change on your side.
+Our validator accepts both forms and is now silent about it.
 
 ---
 

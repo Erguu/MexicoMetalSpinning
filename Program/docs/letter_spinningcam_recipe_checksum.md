@@ -171,15 +171,11 @@ regardless. If this change lands before you regenerate them, it costs nothing ex
 Please add the fields **at the end of the struct**, after `ToolAngle_List`, and keep everything above
 untouched — that keeps the diff reviewable on our side.
 
-**One syntax detail:** emit the value with an explicit type prefix —
-
-```scl
-    Header.ProvidesChecksum := TRUE;
-    Header.Checksum := UDINT#108445058;
-```
-
-An untyped integer literal above 32767 is ambiguous under TIA's implicit-conversion rules and the
-data block will not compile. We hit this immediately; it costs one prefix to avoid.
+**~~One syntax detail:~~ WITHDRAWN 2026-08-14.** This section asked for an explicit `UDINT#` prefix
+on the value, claiming an untyped literal above 32767 would not compile. That was wrong — TIA types
+the literal from the assignment target, and a bare `Header.Checksum := 340461202;` imports cleanly.
+Either form is fine. Kept here struck through rather than deleted, because the request was already
+sent.
 
 ---
 

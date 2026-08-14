@@ -67,11 +67,10 @@ python tools/split_recipe_db.py --stamp --all
 Then re-import the recipe DBs. `Header.ProvidesChecksum = FALSE` simply skips the check, so
 forgetting this costs you the extra evidence but breaks nothing.
 
-SpinningCam now emits checksums itself (verified 2026-08-14 against their test file — our two
-implementations agree on a real export, not just on the worked example). Their exports carry one
-defect: the literal is written without the `UDINT#` prefix, which TIA can reject at import. Running
-`--stamp` on their file repairs it in place and leaves the value unchanged, and `--check` now flags
-it, so you do not have to remember. They have been asked to fix the emitter.
+**SpinningCam now emits checksums itself**, so `--stamp` is no longer needed — verified 2026-08-14
+that our implementation and theirs agree on a real export (`DB_RecipeProgram1`, checksum
+`340461202`), not just on a shared worked example. `--stamp` stays useful only for a recipe exported
+before they implemented it. Their files import into TIA as-is.
 
 If `16#0316` fires, **do not chase `RetryTotal`** — there is no transfer fault. Read
 `DB_Diagnostic.Error_Text`, which carries both numbers. The usual cause is `02b_RecipePrograms.scl`

@@ -176,15 +176,13 @@ def checksum_state(text: str, line_count: int) -> tuple[str, int]:
             " line data came from different exports, or the two implementations of"
             " the algorithm disagree. Do NOT import this")
 
-    # An untyped literal above 32767 is ambiguous against a UDInt target and TIA can
-    # reject the block at IMPORT time -- far from the exporter that caused it. Not
-    # fatal here (the value is right, only its notation is risky) and not silent
-    # either: --stamp rewrites it in place with the prefix. Caught on a real CAM
-    # export 2026-08-14, where every value below 32768 would have compiled fine and
-    # every real recipe would not.
-    if "UDINT#" not in m_sum.group(0) and stated > 32767:
-        return (f"checksum {computed} verified, but the literal has no UDINT# prefix"
-                f" -- run --stamp before importing"), computed
+    # NOTE (2026-08-14): an earlier version of this warned when the literal carried no
+    # UDINT# prefix, on the theory that an untyped literal above 32767 is ambiguous
+    # against a UDInt target. It is NOT -- TIA types it from the assignment target.
+    # DB_RecipeProgram1 imported cleanly with a bare 340461202. The warning was
+    # removed rather than softened: a caution that fires on every CAM export is noise,
+    # and noise is what people learn to skip past. --stamp still writes the prefix
+    # because it is free and unambiguous, not because the bare form is a problem.
     return f"checksum {computed} verified", computed
 
 
