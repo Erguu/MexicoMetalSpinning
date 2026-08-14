@@ -63,6 +63,21 @@
 //  caught it as 16#0313.
 //  ErrorPhase says what failed: 1 = Header, 2 = chunk transfer, 3 = chunk verify.
 //
+//  WHAT THE VERIFY STILL CANNOT SEE, AND THE CHECKSUM (2026-08-14).
+//  Poisoning proves every line was WRITTEN. It says nothing about whether the
+//  right data arrived: a stale flash image, chunks reassembled at the wrong
+//  stride, or a Header paired with another export's Lines all pass it, because
+//  in every one of those cases all 1000 lines are written. So the loader now
+//  folds an order-sensitive checksum over CMD + Param + F into ST_CHUNK_COPY
+//  (the loop that already walks every line -- four adds per line, no second
+//  pass) and compares it with Header.Checksum after the last chunk. Mismatch =
+//  16#0316, ErrorPhase 4. Header.ProvidesChecksum = FALSE skips the check so
+//  pre-2026-08-14 exports still load; that is deliberate, not a hole to close.
+//  X and Z are NOT in the sum -- float32 on the CPU against float64 in the CAM
+//  would eventually disagree on a VALID recipe, and an alarm that cries wolf is
+//  worse than no alarm. Spec both sides build to:
+//  Program/docs/letter_spinningcam_recipe_checksum.md
+//
 //  READING A FAILED LOAD (2026-08-14). ST_LATCH poisons every CMD in
 //  DB_SelectedRecipe.Lines with 16#FF before the first transfer, so after a
 //  failure the buffer says which chunks got in: 16#FF = never copied, 0 = copied
@@ -98,7 +113,9 @@ VERSION : 0.3
                                     // NOT RET_VAL values: 16#FFFF = watchdog timeout,
                                     // 16#0314 = a chunk never arrived intact
         ErrorPhase    : Int;        // 1 = Header transfer, 2 = chunk transfer (RET_VAL),
-                                    // 3 = chunk verify (RET_VAL said OK, data did not arrive)
+                                    // 3 = chunk verify (RET_VAL said OK, data did not arrive),
+                                    // 4 = checksum mismatch (it all arrived, but it is not
+                                    //     the recipe the CAM exported)
         ErrorChunk    : Int;        // Which chunk failed (1..CHUNK_COUNT), 0 = Header or
                                     // the assembled-buffer end-marker check
         RetryTotal    : Int;        // Re-issued transfers across the WHOLE load, cleared
@@ -110,6 +127,14 @@ VERSION : 0.3
                                     // the first hardware run -- a clean Done tells you
                                     // nothing on its own.
         LoadedProgram : Int;        // Which recipe is in the buffer (0 = none/invalid)
+        ChecksumCalc  : UDInt;      // What WE computed over the reassembled buffer. On a
+                                    // 16#0316 this is the number to compare against
+                                    // DB_SelectedRecipe.Header.Checksum by hand -- and to
+                                    // quote to the CAM developer, because one of the two
+                                    // implementations is wrong and the pair says which.
+        ChecksumOK    : Bool;       // TRUE = checked and matched. FALSE also means "the
+                                    // recipe carries no checksum", so it is NOT a fault
+                                    // indicator on its own -- read it with ProvidesChecksum.
     END_VAR
     VAR
         // READ_DBL is NOT declared here -- see the note above.
@@ -126,13 +151,18 @@ VERSION : 0.3
         busyRaw     : Bool;         // READ_DBL BUSY
         retValRaw   : Int;          // READ_DBL return value (raw, every scan)
         chunkOK     : Bool;         // every line of the staging buffer came back written
-        hdrLines    : Int;          // Header.LineCount, for the END-marker check
+        hdrLines    : Int;          // Header.LineCount, latched at ST_HDR_SETTLE. Used by
+                                    // the checksum fold and the END-marker check, so it is
+                                    // read ONCE from the Header and not re-read per chunk.
         dstBase     : Int;          // first DB_SelectedRecipe index of the current chunk
+        sumA        : UDInt;        // checksum accumulator: running line sum
+        sumB        : UDInt;        // checksum accumulator: sum of sumA -> order-sensitive
         prevExecute : Bool;
         rtExecute   : Bool;
     END_VAR
     VAR_TEMP
         i           : Int;          // loop index (poison / verify / copy)
+        gLine       : Int;          // global recipe line index during the copy
     END_VAR
     CONST
         ST_IDLE        : Int := 0;
@@ -187,6 +217,8 @@ BEGIN
         #chunkRetry := 0;
         #RetryTotal := 0;
         #LoadedProgram := 0;        // Buffer is no longer trusted -> forces a re-load
+        #ChecksumCalc := 0;
+        #ChecksumOK := FALSE;
     END_IF;
 
     // -------------------------------------------------------------------------
@@ -476,6 +508,10 @@ BEGIN
             #ErrorChunk := 0;
             #RetryTotal := 0;               // margin gauge, per load
             #LoadedProgram := 0;            // buffer invalid until the copy lands
+            #sumA := 0;                     // checksum accumulators, per load
+            #sumB := 0;
+            #ChecksumCalc := 0;
+            #ChecksumOK := FALSE;
             // POISON (2026-08-06): a failed load must leave a buffer that CANNOT
             // pass pre-scan. DB_SelectedRecipe survives delta downloads and failed
             // transfers, so header data from an OLD copy would otherwise sit there
@@ -533,7 +569,11 @@ BEGIN
             END_IF;
 
         // === ST_HDR_SETTLE (35) -- one scan with REQ low, then start chunk 1 ===
+        // The Header has landed, so LineCount is known before the first chunk.
+        // Latch it here: the checksum fold needs it per line, and re-reading the
+        // Header 1000 times would make a moving target of the bound.
         ST_HDR_SETTLE:
+            #hdrLines := "DB_SelectedRecipe".Header.LineCount;
             #chunkPhase := 1;
             #chunkRetry := 0;
             #state := ST_CHUNK_PREP;
@@ -597,10 +637,31 @@ BEGIN
         // === ST_CHUNK_COPY (57) -- staging -> DB_SelectedRecipe ===
         // Work memory to work memory, synchronous, one scan. Variable indices are
         // legal here; it is only the READ_DBL VARIANT that must be constant.
+        // The checksum is folded into THIS loop rather than run as a separate pass
+        // over 1000 lines: the loop already touches every line, so the cost is four
+        // adds per line instead of a second traversal. Each chunk reaches here
+        // exactly once -- a failed verify retries from ST_CHUNK_PREP and never
+        // copies -- so no line can be accumulated twice.
         ST_CHUNK_COPY:
             #dstBase := (#chunkPhase - 1) * CHUNK_LINES;
             FOR #i := 0 TO CHUNK_LINES - 1 DO
                 "DB_SelectedRecipe".Lines[#dstBase + #i] := "DB_RecipeChunk".Lines[#i];
+
+                // Only the EMITTED lines count. Everything from LineCount to 999 is
+                // padding the CAM never wrote and must not enter the sum, or the two
+                // sides would have to agree on padding as well as on data.
+                #gLine := #dstBase + #i;
+                IF #gLine < #hdrLines THEN
+                    // F goes in as its unsigned 16-bit BIT PATTERN, not its value:
+                    // INT_TO_UDINT of a negative Int is a conversion fault waiting for
+                    // a malformed export, and this way both sides agree regardless of
+                    // sign. CMD and Param are bytes, so they are always non-negative.
+                    #sumA := #sumA
+                             + INT_TO_UDINT(BYTE_TO_INT("DB_RecipeChunk".Lines[#i].CMD)
+                                            + BYTE_TO_INT("DB_RecipeChunk".Lines[#i].Param))
+                             + DWORD_TO_UDINT(WORD_TO_DWORD(INT_TO_WORD("DB_RecipeChunk".Lines[#i].F)));
+                    #sumB := #sumB + #sumA;     // running sum -> order-sensitive
+                END_IF;
             END_FOR;
 
             IF #chunkPhase < CHUNK_COUNT THEN
@@ -612,14 +673,41 @@ BEGIN
                 // the last line is CMD = 99, so the assembled buffer must end
                 // where the Header says it does. Catches a Header and a Lines set
                 // that came from different states of the source DB.
-                #hdrLines := "DB_SelectedRecipe".Header.LineCount;
+                // #hdrLines was latched at ST_HDR_SETTLE -- do not re-read it here.
+                //
+                // CHECKSUM (2026-08-14). Seal the accumulators and compare against
+                // the CAM's figure. This is the ONLY check that looks at the DATA
+                // rather than at whether bytes were written: the poison verify
+                // above proves every line arrived, not that the right recipe did.
+                // It catches a stale flash image, chunks reassembled at the wrong
+                // stride, and a Header paired with someone else's Lines.
+                // XOR is a bit-string operation, hence the two conversions.
+                #ChecksumCalc := DWORD_TO_UDINT(
+                    UDINT_TO_DWORD(#sumB)
+                    XOR UDINT_TO_DWORD(#sumA + INT_TO_UDINT(#hdrLines)));
+
                 IF #hdrLines >= 1 AND #hdrLines <= LINES_MAX
                    AND BYTE_TO_INT("DB_SelectedRecipe".Lines[#hdrLines - 1].CMD) <> CMD_PROGRAM_END THEN
                     #ErrorCode := 16#0314;
                     #ErrorPhase := 3;
                     #ErrorChunk := 0;           // 0 = assembled buffer, not one chunk
                     #state := ST_ERROR;
+
+                ELSIF "DB_SelectedRecipe".Header.ProvidesChecksum
+                      AND #ChecksumCalc <> "DB_SelectedRecipe".Header.Checksum THEN
+                    // Everything arrived and none of it is what was exported.
+                    // Deliberately its own code: 16#0314 sends the operator looking
+                    // for a transfer fault, and there is no transfer fault here.
+                    #ErrorCode := 16#0316;
+                    #ErrorPhase := 4;
+                    #ErrorChunk := 0;
+                    #state := ST_ERROR;
+
                 ELSE
+                    // Matched, or the recipe predates the field. ProvidesChecksum
+                    // = FALSE is ACCEPTED on purpose -- making it mandatory would
+                    // brick every existing export the moment this is downloaded.
+                    #ChecksumOK := "DB_SelectedRecipe".Header.ProvidesChecksum;
                     #LoadedProgram := #selLatched;
                     #Done := TRUE;
                     #state := ST_DONE;

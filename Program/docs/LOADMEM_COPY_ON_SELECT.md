@@ -350,6 +350,46 @@ the whole array — but it buys two things:
 It must run once, in `ST_LATCH`, before the first transfer — never in the per-chunk path, where a
 retry would wipe chunks that already landed.
 
+### Checksum (2026-08-14) — the only check that looks at the data
+
+Everything above answers "were the bytes written?". Nothing answered "are they the right bytes?".
+Three failures write all 1000 lines and pass every check: a **stale flash image** of the recipe DB,
+chunks **reassembled at the wrong stride** after a geometry change, and a `Header` paired with
+another export's `Lines`. The first is the realistic one — importing `02b_RecipePrograms.scl`
+without re-importing the recipes leaves exactly that.
+
+`RecipeHeader` therefore gained `ProvidesChecksum : Bool` and `Checksum : UDInt`, and the loader
+computes, over global lines `0..LineCount-1` only:
+
+```
+sumA := sumA + CMD + Param + F        # F as its unsigned 16-bit BIT PATTERN
+sumB := sumB + sumA                   # running sum -> order-sensitive
+Checksum := sumB XOR (sumA + LineCount)
+```
+
+Unsigned 32-bit, natural wraparound, no modulo (a division per line is the one thing that would
+actually cost something on this CPU). It is folded into `ST_CHUNK_COPY`, which already walks every
+line, so it is four adds per line rather than a second 1000-line pass. Each chunk reaches that state
+exactly once — a failed verify retries from `ST_CHUNK_PREP` and never copies — so nothing can be
+accumulated twice. Mismatch → `16#0316`, `ErrorPhase = 4`, `ChecksumCalc` output carries ours and
+`DB_Diagnostic.Error_Text` carries both.
+
+Three decisions worth not relitigating:
+
+- **`ProvidesChecksum = FALSE` is accepted and skips the check.** Making it mandatory would render
+  every existing export unloadable the moment this is downloaded.
+- **`X` and `Z` are excluded.** Any value-based scheme over `float32` on the CPU against `float64`
+  in the CAM will eventually disagree on a *valid* recipe. A checksum that cries wolf gets ignored
+  on the day it is real. If bit-pattern coverage is ever wanted it goes in a *separate* field.
+- **`sumB` is not decoration.** Without the running sum, a permutation of the lines — precisely the
+  wrong-stride case — produces an identical result.
+
+Adding the fields relayouts `RecipeHeader`, so **every recipe export must be regenerated**;
+`READ_DBL` copies `.Header` by length and a short header fails at runtime. `tools/split_recipe_db.py
+--stamp` computes the identical number offline (`recipe_checksum()`), which lets the load path be
+tested before SpinningCam implements theirs — but it proves only the transfer, since both numbers
+come from the same file. CAM spec: `letter_spinningcam_recipe_checksum.md`.
+
 **Status: PLCSIM only, 2026-08-13.** A full 999-line program loaded with `Done = TRUE`,
 `ErrorCode = 0`, and the operator verified the buffer at the chunk seams (99/100, 199/200,
 899/900) against the source file. That proves the sequencing, the index arithmetic and the

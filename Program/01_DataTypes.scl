@@ -45,6 +45,27 @@ VERSION : 0.2
         AutoCalcAngles : Bool;                  // TRUE = angles auto-spaced from ToolCount; FALSE = use ToolAngle_List
         ToolCode_List : Array[1..4] of Int;     // External tool code installed in each slot (0 = slot unused)
         ToolAngle_List : Array[1..4] of Real;   // Turret angle per slot (deg); used only when AutoCalcAngles = FALSE
+        // ---------------------------------------------------------------------
+        // Recipe checksum (CAM-authored, 2026-08-14 -- letter_spinningcam_recipe_checksum.md)
+        // The chunked loader proves every line was WRITTEN; it cannot prove the
+        // right data arrived. A stale flash image, or chunks reassembled at the
+        // wrong stride, passes every check we have. This closes that.
+        //
+        //   sumA := sumA + CMD + Param + F      per line, global 0..LineCount-1
+        //   sumB := sumB + sumA                 running sum -> ORDER-SENSITIVE
+        //   Checksum := sumB XOR (sumA + LineCount)
+        //
+        // All unsigned 32-bit with natural wraparound. F enters as its unsigned
+        // 16-bit BIT PATTERN, so a negative F cannot break the conversion on
+        // either side. X and Z are deliberately NOT included -- see the letter.
+        //
+        // ProvidesChecksum = FALSE skips the check, so recipes exported before
+        // this field existed still load. Do not use Checksum = 0 to mean "none".
+        // APPEND-ONLY: adding fields here changes the block layout and makes
+        // every existing recipe export unloadable. Never insert above.
+        // ---------------------------------------------------------------------
+        ProvidesChecksum : Bool;                // TRUE = Checksum is valid and enforced
+        Checksum : UDInt;                       // Verified by FB_RecipeLoader -> 16#0316
     END_STRUCT;
 END_TYPE
 

@@ -53,6 +53,24 @@ whole array with `16#FF` before it starts). Scroll it online and read:
 Note the *pattern* — contiguous FF at the front, at the back, or scattered — and photograph it.
 That is the shape of the fault, and it is the one thing PLCSIM could never show.
 
+### Before the download: stamp the recipes with a checksum
+
+The loader now also verifies a checksum over the reassembled recipe (`16#0316` on mismatch), which
+catches the case the poison cannot: everything arrived, and it is not the right data. The CAM does
+not emit one yet, so stamp it yourself — one command, and it makes the hardware test strictly
+stronger:
+
+```
+python tools/split_recipe_db.py --stamp --all
+```
+
+Then re-import the recipe DBs. `Header.ProvidesChecksum = FALSE` simply skips the check, so
+forgetting this costs you the extra evidence but breaks nothing.
+
+If `16#0316` fires, **do not chase `RetryTotal`** — there is no transfer fault. Read
+`DB_Diagnostic.Error_Text`, which carries both numbers. The usual cause is `02b_RecipePrograms.scl`
+imported without re-importing the recipe DBs, i.e. exactly the mistake this error exists to catch.
+
 | `16#0314` on every chunk size | Load memory is unusable on this CPU | Switch to `fallback/work-memory-recipes` |
 
 ## 2. Recipes 2–5 are unusable and must be re-exported

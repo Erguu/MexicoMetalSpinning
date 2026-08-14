@@ -4,7 +4,9 @@
 **Subject:** one new `Header` field, and the exact algorithm to fill it
 **Date:** 2026-08-14
 **Follows:** `letter_spinningcam_chunked_recipes.md` (chunked output — implemented on your side, thank you)
-**Status of our side:** specified here, not yet implemented; we will build it to match this document
+**Status of our side: IMPLEMENTED (2026-08-14), built to match this document.** `FB_RecipeLoader`
+computes and enforces it; `tools/split_recipe_db.py --stamp` computes the same number offline. The
+worked example below is verified against both.
 
 ---
 
@@ -169,6 +171,16 @@ regardless. If this change lands before you regenerate them, it costs nothing ex
 Please add the fields **at the end of the struct**, after `ToolAngle_List`, and keep everything above
 untouched — that keeps the diff reviewable on our side.
 
+**One syntax detail:** emit the value with an explicit type prefix —
+
+```scl
+    Header.ProvidesChecksum := TRUE;
+    Header.Checksum := UDINT#108445058;
+```
+
+An untyped integer literal above 32767 is ambiguous under TIA's implicit-conversion rules and the
+data block will not compile. We hit this immediately; it costs one prefix to avoid.
+
 ---
 
 ## What we need back
@@ -179,5 +191,13 @@ untouched — that keeps the diff reviewable on our side.
    every export.
 4. One re-exported test program carrying a checksum, so we can validate before you regenerate the set.
 
-As before, `tools/split_recipe_db.py --check` will be extended to verify the checksum offline, so a
-bad export is caught at the desk rather than at the machine. Happy to send it over.
+As before, `tools/split_recipe_db.py --check` verifies the checksum offline, so a bad export is
+caught at the desk rather than at the machine. Happy to send it over — the algorithm lives in
+`recipe_checksum()` and is nine lines.
+
+One thing to be aware of, so it does not surprise you: that tool can also `--stamp` a checksum into
+an export that has none, computed from the file's own lines. **That is not a substitute for yours.**
+A number we compute from the file and then re-check after loading proves the *transfer* — that what
+the PLC reassembles equals what is in the file. It cannot prove the file is what the CAM intended,
+because both numbers come from the same source. Only a checksum computed inside SpinningCam, from
+the toolpath, closes that. We stamp so we can test the load path this week; we still want yours.

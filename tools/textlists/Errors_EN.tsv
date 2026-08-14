@@ -57,3 +57,4 @@
 1282	Spindle: Run command failed
 1283	Spindle: Halt failed
 1284	Spindle: Speed not reached
+790	Recipe checksum mismatch - re-export and re-import

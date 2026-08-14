@@ -492,9 +492,10 @@ exists to catch. All four checkpoints verified:
 
 Additional:
 - **`REQ` is never latched independently.** It is recomputed every scan as
-  `(state = ST_REQ_HDR) OR (state = ST_WAIT_HDR) OR (state = ST_REQ_LINES) OR (state = ST_WAIT_LINES)`
-  — the four in-flight states of the two-phase transfer. There is no code path that can hold it TRUE
-  without the state machine being in one of those four states.
+  `(state = ST_REQ_HDR) OR (state = ST_WAIT_HDR) OR (state = ST_REQ_CHUNK) OR (state = ST_WAIT_CHUNK)`
+  — the four in-flight states (the chunk pair is re-entered once per chunk; `ST_REQ_LINES` /
+  `ST_WAIT_LINES` were the pre-chunking names). There is no code path that can hold it TRUE without
+  the state machine being in one of those four states.
 - **New TON:** `tonWatch` in `FB_RecipeLoader`, `IN := reqActive`. It stops automatically whenever the
   state machine leaves any REQ/WAIT state — including state 35 between the two transfers, which also
   gives phase 2 a full fresh timeout — so no stale `ET` can carry into the next run.
@@ -505,6 +506,15 @@ Additional:
   `PT = DB_MachineConfig.RecipeLoadTimeout` (T#10S). Expiry latches `ErrorCode = 16#FFFF` → `16#0312`.
 - **`ErrorCode` is latched at the moment `BUSY` drops**, not mirrored every scan: once `REQ` falls the
   next `READ_DBL` call returns its idle value and would wipe the real result before anything read it.
+- **Checksum state (2026-08-14):** `sumA`, `sumB`, `ChecksumCalc`, `ChecksumOK` are cleared in **both**
+  the `Reset` block and `ST_LATCH`. `ST_LATCH` is the one that matters — the accumulators are summed
+  across ten scans, so a load that started, failed and was restarted without a reset (`ST_DONE` →
+  `ST_LATCH` on a new `Execute` edge) would otherwise carry the previous load's partial sum into the
+  new one and fail with `16#0316` on a perfectly good recipe. Any future per-load accumulator must be
+  cleared in `ST_LATCH` for the same reason; the `Reset` block alone is not sufficient.
+- **`hdrLines` is latched in `ST_HDR_SETTLE`**, not re-read per chunk, because the checksum fold uses
+  it as its upper bound on every line. It is stale between `ST_LATCH` and `ST_HDR_SETTLE`, which is
+  safe: no chunk is copied until after that state.
 - **Lines verify + retry (2026-08-13):** `linesRetry` counts re-issued `.Lines` transfers. It is set
   to 0 by `Reset` **and** by `ST_LATCH`, so an aborted load never leaves a spent budget behind and a
   retry can never be inherited by the next load. `ST_LINES_RETRY(55)` is excluded from `reqActive`

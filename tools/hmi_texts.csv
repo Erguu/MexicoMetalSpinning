@@ -48,6 +48,7 @@ error,0x0311,785,Recipe has no tool table - regenerate in CAM,Receta sin tabla d
 error,0x0312,786,Recipe load from load memory failed,Fallo al cargar la receta desde memoria de carga
 error,0x0313,787,Recipe data empty/corrupt - no END marker,Datos de receta vacios/corruptos - falta marca de fin
 error,0x0314,788,Recipe copy did not land - re-import recipe DB,Copia de receta no completada - reimporte el DB de receta
+error,0x0316,790,Recipe checksum mismatch - re-export and re-import,Suma de verificacion de receta no coincide - reexporte y reimporte
 error,0x0401,1025,EMERGENCY STOP ACTIVE!,PARO DE EMERGENCIA ACTIVO!
 error,0x0402,1026,Safety door is open,Puerta de seguridad abierta
 error,0x0403,1027,Drives not ready,Variadores no listos

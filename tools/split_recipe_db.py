@@ -88,6 +88,20 @@ CHUNK_CMD_RE = re.compile(r"\bLines(\d+)\[(\d+)\]\.CMD[ \t]*:=[ \t]*(\d+)[ \t]*;
 # and the PLC reads 10 x 100". Absent on files converted by this script, which is fine.
 CHUNKS_MARKER_RE = re.compile(r"^//[ \t]*CHUNKS:[ \t]*(\d+)[ \t]*[xX][ \t]*(\d+)[ \t]*$", re.M)
 
+# Checksum (2026-08-14). Matches both layouts: group 1 is the chunk number, empty
+# on a flat file. See Program/docs/letter_spinningcam_recipe_checksum.md.
+FIELD_RE = re.compile(
+    r"\bLines(\d*)\[(\d+)\]\.(CMD|Param|F)[ \t]*:=[ \t]*(-?\d+)[ \t]*;")
+PROVIDES_RE = re.compile(
+    r"^([ \t]*)Header\.ProvidesChecksum[ \t]*:=[ \t]*(\w+)[ \t]*;.*$", re.M)
+# UDINT# prefix optional on read, always written: an untyped literal above 32767
+# is ambiguous to TIA's implicit-conversion rules, and the DB would not compile.
+CHECKSUM_RE = re.compile(
+    r"^([ \t]*)Header\.Checksum[ \t]*:=[ \t]*(?:UDINT#)?(\d+)[ \t]*;.*$", re.M)
+LINECOUNT_LINE_RE = re.compile(r"^([ \t]*)Header\.LineCount[ \t]*:=[ \t]*\d+[ \t]*;.*$", re.M)
+
+MASK32 = 0xFFFFFFFF
+
 FLAT, CHUNKED, BROKEN = "flat", "chunked", "broken"
 
 
@@ -107,6 +121,88 @@ def chunk_decl_block(indent: str) -> str:
         out.append(f"{indent}{f'Lines{c}'.ljust(7)}: Array[0..{CHUNK_LINES - 1}]"
                    f" of \"RecipeLine\"; // global lines {first}..{last}")
     return "\n".join(out)
+
+
+def parse_lines(text: str) -> dict[int, list[int]]:
+    """-> {global line index: [CMD, Param, F]}, fields absent from the file = 0.
+
+    Handles flat and chunked layouts identically, so the checksum computed here is
+    the same before and after conversion -- which is the point: converting a file
+    must never change its checksum.
+    """
+    slot = {"CMD": 0, "Param": 1, "F": 2}
+    lines: dict[int, list[int]] = {}
+    for chunk, idx, field, value in FIELD_RE.findall(text):
+        g = (int(chunk) - 1) * CHUNK_LINES + int(idx) if chunk else int(idx)
+        lines.setdefault(g, [0, 0, 0])[slot[field]] = int(value)
+    return lines
+
+
+def recipe_checksum(lines: dict[int, list[int]], line_count: int) -> int:
+    """The algorithm in letter_spinningcam_recipe_checksum.md, and in FB_RecipeLoader.
+
+    Order-sensitive by construction: sumB accumulates sumA, so any permutation of
+    the lines -- a chunk reassembled at the wrong stride, say -- changes the result.
+    A plain sum would not notice. F enters as its unsigned 16-bit bit pattern, which
+    is what the PLC's WORD_TO_DWORD(INT_TO_WORD(F)) produces, so the two agree even
+    on a malformed export carrying a negative feed.
+
+    Padding beyond LineCount is excluded on both sides: the CAM never wrote it, so
+    agreeing on it would mean agreeing on uninitialised memory.
+    """
+    a = b = 0
+    for g in range(line_count):
+        cmd, param, f = lines.get(g, [0, 0, 0])
+        a = (a + cmd + param + (f & 0xFFFF)) & MASK32
+        b = (b + a) & MASK32
+    return (b ^ ((a + line_count) & MASK32)) & MASK32
+
+
+def checksum_state(text: str, line_count: int) -> tuple[str, int]:
+    """-> (note, computed). Raises if the file states a checksum and it is wrong."""
+    computed = recipe_checksum(parse_lines(text), line_count)
+    m_prov, m_sum = PROVIDES_RE.search(text), CHECKSUM_RE.search(text)
+    if not m_prov or m_prov.group(2).upper() != "TRUE":
+        return "no checksum", computed
+    if not m_sum:
+        raise RecipeError("Header.ProvidesChecksum := TRUE but no Header.Checksum"
+                          " assignment -- the PLC would compare against 0 and stop"
+                          " with 16#0316")
+    stated = int(m_sum.group(2))
+    if stated != computed:
+        raise RecipeError(
+            f"checksum mismatch: the file states {stated}, its own lines compute"
+            f" {computed}. The file is internally inconsistent -- the header and the"
+            " line data came from different exports, or the two implementations of"
+            " the algorithm disagree. Do NOT import this")
+    return f"checksum {computed} verified", computed
+
+
+def stamp_checksum(text: str, line_count: int) -> tuple[str, int]:
+    """Write ProvidesChecksum/Checksum into a file that has none (or refresh them).
+
+    Why we stamp files ourselves rather than only accepting the CAM's number: it
+    makes the checksum test runnable TODAY, without waiting for the post-processor.
+    The number is computed on the PC from the source text and recomputed by the PLC
+    after READ_DBL, so it still proves what we care about -- that the bytes crossing
+    load memory are the bytes in the file. It does NOT audit the CAM; only a number
+    SpinningCam computes independently does that.
+    """
+    computed = recipe_checksum(parse_lines(text), line_count)
+    if CHECKSUM_RE.search(text):
+        text = CHECKSUM_RE.sub(lambda m: f"{m.group(1)}Header.Checksum := UDINT#{computed};", text)
+        text = PROVIDES_RE.sub(lambda m: f"{m.group(1)}Header.ProvidesChecksum := TRUE;", text)
+        return text, computed
+
+    m = LINECOUNT_LINE_RE.search(text)
+    if not m:
+        raise RecipeError("no Header.LineCount line to anchor the checksum to")
+    indent = m.group(1)
+    block = (f"{m.group(0)}\n"
+             f"{indent}Header.ProvidesChecksum := TRUE;\n"
+             f"{indent}Header.Checksum := UDINT#{computed};"
+             f"   // stamped by tools/split_recipe_db.py")
+    return text[:m.start()] + block + text[m.end():], computed
 
 
 def check_common(text: str) -> int:
@@ -217,8 +313,12 @@ def inspect(path: pathlib.Path) -> tuple[str, int, str]:
     try:
         if chunked:
             note = check_marker(text)
-            return CHUNKED, check_chunked(text), f"geometry matches the PLC, {note}"
-        return FLAT, check_flat(text), "flat export, ready to convert"
+            line_count = check_chunked(text)
+            csum, _ = checksum_state(text, line_count)
+            return CHUNKED, line_count, f"geometry matches the PLC, {note}, {csum}"
+        line_count = check_flat(text)
+        csum, _ = checksum_state(text, line_count)
+        return FLAT, line_count, f"flat export, ready to convert, {csum}"
     except RecipeError as exc:
         return BROKEN, 0, str(exc)
 
@@ -244,25 +344,37 @@ def convert(text: str) -> tuple[str, int]:
     return "\n".join(out), moved
 
 
-def process(path: pathlib.Path, check_only: bool) -> int:
+def process(path: pathlib.Path, check_only: bool, stamp: bool = False) -> int:
     """Returns 1 if the file still needs work, 0 if it is ready, 2 if it is broken."""
     kind, line_count, msg = inspect(path)
 
     if kind == BROKEN:
         print(f"  REFUSED       {path.name}: {msg}")
         return 2
-    if kind == CHUNKED:
+
+    if kind == CHUNKED and not stamp:
         print(f"  ready         {path.name}  ({line_count} lines, {msg})")
         return 0
     if check_only:
-        print(f"  WOULD CONVERT {path.name}  ({line_count} lines)")
+        verb = "WOULD STAMP" if kind == CHUNKED else "WOULD CONVERT"
+        print(f"  {verb:<13} {path.name}  ({line_count} lines)")
         return 1
 
     text = io.open(path, encoding="utf-8", newline="").read().replace("\r\n", "\n")
-    converted, moved = convert(text)
-    io.open(path, "w", encoding="utf-8", newline="").write(converted.replace("\n", EOL))
-    print(f"  converted     {path.name}  ({line_count} lines, {moved} references"
-          f" -> Lines1..Lines{CHUNK_COUNT})")
+    moved = 0
+    if kind == FLAT:
+        text, moved = convert(text)
+    note = ""
+    if stamp:
+        text, computed = stamp_checksum(text, line_count)
+        note = f", checksum {computed}"
+    io.open(path, "w", encoding="utf-8", newline="").write(text.replace("\n", EOL))
+
+    if kind == FLAT:
+        print(f"  converted     {path.name}  ({line_count} lines, {moved} references"
+              f" -> Lines1..Lines{CHUNK_COUNT}{note})")
+    else:
+        print(f"  stamped       {path.name}  ({line_count} lines{note})")
     return 0
 
 
@@ -298,16 +410,18 @@ def interactive() -> int:
             tag = {FLAT: "FLAT   ", CHUNKED: "ready  ", BROKEN: "BROKEN "}[kind]
             detail = f"{n} lines" if n else ""
             print(f"    {tag} {p.name:<26} {detail}")
-            if kind != CHUNKED:
+            if kind != CHUNKED or "no checksum" in msg:
                 print(f"             {msg}")
         flat = [p for p, k, _, _ in rows if k == FLAT]
         broken = [p for p, k, _, _ in rows if k == BROKEN]
+        unstamped = [p for p, k, _, m in rows if k != BROKEN and "no checksum" in m]
         print()
 
         print("  What do you want to do?")
         print(f"    1) convert every FLAT export ({len(flat)} file(s))")
         print("    2) convert one file")
-        print("    3) re-check (write nothing)")
+        print(f"    3) stamp a checksum into every file without one ({len(unstamped)} file(s))")
+        print("    4) re-check (write nothing)")
         print("    q) quit")
         choice = _ask("  > ").lower()
 
@@ -315,7 +429,23 @@ def interactive() -> int:
             print("  Nothing written.\n")
             return 0
 
+        if choice == "4":
+            continue
+
         if choice == "3":
+            if not unstamped:
+                print("  Every file already carries a checksum.\n")
+                continue
+            print("\n  This computes the checksum from each file's own lines and writes it"
+                  "\n  into the header. It proves the LOAD PATH -- that what the PLC"
+                  "\n  reassembles equals what is in the file. It does NOT audit the CAM:"
+                  "\n  only a number SpinningCam computes independently does that.")
+            if not _confirm(f"  Stamp {len(unstamped)} file(s)?"):
+                print("  Nothing written.\n")
+                continue
+            for p in unstamped:
+                process(p, check_only=False, stamp=True)
+            print()
             continue
 
         if choice == "1":
@@ -369,6 +499,10 @@ def main() -> int:
                     help="operate on every gcodes/DB_RecipeProgram*.scl")
     ap.add_argument("--batch", action="store_true",
                     help="never prompt, even with no arguments (for scripts/CI)")
+    ap.add_argument("--stamp", action="store_true",
+                    help="also write Header.ProvidesChecksum/Checksum, computed from the"
+                         " file's own lines. Proves the load path end to end; does NOT"
+                         " audit the CAM (only SpinningCam's own number does that)")
     args = ap.parse_args()
 
     paths = list(args.files)
@@ -387,7 +521,7 @@ def main() -> int:
             print(f"  MISSING       {path}")
             failed += 1
             continue
-        rc = process(path, args.check)
+        rc = process(path, args.check, stamp=args.stamp)
         pending += 1 if rc == 1 else 0
         failed += 1 if rc == 2 else 0
 

@@ -327,6 +327,7 @@ BEGIN
                 16#0312: #ActiveErrorText := 'Recipe load from load memory failed';
                 16#0313: #ActiveErrorText := 'Recipe data empty/corrupt - no END marker';
                 16#0314: #ActiveErrorText := 'Recipe copy did not land - re-import recipe DB';
+                16#0316: #ActiveErrorText := 'Recipe checksum mismatch - re-export and re-import';
                 // Safety Errors
                 16#0401: #ActiveErrorText := 'EMERGENCY STOP ACTIVE!';
                 16#0402: #ActiveErrorText := 'Safety door is open';
@@ -375,8 +376,9 @@ BEGIN
             #ActiveSeverity := 3; #ActiveSource := 'Tool';      // tool motion faults (rotation fail/timeout)
         ELSIF #ActiveErrorCode >= 16#0200 AND #ActiveErrorCode < 16#0210 THEN
             #ActiveSeverity := 2; #ActiveSource := 'Tool';      // tool configuration (invalid/out of range)
-        ELSIF #ActiveErrorCode >= 16#0300 AND #ActiveErrorCode <= 16#0314 THEN
-            #ActiveSeverity := 2; #ActiveSource := 'Recipe';    // <= includes 16#0310..16#0314
+        ELSIF #ActiveErrorCode >= 16#0300 AND #ActiveErrorCode <= 16#0316 THEN
+            #ActiveSeverity := 2; #ActiveSource := 'Recipe';    // <= includes 16#0310..16#0316
+                                                               // (16#0315 is reserved, see TODO.md)
         ELSIF #ActiveErrorCode >= 16#0500 AND #ActiveErrorCode < 16#0510 THEN
             #ActiveSeverity := 3; #ActiveSource := 'Spindle';   // spindle motion faults
         ELSE
@@ -2144,10 +2146,26 @@ BEGIN
                 // Same pattern as the 16#0310 / 16#0311 sites next door: context goes
                 // to DB_Diagnostic.Error_Text, never to DB_HMI.ErrorText (single-writer
                 // rule). 16#FFFF here means the watchdog fired, not a READ_DBL code.
-                // ErrorPhase (1 = Header, 2 = Lines, 3 = Lines verify) says WHICH
-                // transfer failed -- the 2026-08-06 field fault was a silent Lines
-                // failure, so this must stay visible.
-                IF #fbRecipeLoader.ErrorPhase = 3 THEN
+                // ErrorPhase (1 = Header, 2 = chunk, 3 = chunk verify, 4 = checksum)
+                // says WHICH stage failed -- the 2026-08-06 field fault was a silent
+                // Lines failure, so this must stay visible.
+                IF #fbRecipeLoader.ErrorPhase = 4 THEN
+                    // Phase 4: the copy is COMPLETE and wrong. Every line arrived,
+                    // the END marker is where the Header says, and the checksum
+                    // still disagrees -- so this is not a transfer fault and must
+                    // not be reported as one. Either the recipe DB in load memory
+                    // is not the export the CAM computed the checksum over (the
+                    // usual cause: 02b imported without re-importing the recipes),
+                    // or the two checksum implementations disagree. Both numbers
+                    // go in the text, because the pair is what tells them apart.
+                    #newErrorCode := 16#0316;
+                    "DB_Diagnostic".Error_Text := CONCAT(
+                        IN1 := CONCAT(IN1 := 'Recipe checksum mismatch: PLC ',
+                                      IN2 := UDINT_TO_STRING(#fbRecipeLoader.ChecksumCalc)),
+                        IN2 := CONCAT(IN1 := ' vs CAM ',
+                                      IN2 := UDINT_TO_STRING("DB_SelectedRecipe".Header.Checksum)));
+
+                ELSIF #fbRecipeLoader.ErrorPhase = 3 THEN
                     // Phase 3 is NOT a READ_DBL error: every call returned RET_VAL = 0
                     // and the chunk still came back with holes, on every retry. Separate
                     // code so the operator is not sent looking for a transfer fault.
