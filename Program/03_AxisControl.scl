@@ -141,7 +141,15 @@ BEGIN
     );
     #ErrorID := #MC_MoveRelative_Instance.ErrorID;
 
-    IF #MC_MoveRelative_Instance.Done OR #MC_MoveRelative_Instance.Error THEN
+    // CommandAborted added 2026-08-16 (ITEM-56a). Without it, a tool step killed by
+    // MC_Halt (Stop, Reset, fault) left execLatch TRUE, so the next press produced no
+    // rising edge on Execute and the turret stood still until a PLC restart.
+    // Same omission was already fixed in FB_Axis_AbsPos. Note the arming above is
+    // EDGE-based, unlike FB_Axis_AbsPos -- so clearing the latch here does NOT restart
+    // an aborted move while the button is still held. That is deliberate for a manual
+    // step button; do not adopt FB_Axis_AbsPos's level-based re-arm here.
+    IF #MC_MoveRelative_Instance.Done OR #MC_MoveRelative_Instance.Error
+       OR #MC_MoveRelative_Instance.CommandAborted THEN
         #execLatch  := FALSE;
         #doneLatch  := TRUE;
     END_IF;

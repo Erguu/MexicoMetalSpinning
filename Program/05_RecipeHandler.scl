@@ -1171,8 +1171,11 @@ BEGIN
         #state := STATE_STOPPING;
     END_IF;
 
-    // Move timeout timer -- only counts during STATE_WAIT (30 seconds)
-    // If axis does not return Done within 30s, error 16#0008 (Motion Timeout) is generated.
+    // Move timeout timer -- only counts during STATE_WAIT.
+    // PT is DB_MachineConfig.Timeout_Motion (T#300S as configured in FC_LoadConfig).
+    // If the axis does not return Done within it, error 16#0008 (Motion Timeout) is raised.
+    // Do NOT quote the figure in comments or operator strings -- it drifted once already:
+    // three ErrorDetail strings said '(30s limit)' while the real value was 300 s (ITEM-56e).
     #tonMoveTimeout(IN := #state = STATE_WAIT, PT := "DB_MachineConfig".Timeout_Motion);
 
     // Pause retract/return move timeout -- counts only while a pause move is in progress.
@@ -1218,31 +1221,42 @@ BEGIN
                         #state := STATE_DONE;
                         
                     CMD_TOOL_CHANGE:
-                        // Read raw tool code (supports post-processed codes like 101)
-                        #tmpToolCode := BYTE_TO_INT(#Lines[#lineIndex].Param);
-                        #mapFound := FALSE;
-                        // Try explicit mapping in DB_ToolConfig.ToolCode_List
-                        FOR #mapIndex := 1 TO "DB_MachineConfig".ToolCount DO
-                            IF "DB_ToolConfig".ToolCode_List[#mapIndex] = #tmpToolCode THEN
-                                #ToolReqNumber := #mapIndex;
-                                #mapFound := TRUE;
-                            END_IF;
-                        END_FOR;
-                        // If mapping not found -> report recipe tool number error (operator must map codes via HMI)
-                        IF NOT #mapFound THEN
-                            #ErrorID := 16#0308; // Recipe: Invalid tool number
-                            "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Tool code ', IN2 := INT_TO_STRING(#tmpToolCode));
-                            "DB_Diagnostic".Error_Line := #lineIndex;
-                            "DB_Diagnostic".Error_Code := #ErrorID;
-                            // Single-writer: ErrorText comes from FB_AlarmManager (FB_Process forwards
-                            // #ErrorID from STATE_RUNNING). The missing code number goes into ErrorDetail.
-                            "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Tool code ', IN2 := CONCAT(
-                                                       IN1 := INT_TO_STRING(#tmpToolCode),
-                                                       IN2 := ' not mapped. Open Tool Setup, enter slot code & Apply.'));
-                            #state := STATE_ERROR;
+                        // ITEM-35 (fixed 2026-08-16): on a bypassed machine, skip the line here --
+                        // BEFORE the mapping lookup. FB_RecipePreScan already skips its tool-mapping
+                        // check under the same flag, but the runtime skip used to live in FB_Process
+                        // STATE_RUNNING (clearing ToolChangeReq), which is reached only AFTER this
+                        // lookup has already raised 16#0308. So a bypass machine passed validation
+                        // and then faulted mid-run on its first CMD=10 with an unmapped code.
+                        // Same shape as the Bypass_Spindle branch below -- keep them consistent.
+                        IF "DB_MachineConfig".Bypass_ToolAxis THEN
+                            #state := STATE_NEXT;
                         ELSE
-                            // Mapping found -> request tool change for mapped slot
-                            #state := STATE_TOOL_REQ;
+                            // Read raw tool code (supports post-processed codes like 101)
+                            #tmpToolCode := BYTE_TO_INT(#Lines[#lineIndex].Param);
+                            #mapFound := FALSE;
+                            // Try explicit mapping in DB_ToolConfig.ToolCode_List
+                            FOR #mapIndex := 1 TO "DB_MachineConfig".ToolCount DO
+                                IF "DB_ToolConfig".ToolCode_List[#mapIndex] = #tmpToolCode THEN
+                                    #ToolReqNumber := #mapIndex;
+                                    #mapFound := TRUE;
+                                END_IF;
+                            END_FOR;
+                            // If mapping not found -> report recipe tool number error (operator must map codes via HMI)
+                            IF NOT #mapFound THEN
+                                #ErrorID := 16#0308; // Recipe: Invalid tool number
+                                "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Tool code ', IN2 := INT_TO_STRING(#tmpToolCode));
+                                "DB_Diagnostic".Error_Line := #lineIndex;
+                                "DB_Diagnostic".Error_Code := #ErrorID;
+                                // Single-writer: ErrorText comes from FB_AlarmManager (FB_Process forwards
+                                // #ErrorID from STATE_RUNNING). The missing code number goes into ErrorDetail.
+                                "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Tool code ', IN2 := CONCAT(
+                                                           IN1 := INT_TO_STRING(#tmpToolCode),
+                                                           IN2 := ' not mapped. Open Tool Setup, enter slot code & Apply.'));
+                                #state := STATE_ERROR;
+                            ELSE
+                                // Mapping found -> request tool change for mapped slot
+                                #state := STATE_TOOL_REQ;
+                            END_IF;
                         END_IF;
                     
                     CMD_SPINDLE_ON, CMD_SPINDLE_OFF:
@@ -1425,7 +1439,7 @@ BEGIN
                     "DB_Diagnostic".Error_Code := #ErrorID;
                     #state := STATE_ERROR;
                 ELSIF #tonMoveTimeout.Q THEN
-                    // Axis did not return Done within 30s -- mechanical blockage, drive fault or TO issue
+                    // Axis did not return Done within Timeout_Motion -- mechanical blockage, drive fault or TO issue
                     #ErrorID := 16#0008;
                     "DB_Diagnostic".Error_Line := #lineIndex;
                     "DB_Diagnostic".Error_Code := #ErrorID;
@@ -1433,16 +1447,16 @@ BEGIN
                     // Single-writer: ErrorText from FB_AlarmManager; axis goes into ErrorDetail.
                     IF #bMoveX AND #bMoveZ THEN
                         "DB_Diagnostic".Error_Text := 'Motion Timeout: X+Z axes';
-                        "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'X+Z Ln:', IN2 := CONCAT(
-                                                  IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (30s limit)'));
+                        "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'X+Z no Done - Ln:',
+                                                  IN2 := INT_TO_STRING(#lineIndex));
                     ELSIF #bMoveX THEN
                         "DB_Diagnostic".Error_Text := 'Motion Timeout: X axis';
-                        "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'X axis Ln:', IN2 := CONCAT(
-                                                  IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (30s limit)'));
+                        "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'X axis no Done - Ln:',
+                                                  IN2 := INT_TO_STRING(#lineIndex));
                     ELSE
                         "DB_Diagnostic".Error_Text := 'Motion Timeout: Z axis';
-                        "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Z axis Ln:', IN2 := CONCAT(
-                                                  IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (30s limit)'));
+                        "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Z axis no Done - Ln:',
+                                                  IN2 := INT_TO_STRING(#lineIndex));
                     END_IF;
                     #state := STATE_ERROR;
                 END_IF;

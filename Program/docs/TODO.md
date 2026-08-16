@@ -489,7 +489,35 @@ timer (ITEM-32). If VFD decels in 3s from max speed, set T#4S.
 
 ## ITEM-33 — FEATURE: `Bypass_MandrelLock` — machine-config flag to skip MandrelLock cylinder on variants without it
 
-**Found:** 2026-05-24 | **Status: IMPLEMENTED 2026-05-24**
+**Found:** 2026-05-24 | **Status: IMPLEMENTED 2026-05-24 · ENABLED and corrected 2026-08-16**
+
+### 2026-08-16 — the flag was built but never switched on, and it was declared twice
+
+**This machine has no MandrelLock cylinder** — the sheet is clamped manually, and has been for a
+long time (user, 2026-08-16). The bypass built here was nevertheless left `FALSE` in `FC_LoadConfig`
+for nearly three months, so the program ran the full cylinder sequence against hardware that is not
+there: ~0.5 s per sheet load in SHEET_WAIT Ph2, plus the STATE_STOPPING phase-2 wait of
+`SpindleStopSafeTime × capturedRPM / SpindleMaxRPM` (≈4 s at 1000 RPM, up to 10 s) on every Stop.
+Now `TRUE`.
+
+**Why it went unnoticed — the useful part.** The MandrelLock has **no sensor**
+(`PositioningMode = 0`) and every wait around it is an open-loop timer; the code comment at
+STATE_SHEET_WAIT Ph2 literally reads *"MandrelLock assumed clamped"*. The machine therefore cannot
+detect the cylinder's absence: nothing faults, nothing hangs, it only spends the time — and the stop
+wait is indistinguishable from the spindle coasting down. **"We would have noticed" is not evidence
+about a subsystem with no feedback.** Apply that test before trusting a similar argument elsewhere.
+
+**The duplicate declaration (fixed).** This item declared `Bypass_MandrelLock` in **both**
+`DB_HMI` (`02_DataBlocks.scl`, beside the other HMI bypasses) **and** `DB_MachineConfig`. All nine
+read sites and `FC_LoadConfig` use the `DB_MachineConfig` one; the `DB_HMI` copy was written by
+nothing and read by nothing. An HMI switch bound to it would have looked like a working bypass and
+done absolutely nothing — which is the most likely reason the bypass was remembered as already on.
+The orphan is **deleted**; `Human_TODO.md` carries the HMI-side check to run before downloading.
+
+Note the item's own file list below says to document the tag in `HMI_Tag_Guide.md` — that step was
+never done either, which is why neither copy appears there.
+
+---
 
 ### Implementation record (for revert reference)
 
@@ -668,7 +696,17 @@ text correctly afterward.
 
 ## ITEM-35 — INCONSISTENCY: `Bypass_ToolAxis` machine still faults on unmapped tool codes at runtime
 
-**Found:** 2026-06-12 (code review) | **Status: PENDING**
+**Found:** 2026-06-12 (code review) | **Status: RESOLVED 2026-08-16** — implemented as the fix
+sketch below: `05_RecipeHandler.scl` STATE_READ `CMD_TOOL_CHANGE` now tests
+`DB_MachineConfig.Bypass_ToolAxis` first and goes straight to `STATE_NEXT`, skipping the mapping
+lookup and `STATE_TOOL_REQ` entirely. Deliberately the same shape as the `Bypass_Spindle` branch
+immediately below it — keep the two consistent if either is touched.
+
+**Not compiled, and dormant on this machine:** `FC_LoadConfig` forces `Bypass_ToolAxis := FALSE` on
+every power-up, so the new branch never executes here and runtime behaviour is unchanged. It matters
+only if the tool axis is ever switched off to keep the machine running single-tool programs — which
+is the whole point of the flag surviving (see the 2026-08-16 discussion: the bypass is woven into 14
+sites and was kept rather than deleted).
 
 `FB_RecipePreScan` skips the tool-mapping check when `Bypass_ToolAxis = TRUE` (comment says
 "runtime also skips tool changes on bypass machines"). But the runtime skip happens in
@@ -1881,3 +1919,361 @@ stage 2 must be depth-aware from the start, and must be checked with the min-dep
 Stage 2 (removing the English text) is therefore no longer needed to make the slot count work.
 It is now purely optional headroom — worth doing only if a future feature needs the space, or for
 the EN/ES drift benefit. Re-scope it as such rather than as a blocker.
+
+---
+
+## ITEM-56 — Full-program audit 2026-08-15: ten findings — CLOSED 2026-08-16 (5 fixed, 1 withdrawn, 1 won't-fix, 2 deferred to the next machine)
+
+**Found:** 2026-08-15, reading all 14 SCL files on `feat/recipe-slots-and-batching`. |
+**Status 2026-08-16: 56a, 56c, 56d, 56e and 56h RESOLVED · 56g WITHDRAWN (my misreading) · 56b
+closed WON'T FIX · 56f and the display half of 56h DEFERRED to the next machine
+(`Program/docs/NEXT_MACHINE.md`). ITEM-56 is closed.** Not reported from the machine; none is
+known to have caused a failure. Grouped as one ITEM rather than ten because they are a single
+review pass.
+
+**Read this before acting on any sub-item.** Two of the ten did not survive scrutiny — 56g was a
+misreading of two unrelated tags, and 56b's severity was inflated by inference past the evidence.
+This machine is in production; the bar is *observed symptom or clear reasoning from working code*,
+not a plausible failure mode. Where an item has never been seen in the field, say so and weigh it
+accordingly.
+
+Three findings from the same pass were fixed the same day and are not repeated here: the SheetHolder
+retract time (`T#0.5S` → `T#1S`), the `DB_Production` accounting holes (`TotalAborted` + moving the
+start edge to RECIPE_LOAD), and the deletion of `DB_HMI.CycleCount`.
+
+One was **closed as won't-fix**: `CylMandrelLock_ClampTime = T#0.5S`. The MandrelLock is operated
+**manually** on this machine (user, 2026-08-15) — its cylinder timing is not to be worked on.
+
+---
+
+### 56a — `FB_Axis_RelPos` does not clear `execLatch` on `CommandAborted` — **RESOLVED 2026-08-16**
+
+**Fixed** in `03_AxisControl.scl` (not compiled — rides the branch merge gate). One term added to the
+existing reset condition. **The arming was deliberately left alone:** `FB_Axis_RelPos` arms
+`execLatch` on a rising edge of `Execute`, while `FB_Axis_AbsPos` arms it on level
+(`IF #Execute AND NOT #execLatch AND NOT #doneLatch`). Adopting the AbsPos structure would make an
+aborted move restart by itself while the button is still held — wrong for a hand-held manual step
+button after a Stop. Copy the term, never the structure.
+
+**Known limitation, belongs to 56b/56f:** on `CommandAborted` both `#Done` and `#Error` stay FALSE,
+so `FB_ManualMode` state 80 still sits `Busy` after an abort. That path self-recovers (whatever
+aborted the move also drives `FB_ManualMode.Reset`, sending it to state 0). The latch inside this
+wrapper was the half that nothing cleared, and that is what this fix addresses.
+
+Original finding follows.
+
+`03_AxisControl.scl:144`. The FB clears `execLatch` on `Done` or `Error` but not on
+`CommandAborted` — **the exact omission that was fixed in `FB_Axis_AbsPos` at `:87`**, where the
+comment already explains the consequence:
+
+> *"Without this branch execLatch stays TRUE across recipe runs, MC never gets a new rising edge on
+> Execute, and the axis stands still on the next start."*
+
+Used by the manual TOOL STEP (`fbMoveTool` in `FB_ManualMode`). A tool step aborted by `MC_Halt` —
+Stop, Reset or a fault — leaves `execLatch` TRUE, so the next step press generates no rising edge
+and the turret silently does nothing until something else clears it.
+
+**Fix:** add `OR #MC_MoveRelative_Instance.CommandAborted` to the reset condition, mirroring
+`FB_Axis_AbsPos`. Two lines. Supersedes the `FB_Axis_RelPos` half of ITEM-36.
+
+---
+
+### 56b — `FB_ManualMode` abandons in-flight motion jobs on exit (medium)
+
+`06_MainProcess.scl:708`. `IF NOT #Enable THEN … RETURN;` returns **before** all twelve motion FB
+calls at `:967-994`. The execute flags are cleared just above the `RETURN`, so the FBs never see the
+FALSE — the job is abandoned with the instruction no longer being called.
+
+`Enable := (#State = STATE_MANUAL OR #State = STATE_PNP_HALT)`, so this happens on every exit from
+manual, **including a fault dropping the machine to ERROR mid-jog**.
+
+**This is the same bug that was found and fixed in `FB_ToolChanger`** (`04_ToolChanger.scl:58-72`),
+where the fix and its reasoning are already written down:
+
+> *"BUG FIX: fbMoveTool must be called every scan, even while idle… Siemens MC instructions must be
+> called cyclically while a job is active anyway."*
+
+`FB_ManualMode` never got the same treatment, and it holds three of the tool axis's motion instances
+plus a second `MC_Home` instance on the same TO as FB_Process's. Compounds with **56a**.
+
+**Fix (corrected 2026-08-16):** *not* "drop the `RETURN`" — the `RETURN` is at `:708` and the FB
+calls are at `:967-994`, so removing it would run the entire manual-mode body (safety checks, state
+machine, button edges) while the machine is in AUTO. That is far worse than the bug. The
+`FB_ToolChanger` shape is the opposite: **keep** the `RETURN` and call the FB instances *inside* the
+guard block with their execute inputs FALSE. Here that means twelve calls, not one line.
+
+**Severity — reviewed and lowered 2026-08-16. Do not act on this without a test first.**
+An earlier draft of this item speculated that an abandoned job keeps running, i.e. uncommanded
+motion after leaving manual. **That was inference, and the available evidence points against it.**
+The only *observed* instance of this pattern in this codebase is the `FB_ToolChanger` one, whose
+comment records the symptom as *"the turret stood still until the 30s timeout"* — a **next command
+fails** symptom, not runaway motion. Manual mode is used constantly on this machine and no such
+behaviour has ever been reported (user, 2026-08-16).
+
+So the realistic symptom is the mild 56a-class one: an interrupted manual move leaves the wrapper's
+latch stale and the next press of that button does nothing until something resets it. Also never
+reported.
+
+**Recommendation: leave it.** Manual mode works and is used daily; the change touches twelve call
+sites in that exact path to defend against something never observed. Bad trade. If it is ever
+revisited, settle the behaviour in PLCSIM first — start a Home in manual, toggle manual off, watch
+`Axis_X.ActualPosition` — so the fix is written against measurement rather than inference.
+
+Listed as *Cause 5* in `Program/docs/errors/16-000D_tool_drive_power_failed.md`; unproven there too.
+
+---
+
+### 56c — STATE_STOPPING treats a failed park move as a successful one — **RESOLVED 2026-08-16**
+
+**Fixed** in `06_MainProcess.scl` STATE_STOPPING (not compiled — rides the branch merge gate).
+The `Done OR Error` branch is split; `.Error` now reports `16#0001` (X) / `16#0002` (Z) with the
+decoded TO code in `ErrorDetail` and context in `DB_Diagnostic.Error_Text`, then goes to
+STATE_ERROR — matching what STATE_STOP_GOTOZERO has always done for the identical failure.
+
+**Three things the split dragged in, all necessary — do not "simplify" them away:**
+
+1. **Phase 1 and phase 2 gained `AND (#State = STATE_STOPPING)`.** Both run later in the same scan
+   than the completion check, and both key off `bStopMoveX/Z` being FALSE — which is exactly what
+   the new error branch does. Without the guard, phase 1 re-arms the park move and phase 2 releases
+   the MandrelLock and transitions to LOCK_RETRACT_WAIT, overwriting the STATE_ERROR that was just
+   set *and* unclamping the sheet on a machine with a faulted axis. `STATE_STOP_GOTOZERO` already
+   used this same guard on its own exit test.
+2. **Z is checked only while `#State = STATE_STOPPING`**, so if X failed first its report is not
+   overwritten by a second one in the same scan. Both branches clear both flags.
+3. **`#bWaitingSpindleStop := FALSE` added to STATE_ERROR.** This closes a route that already
+   existed before this fix: STOPPING could be left for ERROR by an E-Stop or safety fault and
+   *nothing* cleared the flag on that path — only phase 2 itself and the hard reset did. A stale
+   TRUE makes the next stop skip phase 1 entirely (no spindle stop command, no park move, no
+   sheet-holder release) and drop into phase 2 on a leftover `spindleStopPT`.
+
+**Deliberately unchanged:** the MandrelLock stays **extended** on this path. Phase 2 is the only
+thing that releases it and STATE_ERROR skips phase 2, so the sheet stays clamped while the spindle
+coasts down; the operator's Ack releases it through the ITEM-32 deferred wait. That is the correct
+behaviour for a stop that failed with the spindle possibly still turning.
+
+Original finding follows.
+
+`06_MainProcess.scl`, STATE_STOPPING:
+
+    IF #bStopMoveX THEN
+        IF #fbMoveX_Stop.Done OR #fbMoveX_Stop.Error THEN   // Error handled as Done
+            #bStopMoveX := FALSE;
+
+An axis that fails to reach the sheet-load park clears its flag exactly as if it had arrived: no
+alarm, no `ErrorDetail`, and the machine reports a clean stop. The legacy STATE_STOP_GOTOZERO raises
+`16#0001` / `16#0002` for the identical failure, so the two stop paths disagree.
+
+Not dangerous — the next Start compares actual position against `parkTargetX/Z` and repositions —
+but it hides a drive fault behind a normal-looking stop.
+
+---
+
+### 56d — STATE_PNP_HALT gates the jog buttons and nothing else — **RESOLVED 2026-08-16**
+
+**A bigger problem was found while discussing this one, and fixed instead.** The documented recovery
+from a PNP trip — Reset, then Start — **could not work at all**, and that mattered far more than the
+ungated buttons below.
+
+Reset does its half correctly: it acknowledges the alarm, sets `State := STOPPED`, and latches
+`bRequireHoming` (PNP_HALT is not in the `bDoHardReset` motionless whitelist), so the next Start is
+supposed to home the axis out of the zone. The TO is configured to reverse at the hardware limit
+(user, 2026-08-16), so the seek recovers whichever side tripped.
+
+It never got there. STOPPED force-clears `bHaltX/Z_PNP` every scan while the sensor is still TRUE —
+the axis has not moved — and Start lands in **RECIPE_LOAD(11)**, which was **not** on the PNP bypass
+list. The first scan re-fired `16#0121` and threw the machine straight back into PNP_HALT.
+Reset → Start → instant re-trip. The only way out was for the operator to walk to the manual page,
+select the axis and jog clear by hand — which is exactly the usability complaint that started this.
+
+**Fix: three states added to the bypass condition** — `STATE_STARTING(10)`, `STATE_RECIPE_LOAD(11)`,
+`STATE_PRE_SCAN(12)`. All three command **no axis motion** (contactors and a state decision, a
+`READ_DBL`, and a walk over the recipe array), so there was never anything for an `MC_Halt` to halt
+in them. Every state that *does* move was already bypassed. The four `0x0121`–`0x0124` `ErrorDetail`
+strings were reworded from "select X, jog + to escape" to "press Reset, then Start (homing clears
+the zone)".
+
+**Deliberately NOT done:** no escape move, no `PNP_EscapeDistance`, no change to Reset, no
+auto-homing, and ITEM-45 was left alone. All of those were considered and are unnecessary once
+homing can actually be reached.
+
+**Button gate — DONE 2026-08-16, and it is THREE buttons, not five.** `Btn_MoveAbsolute`,
+`Btn_GoSafe` and `Btn_GoZero` are now ANDed with `NOT #bBlindMoveBlocked`
+(`:= #State = STATE_PNP_HALT`) at the `#fbManualMode` call, with `WarningID = 4` *"Blocked in
+proximity zone - use jog or Home to escape"* — a warning, not an error, so a refused button never
+demands a Reset.
+
+**`Btn_Home` and `Btn_HomeAll` are deliberately NOT blocked, and the original wording of this item
+was wrong to lump them in.** Homing *is* the escape — the identical action the Reset → Start
+recovery performs. `FB_ManualMode` states 40 and 50 already pre-clear the min zone
+(`bClearX/Z := PNP_X/Z_Min`) before seeking, and the TO reverses at the hardware limit, so a home
+recovers from either side. Blocking them would have deleted the operator's only *manual* way out and
+left nothing but the automatic path. **The distinction is blind coordinate move vs reference-seeking
+move** — `GoZero` targets 0,0, which is toward MIN and exactly wrong after a MIN trip, whereas a
+home knows where it is going. Keep that distinction if this is revisited.
+
+**`fbHaltX/Z_PNP` Execute-contention half: reviewed, left alone.** Escaping by jog works today and
+reworking it would touch the one path known to be good — same trade as 56b.
+
+Original finding follows.
+
+
+`06_MainProcess.scl:3632-3642` blocks the jog direction that would drive an axis deeper into the
+proximity zone. But `Btn_MoveAbsolute`, `Btn_Home`, `Btn_HomeAll`, `Btn_GoSafe` and `Btn_GoZero` are
+passed to `FB_ManualMode` ungated, so from the halt state the operator can still command a move
+straight back into the zone.
+
+Also: `fbHaltX/Z_PNP` are held with `Execute = TRUE` for the whole of PNP_HALT while `FB_ManualMode`
+may command a jog on the same axis — two MC instructions contending for one TO.
+
+**Fix:** extend the existing PNP direction gate to the other manual commands, or refuse them in
+PNP_HALT with a `WarningID` — same pattern as the ToolHeadLock interlock, which returns a warning
+rather than an error so a refusal does not demand a Reset.
+
+---
+
+### 56e — `Timeout_Motion` is 300 s but the operator is told "30s limit" — **RESOLVED 2026-08-16**
+
+**Fixed as text only** (not compiled). `T#300S` is the intended value and was left alone; the three
+`ErrorDetail` strings in `05_RecipeHandler.scl` now read `'X axis no Done - Ln:<n>'` and **quote no
+figure at all** — per this item's own advice, a number in an operator string only drifts again. The
+two comments that also said "30 s" now name `Timeout_Motion` instead, with a note recording why the
+figure must not be repeated.
+
+**Checked while here — which motion is actually guarded.** `Timeout_Motion` arms exactly two timers,
+both in `FB_RecipeHandler`, so it covers **recipe-driven motion only**:
+
+| Timer | Armed in |
+|-------|----------|
+| `tonMoveTimeout` | `STATE_WAIT` (G0/G1 move) → `16#0008` |
+| `tonPauseMove` | `STATE_PAUSE_RETRACT`, `STATE_PAUSE_RETURN` |
+
+Everything else has its own timeout or none: homing uses `tonHomingTimeout` / `tonStopHomeTimeout`
+(`T#120S`), the tool change has `FB_ToolChanger`'s own 30 s (**the likely origin of the wrong
+string**), STARTING has `tonDriveReady`. **Un-guarded: manual moves (`FB_ManualMode` state 80), the
+PRE/POST_HOME_CLR clearance moves, and the STATE_STOPPING park move.**
+
+**A timeout on the STOPPING park move was considered and rejected 2026-08-16.** The 56c fix handles
+`.Error`; a move that returns *neither* Done nor Error would hang state 18 forever with no alarm.
+But these are **open-loop PTO axes — the TO reports Done when it finishes sending pulses, not when
+the axis arrives** — so a blocked axis reports Done rather than hanging. A timeout would guard a case
+that essentially cannot occur here, and would still not catch the failure that can: Done reported
+from the wrong position. Nothing catches that today except the position check at the next Start.
+Do not add the timeout without evidence of an actual hang.
+
+Original finding follows.
+
+
+`00_Configuration.scl:443` sets `T#300S`. Three `ErrorDetail` strings in `05_RecipeHandler.scl`
+(`:1437`, `:1441`, `:1445`) end with `' (30s limit)'`, and the surrounding comments say 30 s
+throughout. The operator is told the axis had 30 seconds when it had five minutes.
+
+**Fix:** decide which number is right, then make text and config agree. If 300 s is intended, the
+strings should not quote a figure at all — it will only drift again.
+
+---
+
+### 56f — `FB_ManualMode` can hang on an unsupported `SelectedAxis` — **DEFERRED TO THE NEXT MACHINE (user, 2026-08-16)**
+
+> **Not "won't fix" — "not here".** The user wants this fix on future machines but explicitly not on
+> this one. It is carried in **`Program/docs/NEXT_MACHINE.md` § 1**, which is the list to read when
+> starting a new machine build. Do not apply it to this installation, and do not drop it either.
+
+**Unreachable on this machine: the HMI does not offer the combinations that trigger it** (user,
+2026-08-16). You cannot select Spindle or Tool and then press MoveAbsolute / GoSafe / GoZero from
+the current screens, so the dead `CASE` branches are never entered.
+
+**The caveat, and the only reason to revisit:** the protection lives in the **HMI**, not the PLC.
+`DB_Manual.SelectedAxis` is a plain Int the PLC accepts without validation, so anything that widens
+the HMI's axis selection — a new screen, a rebuilt project, an operator typing the tag directly —
+makes this reachable again. If the manual screens are ever reworked, re-check this before assuming
+it is still dead.
+
+Symptom if it ever does happen is mild and self-recovering: `Busy` sticks TRUE and the manual page
+appears frozen until Reset is pressed or manual mode is left. No motion is commanded, nothing
+unsafe. Fix, if ever needed, is an `ELSE` in each `CASE #SelectedAxis` returning to state 0 instead
+of falling through to state 80 — four small branches.
+
+Original finding follows.
+
+
+- States 30 (MOVE ABSOLUTE), 60 (GO SAFE) and 70 (GO ZERO) fall through to state 80 with **no
+  execute flag set** when `SelectedAxis` has no branch — 3 (Spindle) for MoveAbs, 2 or 3 for
+  GoSafe/GoZero. Nothing in state 80 matches, so the FB sits `Busy = TRUE` indefinitely.
+- State 40 (HOME AXIS) with `SelectedAxis = 3` never leaves state 40 at all.
+
+Recoverable by pressing Reset or leaving manual mode, and the `HomingActive` output that state 40
+holds TRUE is **consumed nowhere**, so nothing unsafe follows from it.
+
+**Fix:** an `ELSE` in each `CASE #SelectedAxis` returning to state 0 with a hint. `HomingActive` is
+a dead output — remove it or wire it.
+
+---
+
+### 56g — WITHDRAWN 2026-08-16. Not a finding; I misread two unrelated tags.
+
+The original claim was that `DB_Spindle.MaxSpeed` (3000) exceeded the machine rating implied by
+`DB_MachineConfig.SpindleMaxRPM` (2400). **They are not two limits.**
+
+- **`DB_Spindle.MaxSpeed` = 3000** is the real and only spindle limit — the machine's actual rating
+  (user-confirmed 2026-08-16). Pre-scan validates against it; `FB_SpindleControl` clamps to it.
+  CLAUDE.md said 2400; that was the error, and it has been corrected.
+- **`DB_MachineConfig.SpindleMaxRPM` = 2400** is a **denominator**, not a limit:
+  `PT = (capturedRPM / SpindleMaxRPM) × SpindleStopSafeTime` sizes the MandrelLock coast-down wait.
+
+**Do not sync the two.** A smaller denominator makes the wait *longer*, so 2400 is the conservative
+side. Raising it to 3000 would shorten a safety wait before the MandrelLock releases. The old
+comment on the tag said "match DB_Spindle.MaxSpeed", which invited exactly that; both the DB comment
+and `FC_LoadConfig` now say plainly that it is a denominator and must not be raised.
+
+**Worth knowing:** `RecipeLine.Param` is a byte encoding RPM/10, so **no recipe can command more
+than 2550 RPM** whatever `MaxSpeed` says. The 3000 rating is unreachable from a program without
+changing the encoding.
+
+---
+
+### 56h — three cosmetic / dead-code items — **2 DONE, 1 DEFERRED (2026-08-16)**
+
+| Sub-item | Outcome |
+|----------|---------|
+| STATE_COMPLETE `Cmd_Reset` branch is dead | **DELETED.** User confirmed no other meaning is wanted for Reset-from-COMPLETE (2026-08-16). `Cmd_Reset` raises `bDoHardReset`, which sets `State := STOPPED` before the `IF #State = 100` is evaluated, so the branch could never run. Its comment claimed Reset re-loads and re-scans the recipe; it never did. Start / Restart remain the live re-run path |
+| PNP_HALT auto-exit does not acknowledge the alarm | **FIXED.** `#Error := FALSE` + `#fbAlarmManager(AcknowledgeError := TRUE)` added to the auto-exit, matching the manual exit |
+| `SelectedAxisPos` / `SelectedAxisName` show Z for anything not X | **DEFERRED to the next machine** — `Program/docs/NEXT_MACHINE.md` § 2. Unreachable here because the HMI never selects Tool or Spindle on that screen; it is the display half of the same unvalidated-`SelectedAxis` problem as 56f, so fix both together |
+
+**On the alarm acknowledge — why it was worth doing rather than filing as cosmetic.** The machine
+state and the alarm are independent; clearing one does not clear the other. The auto-exit set
+`State := STOPPED` and told `FB_AlarmManager` nothing, so `16#0121`–`16#0124` stayed **active** in
+`DB_Error` and the HMI displayed a live alarm on a machine reading *Stopped*. The operator had to
+press Reset purely to clear the red — on a machine that had already recovered on its own. That is
+how operators are taught to distrust alarms, and it matters more now that Reset → Start is the
+sanctioned PNP recovery (see 56d).
+
+**It is genuinely reachable**, not theoretical: `MC_Halt` decelerates, so the axis can come to rest
+right at the **edge** of the detection zone, where vibration flickers the sensor FALSE and fires the
+auto-exit.
+
+Original finding follows.
+
+
+- **STATE_COMPLETE `Cmd_Reset` branch is dead.** `06_MainProcess.scl:3119`. `Cmd_Reset` raises
+  `bDoHardReset` at `:1588`, which sets `State := STOPPED` before the CASE runs, so `IF #State = 100`
+  is already false. Delete it, or make Reset-from-COMPLETE mean something.
+- **PNP_HALT auto-exit does not acknowledge the alarm.** `:2917-2921`. When the zone clears, the
+  state returns to STOPPED but `16#0121`–`16#0124` stays latched active in `DB_Error`, so the HMI
+  shows a live alarm on a machine reading *Stopped*. The manual Ack/Reset exit clears it correctly.
+- **`SelectedAxisPos` / `SelectedAxisName` show Z when Tool is selected.** `:3672-3674` use a
+  two-way `SEL` on `SelectedAxis = 0`, so anything that is not X displays the Z axis — wrong for
+  `SelectedAxis = 2` (Tool) and 3 (Spindle).
+
+---
+
+### Not findings — checked and correct
+
+Recorded so the next reviewer does not re-derive them:
+
+- **`FC_ToolAngleCalc` does not clobber the recipe's tool angles.** PRE_SCAN writes explicit angles
+  only when `AutoCalcAngles = FALSE`, and the FC returns early in exactly that case.
+- **`FB_CylinderControl` state 10 auto-clearing its error before FB_Process can see it** is safe —
+  but *only* because OB1 calls `fbProcess` before the cylinder FBs. If that call order is ever
+  changed, this becomes a real bug.
+- **STATE_LOCK_EXTEND_WAIT cannot hang.** `DB_Cylinder_ToolHeadLock.Timeout_Extend = T#6S` gives it
+  an exit via `16#0012`.

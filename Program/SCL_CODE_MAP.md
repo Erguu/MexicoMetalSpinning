@@ -114,7 +114,7 @@ The schema of all DBs in the project is defined here. All HMI tag connections ar
 | `DB_Diagnostic` | Runtime debug info (axis position, move status) | Multiple FBs | Developer/HMI |
 | `DB_Manual` | Manual mode buttons, jog, homing, spindle manual | HMI | FB_ManualMode + FB_SpindleControl |
 | `DB_HMI_Errors` | Discrete alarm bits (for HMI Discrete Alarm View) | FB_Process | HMI Alarm View |
-| `DB_Production` | Production counters (OK/NOK/STOP) + last-cycle summary. 100-entry cycle history removed 2026-07-31 (memory reclaim — it was write-only) | FB_Process | HMI |
+| `DB_Production` | Production counters (Started/OK/NOK/STOP/ABORT) + last-cycle summary. Buckets reconcile: `TotalStarted = TotalOK + TotalNOK + TotalStopped + TotalAborted + (1 if CurrentActive)` — add a bucket in the PRODUCTION LOGGING block for any new way to end a cycle. `TotalAborted` and the RECIPE_LOAD start edge added 2026-08-15. **`NON_RETAIN` — every counter zeroes on power cycle, so these are per-power-cycle, not lifetime.** 100-entry cycle history removed 2026-07-31 (memory reclaim — it was write-only) | FB_Process | HMI |
 | `DB_SystemEvents` | Error report request (flag + code + text) | FC_ReportError | FB_Process |
 
 #### Instance DBs (FB Instances)
@@ -329,11 +329,11 @@ STATE 16   POST_HOME_CLR        → Park move to SheetLoadPos_X/Z at RapidVeloci
                                      (reference trusted, axes parked elsewhere)
 STATE 17   LOCK_EXTEND_WAIT     → ToolHeadLock engaging (AtSetpoint required) before → RUNNING
                                    DB_HMI.Bypass_ToolHeadLock=TRUE skips the sensor wait → RUNNING immediately (no 0x0012)
-STATE 18   STOPPING             → Halt recipe; X and Z park at SheetLoadPos_X/Z simultaneously (MC_MoveAbsolute, parallel with spindle decel; hardcoded 0,0 before 2026-08-03); MandrelLock releases when both done → LOCK_RETRACT_WAIT → STOPPED
+STATE 18   STOPPING             → Halt recipe; X and Z park at SheetLoadPos_X/Z simultaneously (MC_MoveAbsolute, parallel with spindle decel; hardcoded 0,0 before 2026-08-03); MandrelLock releases when both done → LOCK_RETRACT_WAIT → STOPPED. A FAILED park move → ERROR with 16#0001/16#0002 (ITEM-56c, 2026-08-16); MandrelLock stays clamped on that exit. Phase 1 and phase 2 both carry AND (State = STATE_STOPPING) so they cannot undo the ERROR transition later in the same scan
 STATE 19   STOP_GOHOME          → Home X → Z → Tool — legacy, no longer reached on normal stop path
 STATE 20   RUNNING              → FB_RecipeHandler running
 STATE 21   STOP_GOTOZERO        → Move axes to zero post-stop
-STATE 22   PNP_HALT             → PNP zone: halt active, reverse jog allowed
+STATE 22   PNP_HALT             → PNP zone: halt active, reverse jog allowed. Recovery is Reset → Start: Reset acks the alarm, goes to STOPPED and latches bRequireHoming, and the next Start homes the axis out of the zone. Works only because STARTING(10)/RECIPE_LOAD(11)/PRE_SCAN(12) joined the PNP bypass list on 2026-08-16 — before that, Start re-tripped on the first scan of RECIPE_LOAD and homing was never reached. Those three command no motion; every state that does move was already bypassed
 STATE 25   PAUSED               → Paused (feed hold): axes retract clear of tool + spindle stops (RunCmd gated off, RunForward drops, no MC_Halt). On Continue: spindle spins up for SpindleResumeSpeedupTime (default T#5S) with axes held at retract point, then bPauseActive drops → axes return (RecipeHandler 803) → RUNNING
 STATE 29   LOCK_RETRACT_WAIT    → ToolHeadLock releasing (T#3S spring-return wait); exits to STOPPED (normal stop) or TOOL_CHANGE
 STATE 30   TOOL_CHANGE          → FB_ToolChanger running
@@ -482,6 +482,37 @@ STATE_ERROR). Commanding an axis enabled with its drive physically dead can faul
 worthless. That is why the machine "sometimes" re-homed on auto start with
 `AlwaysHomeOnAutoStart = FALSE`. Contactors now stay closed while idle (spindle contactor
 included). STATE_ERROR was already allowed, so the operator could jog off a limit switch.
+
+**Tool enable output added 2026-08-16 (`Output_Enable_Tool`, `%Q8.1`) — not compiled; wire landed,
+tag created, HMI button added.** The tool axis previously had *no* enable output, only its contactor, while the drive's
+enable input was held on locally — so the servo came up already enabled the moment its contactor
+closed, i.e. enable before drive power. X and Z were never exposed to that because their enable is
+a PLC output that stays low until STATE_STARTING. Leading suspect for `16#000D`, which names the
+tool axis and no other. Three coupled changes:
+
+1. `Output_Enable_Tool := Btn_Enable_Tool AND Btn_Contactor_Tool AND drivePermit AND modePermit` —
+   same shape and same E-Stop behaviour as X/Z.
+2. **`Btn_Enable_Tool := TRUE`, set in STATE_STARTING beside `Btn_Enable_X/Z`.** Shared ownership,
+   exactly like `Btn_Enable_X/Z`: the HMI has a maintained toggle for it on MANUAL > MANAGE, and
+   STATE_STARTING forces it TRUE on every auto start. No `Bypass_ToolAxis` term: the output is
+   ANDed with `Btn_Contactor_Tool`, which the bypass already drives FALSE, so the bypass is
+   enforced in one place for all three axes.
+3. **STATE_STARTING now waits for the tool drive.** Both the readiness `IF` and `tonDriveReady`
+   carry `AND (#fbPowerTool.Status OR Bypass_ToolAxis)` — *the two must stay identical*. Before
+   this the machine confirmed X and Z and started moving without ever checking the tool drive, so
+   a tool drive that failed to come up showed up later as a homing or motion failure. `16#000C`
+   now names the failing axis in `ErrorDetail`.
+
+**No settle delay, deliberately.** The tool servo is the *same drive model as X and Z* (user,
+2026-08-16). A 500 ms `ToolEnableDelay` was written and removed the same day: X/Z assert enable in
+the same scan as their contactor and have always worked, so delaying the tool alone would make the
+one suspect axis behave differently from the two known-good ones. The thing that actually addresses
+the `16#000D` suspect is that the output is **low from power-up until Start** — the delay
+contributed nothing to that. Do not re-add it without field evidence. Same drive model also settles
+the wiring question: land `%Q8.1` exactly like `%Q1.0`/`%Q1.1`.
+
+Remaining steps (compile/download, watch-table check, re-run Test A for `16#000D`) are in
+`Human_TODO.md` §3b.
 
 #### `DB_fbEStop` and `fbProcess`
 Instance DBs for the two large FBs called inside OB1.

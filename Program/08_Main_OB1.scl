@@ -174,6 +174,13 @@ BEGIN
     // Enable outputs -- associated contactor must also be on (interlock)
     "Output_Enable_X" := "DB_HMI".Btn_Enable_X AND "DB_HMI".Btn_Contactor_X AND drivePermit AND modePermit;
     "Output_Enable_Z" := "DB_HMI".Btn_Enable_Z AND "DB_HMI".Btn_Contactor_Z AND drivePermit AND modePermit;
+    // Tool enable %Q8.1 (2026-08-16). The cable was always there; the drive's enable input was
+    // held on locally, so the tool servo came up enabled the instant its contactor closed --
+    // enable asserted before the drive had power. X and Z never had that problem because their
+    // enable is a PLC output that is low until STATE_STARTING. Prime suspect for 16#000D.
+    // Same drive model as X/Z, so this line is deliberately identical to theirs -- the
+    // Btn_Contactor_Tool term is the interlock that makes E-Stop drop enable with the contactor.
+    "Output_Enable_Tool" := "DB_HMI".Btn_Enable_Tool AND "DB_HMI".Btn_Contactor_Tool AND drivePermit AND modePermit;
 
     // HMI lamp feedback
     "DB_HMI".Contactor_X_On       := "Output_Contactor_X";
@@ -182,6 +189,7 @@ BEGIN
     "DB_HMI".Contactor_Spindle_On := "Output_Contactor_Spindle";
     "DB_HMI".Enable_X_On          := "Output_Enable_X";
     "DB_HMI".Enable_Z_On          := "Output_Enable_Z";
+    "DB_HMI".Enable_Tool_On       := "Output_Enable_Tool";
 END_FUNCTION
 
 // -----------------------------------------------------------------------------

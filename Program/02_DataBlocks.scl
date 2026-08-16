@@ -136,8 +136,12 @@ NON_RETAIN
         HasError : Bool;            // Error is active
         ElapsedTime : Time;         // Program elapsed time
         ElapsedSeconds : DInt;      // Elapsed time in seconds (for HMI display)
-        CycleCount : Int;           // Number of completed programs
-        
+        // CycleCount DELETED 2026-08-15 -- it duplicated "DB_Production".TotalOK and was
+        // wrong (its one-shot only cleared on a hard reset, so it counted once per Reset
+        // press, not once per part). Parts counting lives in DB_Production alone:
+        // TotalStarted / TotalOK / TotalNOK / TotalStopped / TotalAborted. Do not add a
+        // parts counter back into DB_HMI.
+
         // ===========================================================
         // ERROR DISPLAY (Output)
         // ===========================================================
@@ -190,7 +194,12 @@ NON_RETAIN
         Bypass_Drives       : Bool := FALSE;  // Used in FB_SafetyMonitor ✅
         Bypass_Spindle      : Bool := FALSE;  // Skips spindle commands in recipe (FB_RecipeHandler) -- dry run / commissioning
         Bypass_ToolChanger  : Bool := FALSE;  // ⚠️ UNUSED -- not in safety monitor
-        Bypass_MandrelLock  : Bool := FALSE;  // TRUE = machine variant without MandrelLock cylinder (manual clamping)
+        // Bypass_MandrelLock DELETED from DB_HMI 2026-08-16 -- it was an ORPHAN. ITEM-33 declared
+        // it here as well as in DB_MachineConfig, but every one of the nine read sites, and
+        // FC_LoadConfig, use "DB_MachineConfig".Bypass_MandrelLock. This copy was written by
+        // nothing and read by nothing. Two identically-named flags where only one is live is a
+        // trap: an HMI switch bound to this one would appear to bypass the cylinder and do
+        // absolutely nothing. The live flag is DB_MachineConfig.Bypass_MandrelLock -- use that.
         Bypass_ToolHeadLock : Bool := FALSE;  // TRUE = skip ToolHeadLock sensor wait in STATE_LOCK_EXTEND_WAIT (no cylinder/sensor); cylinder still commanded if present
         
         // ===========================================================
@@ -214,6 +223,13 @@ NON_RETAIN
         Btn_Contactor_Spindle : Bool;   // Energize Spindle driver contactor
         Btn_Enable_X          : Bool;   // Send enable signal to X drive
         Btn_Enable_Z          : Bool;   // Send enable signal to Z drive
+        // Btn_Enable_Tool (2026-08-16): treated exactly like Btn_Enable_X/Z -- an HMI toggle on
+        // MANUAL > MANAGE, ALSO forced TRUE by STATE_STARTING on every auto start. Same drive
+        // model, same treatment, no settle delay, no bypass term (FC_ContactorControl ANDs the
+        // output with Btn_Contactor_Tool). Before this the tool had no enable output at all:
+        // the drive's enable was linked on locally, so the servo came up enabled the instant its
+        // contactor closed. The wire is now landed on %Q8.1 and that link is removed.
+        Btn_Enable_Tool       : Bool;   // Send enable signal to Tool drive
 
         // MANUAL > MANAGE: Status feedback (Output) for HMI lamps
         // PLC writes these back after applying safety interlock.
@@ -223,6 +239,7 @@ NON_RETAIN
         Contactor_Spindle_On : Bool;
         Enable_X_On          : Bool;
         Enable_Z_On          : Bool;
+        Enable_Tool_On       : Bool;
 
         // ===========================================================
         // E-STOP DUAL CHANNEL STATUS (Output - PLC writes, HMI reads)
@@ -347,7 +364,12 @@ VERSION : 0.3
         // Hardware configuration -- set TRUE if this axis is not physically connected to the machine
         // (different from HMI bypasses: this is a hardware presence flag)
         Bypass_ToolAxis : Bool := FALSE;
-	Bypass_MandrelLock : BOOL := FALSE;
+        // THE live MandrelLock bypass -- all nine read sites and FC_LoadConfig use this one.
+        // (A duplicate in DB_HMI was deleted 2026-08-16; it was never read.)
+        // TRUE = no MandrelLock cylinder, sheet clamped manually. FC_LoadConfig sets the
+        // per-machine value on every power-up and overrides this start value -- change it there,
+        // not here. On THIS machine it is TRUE.
+        Bypass_MandrelLock : Bool := FALSE;
         // Spindle deceleration wait: time between RunCmd=FALSE and next RunCmd=TRUE.
         // Set to match VFD deceleration ramp time. HMI-editable.
         SpindleDecelTime : Time := T#2S;
@@ -380,7 +402,13 @@ VERSION : 0.3
         // Proportional MandrelLock release wait (ITEM-28).
         // SpindleStopSafeTime = full-speed stop safety margin (tune to measured VFD decel time + margin).
         // Formula: PT = (capturedRPM / SpindleMaxRPM) * SpindleStopSafeTime
-        SpindleMaxRPM       : Real := 2400.0;  // RPM -- denominator for proportional wait (match DB_Spindle.MaxSpeed)
+        // NOT a speed limit -- the only spindle limit is DB_Spindle.MaxSpeed (3000). This is the
+        // denominator that scales the coast-down wait, and 2400 is deliberately BELOW it:
+        // a smaller denominator makes PT longer, so the MandrelLock waits a little more than
+        // strictly needed before releasing. Do NOT "sync" this to DB_Spindle.MaxSpeed -- raising
+        // it to 3000 SHORTENS a safety wait. (An older comment here said "match
+        // DB_Spindle.MaxSpeed"; that was misleading and is why this note exists. 2026-08-16.)
+        SpindleMaxRPM       : Real := 2400.0;  // RPM -- denominator for the proportional wait only
         SpindleStopSafeTime : Time := T#20S;   // Full-speed decel safety margin (tune on-site)
 
         // ─── Cylinder stroke wait times (open-loop: tuned to physical stroke duration)
@@ -393,6 +421,9 @@ VERSION : 0.3
 
         // ─── Process timeouts (trigger errors when limits exceeded)
         Timeout_DriveReady     : Time := T#3S;     // STATE_STARTING: drives not ready within this time → error
+        // NOTE: there is deliberately no tool-enable settle delay. The tool servo is the same
+        // drive as X and Z, which assert enable in the same scan as their contactor and have
+        // always worked. See STATE_STARTING in 06_MainProcess.scl.
         Timeout_Homing         : Time := T#120S;   // STATE_HOMING + STATE_STOP_GOHOME combined timeout
         Timeout_Motion         : Time := T#300S;   // Per-line G0/G1 motion timeout in FB_RecipeHandler
         Timeout_SpindleAtSpeed : Time := T#10S;    // CMD=20: spindle must reach target speed within this time
@@ -841,24 +872,62 @@ END_DATA_BLOCK
 // -----------------------------------------------------------------------------
 // DB_Production - Production counters and last cycles
 // -----------------------------------------------------------------------------
+// RETENTIVITY (changed 2026-08-15) -- NON_RETAIN was REMOVED from this block, for the
+// same reason it was removed from DB_MachineConfig on 2026-08-09.
+//
+// A block declared NON_RETAIN is non-retentive as a WHOLE -- the per-tag "Retain"
+// checkbox in the TIA DB editor is greyed out. So while that keyword was here, the
+// production counters could not be made to survive a power cycle no matter what anyone
+// ticked, and "reset every restart" was not a choice anybody made, it was a side effect.
+//
+// Removing the keyword does NOT make anything retentive. It only makes the tick POSSIBLE.
+// The tick is a manual TIA step -- source import cannot set per-tag retentivity -- and it
+// must be redone and verified after every re-import of this file. See
+// Program/docs/RETAINED_TAGS.md for the full list and the procedure.
+//
+//   Tick Retain on: TotalStarted, TotalOK, TotalNOK, TotalStopped, TotalAborted
+//   Leave alone:    CurrentActive / CurrentProgram / CurrentStartTime (in-flight cycle
+//                   state -- a cycle cannot survive a power cycle, and a stale
+//                   CurrentActive = TRUE would make the next STOPPED edge count a phantom
+//                   abort), and the Last* summary (describes a cycle from before the
+//                   restart; harmless either way, but not worth retentive memory).
+//
+// Changing retentivity forces a full DB re-initialisation on the next download, so the
+// counters zero once when this lands. They zeroed on every power cycle before, so nothing
+// is lost that was not already being lost.
 DATA_BLOCK "DB_Production"
 { S7_Optimized_Access := 'TRUE' }
-VERSION : 0.1
-NON_RETAIN
+VERSION : 0.2
     VAR
-        // Overall counters
-        TotalStarted  : DInt := 0;       // All cycles that entered PRE_SCAN
+        // Overall counters.
+        // INVARIANT: TotalStarted = TotalOK + TotalNOK + TotalStopped + TotalAborted
+        //            + (1 if CurrentActive). Every cycle that starts lands in exactly
+        //            one outcome bucket -- see the PRODUCTION LOGGING block in
+        //            06_MainProcess.scl. If you add a new way to end a cycle, give it a
+        //            bucket there or this stops adding up.
+        TotalStarted  : DInt := 0;       // All cycles that entered RECIPE_LOAD (11) -- i.e. every
+                                         // accepted Start press. Was PRE_SCAN (12) until 2026-08-15,
+                                         // which missed every start that died in the recipe load
+                                         // (16#0312 / 16#0314 / 16#0316): not counted as started,
+                                         // and not counted as failed either.
         TotalOK       : DInt := 0;       // Completed successfully (STATE=100)
         TotalNOK      : DInt := 0;       // Ended in ERROR (STATE=999)
-        TotalStopped  : DInt := 0;       // Stopped by operator (STOP sequence)
-        
+        TotalStopped  : DInt := 0;       // Operator pressed Stop -- reached STOPPED via the
+                                         // STOP sequence (STOPPING / LOCK_RETRACT_WAIT / legacy
+                                         // GOHOME / GOTOZERO), so the axes parked cleanly
+        TotalAborted  : DInt := 0;       // Cycle ended at STOPPED by any OTHER route -- in practice
+                                         // Reset pressed from an active state, which sets
+                                         // State := STOPPED directly with no park sequence.
+                                         // Added 2026-08-15: these cycles previously hit no bucket
+                                         // at all and left CurrentActive stranded TRUE.
+
         // Current active cycle
         CurrentActive    : Bool := FALSE;
         CurrentProgram   : Int := 0;     // Active program number
         CurrentStartTime : DTL;          // Cycle start timestamp
 
         // Last cycle summary
-        // 0=None, 1=OK, 2=NOK, 3=STOP
+        // 0=None, 1=OK, 2=NOK, 3=STOP, 4=ABORT (Reset from an active state)
         LastResult     : Byte := 0;
         LastProgram    : Int := 0;
         LastDuration_s : DInt := 0;      // Duration in seconds
@@ -871,8 +940,12 @@ NON_RETAIN
         // Hist_ErrorCode / Hist_ErrorLine / Hist_Time) was removed -- it cost ~2.3 KB
         // of work memory but was write-only: nothing in the SCL ever read it back and
         // no HMI tag was mapped to it (see HMI_Tag_Guide.md).
-        // The lifetime counters (Total*) and the last-cycle summary (Last*) are kept
-        // and remain the HMI production source. Error-side history is unaffected --
+        // The Total* counters and the last-cycle summary (Last*) are kept and remain the
+        // HMI production source. (They were called "lifetime" counters here until
+        // 2026-08-15, which was wrong at the time: the block was NON_RETAIN, so every
+        // Total* zeroed on a power cycle. That keyword is now gone -- see the block
+        // header -- but they only become genuinely lifetime once Retain is ticked per tag
+        // in the TIA DB editor. Until then they still count per power-up.) Error-side history is unaffected --
         // DB_AlarmHistory (20 entries) and DB_Error.History_* still hold fault records.
         // To restore: re-add the arrays here and the push block in FB_Process
         // ("PRODUCTION LOGGING" section of 06_MainProcess.scl).
@@ -1037,7 +1110,7 @@ BEGIN
     // Backstop only -- it is NOT what ends the retract.
     //
     // The retract duration is owned by FB_Process: it holds Cmd_Retract for
-    // DB_MachineConfig.CylSheetHolder_RetractTime (T#0.5S) and then drops it, which takes
+    // DB_MachineConfig.CylSheetHolder_RetractTime (T#1S) and then drops it, which takes
     // the FB from State 2 to State 0 with both coils off. This value only decides what
     // happens if a retract is ever commanded for LONGER than that -- the FB gives up
     // waiting, calls the stroke done and moves to State 4, which since 2026-08-09 also

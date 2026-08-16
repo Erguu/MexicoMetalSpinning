@@ -63,7 +63,29 @@
 | **Feedrate Int** | `DB_HMI.Feedrate` | Int | Speed (integer alias) |
 | **Elapsed Time** | `DB_HMI.ElapsedTime` | Time | Program run time |
 | **Elapsed Seconds** | `DB_HMI.ElapsedSeconds` | Int | Run time in seconds |
-| **Cycle Count** | `DB_HMI.CycleCount` | Int | Completed programs |
+| **Cycle Count** | `DB_Production.TotalOK` | DInt | Completed programs. ⚠️ **`DB_HMI.CycleCount` was deleted 2026-08-15** — repoint this tag before downloading the PLC, or the HMI is left pointing at a tag that no longer exists |
+
+### Production counters — `DB_Production`
+
+Five counters that reconcile: `TotalStarted = TotalOK + TotalNOK + TotalStopped + TotalAborted + (1 if a cycle is running)`.
+
+| HMI Label | PLC Tag | Type | Description |
+|-----------|---------|------|-------------|
+| **Started** | `DB_Production.TotalStarted` | DInt | Every accepted Start press (counted on entry to RECIPE_LOAD) |
+| **Completed** | `DB_Production.TotalOK` | DInt | Ran to COMPLETE |
+| **Faulted** | `DB_Production.TotalNOK` | DInt | Ended in ERROR — includes recipe-load and pre-scan failures |
+| **Stopped** | `DB_Production.TotalStopped` | DInt | Operator pressed Stop; axes parked cleanly |
+| **Aborted** | `DB_Production.TotalAborted` | DInt | Operator pressed Reset mid-cycle; axes left where they were |
+| **Last result** | `DB_Production.LastResult` | Byte | 0=None, 1=OK, 2=NOK, 3=STOP, 4=ABORT — good candidate for a WinCC text list (ITEM-55 pattern) |
+| **Last program** | `DB_Production.LastProgram` | Int | Slot number of the last finished cycle |
+| **Last duration** | `DB_Production.LastDuration_s` | DInt | Seconds |
+| **Last error code** | `DB_Production.LastErrorCode` | Word | 0 if OK/STOP/ABORT |
+| **Last error line** | `DB_Production.LastErrorLine` | Int | −1 if not applicable |
+| **Cycle running** | `DB_Production.CurrentActive` | Bool | A cycle is in flight |
+| **Reset counters** | `DB_HMI.Btn_ProdReset` | Bool | Zeroes all five Total* and the Last* summary |
+| **Reset last cycle** | `DB_HMI.Btn_LastCycleReset` | Bool | Clears only the Last* summary |
+
+> These are per-power-up figures until Retain is ticked on the five `Total*` tags in the TIA DB editor — see `Program/docs/RETAINED_TAGS.md`.
 | **Error Code** | `DB_HMI.ErrorID` | Word | Error number (0=OK) |
 | **Error Text** | `DB_HMI.ErrorText` | String[50] | Error description (English) |
 
@@ -245,6 +267,7 @@ For diagnostics screen — use DB_HMI_Errors.Err_* bool flags:
 | **Homing Required** | `DB_Diagnostic.Require_Homing` | Bool | TRUE = next auto start **will** home regardless of `AlwaysHomeOnAutoStart` (set by E-Stop / fault / hard reset / power-up). Read-only. See MACHINE LIMITS SCREEN → Sheet-Load Park |
 | **X Enabled** | `DB_Diagnostic.Axis_X_Enabled` | Bool | X drive enabled |
 | **Z Enabled** | `DB_Diagnostic.Axis_Z_Enabled` | Bool | Z drive enabled |
+| **Tool Enabled** | `DB_HMI.Enable_Tool_On` | Bool | Tool servo enable `%Q8.1` — new 2026-08-16. Read-only lamp. Its button is `DB_HMI.Btn_Enable_Tool`, a maintained toggle exactly like the X/Z enable buttons; STATE_STARTING also forces `Btn_Enable_Tool := TRUE` on every auto start, same as X/Z |
 | **Move X Busy** | `DB_Diagnostic.MoveX_Busy` | Bool | X axis moving |
 | **Move Z Busy** | `DB_Diagnostic.MoveZ_Busy` | Bool | Z axis moving |
 | **Recipe Line** | `DB_Diagnostic.Recipe_CurrentLine` | Int | Currently executing line |
@@ -461,6 +484,10 @@ CAM post-processors can drop the trailing `G0 X0 Z0`; the PLC parks the axes its
 >    `Btn_Contactor_X`+`Btn_Enable_X` (or the Z pair) are off, the reference is treated as lost —
 >    an unpowered stepper can be moved by hand and the PLC would never know. Switching drive power
 >    off on the manual page therefore costs a homing cycle, deliberately.
+>    **The Tool pair joined this test on 2026-08-16** (`Btn_Contactor_Tool`+`Btn_Enable_Tool`,
+>    skipped entirely when `Bypass_ToolAxis` is set). Switching the tool contactor off by itself on
+>    MANUAL > MANAGE now also costs a homing cycle — a de-energised turret can be turned by hand
+>    and the tool angle would otherwise be silently wrong on the next start.
 > 3. **Are the axes actually at `SheetLoadPos` ± `SheetLoadTol`?** Outside the window the PLC does a
 >    park move (state 16), not a homing cycle — that is normal and much faster.
 > 4. **Was Reset pressed while the machine was moving?** A reset from a moving state still forces a

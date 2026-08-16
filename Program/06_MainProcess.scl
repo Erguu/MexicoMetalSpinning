@@ -1096,6 +1096,10 @@ VERSION : 4.0
         bJogBlockMinus     : Bool;  // Manual soft-limit jog gate: block jog- (recomputed every scan)
         bToolLockEngaged   : Bool;  // ToolHeadLock is (or may be) holding the turret
         bToolAxisBlocked   : Bool;  // Manual motion on the tool axis refused because of it
+        // ITEM-56d: blind coordinate moves (MoveAbsolute / GoSafe / GoZero) refused while halted
+        // in a PNP zone. Home/HomeAll are NOT included -- homing is the escape. Level-computed
+        // every scan from #State alone, like bToolAxisBlocked above, so it needs no reset path.
+        bBlindMoveBlocked  : Bool;
                                     // Both recomputed every scan -- no reset path needed
         prevManualError : Bool;  // Edge detection: manual mode error
         prevMDIExec : Bool;      // Edge detection: manual MDI execute button (STATE_MANUAL)
@@ -1162,7 +1166,6 @@ VERSION : 4.0
         tonSpindleStopWait        : TON;    // Proportional wait before MandrelLock retract (see SpindleStopSafeTime). Fires immediately if speed was 0.
         capturedSpindleRPM        : Real;   // Speed captured when bWaitingSpindleStop is set (ITEM-28)
         spindleStopPT             : Time;   // Proportional PT for tonSpindleStopWait (ITEM-28)
-        bCycleCountDone           : Bool;   // One-shot: prevents multiple CycleCount increments per cycle (ITEM-20)
 
         // Cycle timer
         tonElapsed : TON;
@@ -1516,35 +1519,55 @@ BEGIN
     // PNP proximity sensor halt -- auto mode only.
     // Bypassed in: homing states (PNP zone expected during reference seek),
     //              manual mode (operator in direct control, TO handles HW limits),
-    //              STOPPED, PNP_HALT, and ERROR (no active motion to halt).
+    //              STOPPED, PNP_HALT, and ERROR (no active motion to halt),
+    //              STARTING / RECIPE_LOAD / PRE_SCAN (see below -- added 2026-08-16).
     // Triggers: MC_Halt on affected axis + STATE_PNP_HALT.
     // In STATE_PNP_HALT: drives stay ON, FB_ManualMode active, reverse jog allowed to escape zone.
+    //
+    // STARTING(10) / RECIPE_LOAD(11) / PRE_SCAN(12) added 2026-08-16 -- this is what makes the
+    // documented recovery actually work. Recovery is: PNP trips -> PNP_HALT -> operator presses
+    // Reset -> error acknowledged, State := STOPPED, bRequireHoming latched TRUE -> operator
+    // presses Start -> homing runs and drives the axis out of the zone (the TO is configured to
+    // reverse at the hardware limit, so the seek recovers from either side).
+    //
+    // It could never get there. STATE_STOPPED force-clears bHaltX/Z_PNP every scan, and the
+    // sensor is of course still TRUE -- the axis has not moved. Start puts the machine in
+    // RECIPE_LOAD(11), which was NOT bypassed, so the very first scan re-fired 16#0121 and threw
+    // it straight back into PNP_HALT. Reset -> Start -> instant re-trip, homing never reached,
+    // and the only way out was for the operator to jog clear by hand from the manual page.
+    //
+    // Safe because all three states command NO axis motion: STARTING closes contactors and picks
+    // the next state, RECIPE_LOAD runs READ_DBL, PRE_SCAN walks the recipe array. There is
+    // nothing for an MC_Halt to halt. The first state that does move -- HOMING(15),
+    // PRE_HOME_CLR(13) or POST_HOME_CLR(16) -- was already on this list.
     IF #State <> STATE_HOMING AND #State <> STATE_STOP_GOHOME
        AND #State <> STATE_PRE_HOME_CLR AND #State <> STATE_POST_HOME_CLR
        AND #State <> STATE_MANUAL AND #State <> STATE_STOPPED
-       AND #State <> STATE_PNP_HALT AND #State <> STATE_ERROR THEN
+       AND #State <> STATE_PNP_HALT AND #State <> STATE_ERROR
+       AND #State <> STATE_STARTING AND #State <> STATE_RECIPE_LOAD
+       AND #State <> STATE_PRE_SCAN THEN
         IF #HW_PNP_X_Min AND NOT #bHaltX_PNP THEN
             #bHaltX_PNP := TRUE;
             #newErrorFlag := TRUE; #newErrorCode := 16#0121;
-            "DB_HMI".ErrorDetail    := 'X axis MIN proximity triggered - select X, jog + to escape';
+            "DB_HMI".ErrorDetail    := 'X MIN proximity triggered - press Reset, then Start (homing clears the zone)';
             #State := STATE_PNP_HALT;
         END_IF;
         IF #HW_PNP_X_Max AND NOT #bHaltX_PNP THEN
             #bHaltX_PNP := TRUE;
             #newErrorFlag := TRUE; #newErrorCode := 16#0122;
-            "DB_HMI".ErrorDetail    := 'X axis MAX proximity triggered - select X, jog - to escape';
+            "DB_HMI".ErrorDetail    := 'X MAX proximity triggered - press Reset, then Start (homing clears the zone)';
             #State := STATE_PNP_HALT;
         END_IF;
         IF #HW_PNP_Z_Min AND NOT #bHaltZ_PNP THEN
             #bHaltZ_PNP := TRUE;
             #newErrorFlag := TRUE; #newErrorCode := 16#0123;
-            "DB_HMI".ErrorDetail    := 'Z axis MIN proximity triggered - select Z, jog + to escape';
+            "DB_HMI".ErrorDetail    := 'Z MIN proximity triggered - press Reset, then Start (homing clears the zone)';
             #State := STATE_PNP_HALT;
         END_IF;
         IF #HW_PNP_Z_Max AND NOT #bHaltZ_PNP THEN
             #bHaltZ_PNP := TRUE;
             #newErrorFlag := TRUE; #newErrorCode := 16#0124;
-            "DB_HMI".ErrorDetail    := 'Z axis MAX proximity triggered - select Z, jog - to escape';
+            "DB_HMI".ErrorDetail    := 'Z MAX proximity triggered - press Reset, then Start (homing clears the zone)';
             #State := STATE_PNP_HALT;
         END_IF;
     END_IF;
@@ -1629,7 +1652,7 @@ BEGIN
     // it is the only sign that the machine will run unguarded, so it outranks a
     // transient interlock message. A blocked tool jog therefore shows no banner while
     // the bypass is on; the jog is still refused, which is the part that matters.
-    "DB_HMI".HasWarning := "DB_HMI".Bypass_EStop OR #bToolAxisBlocked;
+    "DB_HMI".HasWarning := "DB_HMI".Bypass_EStop OR #bToolAxisBlocked OR #bBlindMoveBlocked;
     IF "DB_HMI".Bypass_EStop THEN
         "DB_HMI".WarningText    := 'DANGER: E-Stop bypassed - machine runs unguarded';
         "DB_HMI".WarningID      := 1;
@@ -1640,6 +1663,15 @@ BEGIN
         // it clears itself when the lock releases or another axis is selected.
         "DB_HMI".WarningText    := 'Tool axis locked - ToolHeadLock is engaged';
         "DB_HMI".WarningID      := 3;
+    ELSIF #bBlindMoveBlocked THEN
+        // ITEM-56d: MoveAbsolute / GoSafe / GoZero are refused while halted in a PNP zone.
+        // A dead button with no explanation is how an operator concludes the panel is broken,
+        // so say why and name the two things that DO work. Warning, not an error -- a refused
+        // button must never demand a Reset (same rule as the ToolHeadLock interlock above).
+        // #bBlindMoveBlocked is assigned near the bottom of this FB, so this reads the previous
+        // scan's value; harmless, because STATE_PNP_HALT is held for many scans.
+        "DB_HMI".WarningText    := 'Blocked in proximity zone - use jog or Home to escape';
+        "DB_HMI".WarningID      := 4;
     ELSE
         "DB_HMI".WarningText    := '';
         "DB_HMI".WarningID      := 0;
@@ -1809,7 +1841,6 @@ BEGIN
         #bWaitingSpindleStop         := FALSE;  // Cancel any pending spindle-stop wait
         #capturedSpindleRPM          := 0.0;
         #spindleStopPT               := T#0MS;
-        #bCycleCountDone             := FALSE;  // Allow CycleCount to increment on next completion
         #prevMDIExec                 := FALSE;  // Clear stale MDI edge (button may be held at reset)
         #bMDI_Cmd40Extend            := FALSE;  // Release MDI CMD=40 BackSupport extend latch
         // CMD=41 edge memory: SEED with the live button state, do not clear. Clearing
@@ -2344,10 +2375,27 @@ BEGIN
             "DB_HMI".Btn_Contactor_Spindle := NOT "DB_HMI".Bypass_Spindle;
             "DB_HMI".Btn_Enable_X          := TRUE;
             "DB_HMI".Btn_Enable_Z          := TRUE;
-            // Wait for both drives to report ready before issuing any motion command.
+            // Tool enable (2026-08-16, %Q8.1). Same drive model as X/Z, so treated identically:
+            // asserted in the same scan as its contactor, no settle delay. What fixes the 16#000D
+            // suspect is that this output is LOW from power-up until Start -- previously the tool
+            // had no enable output and the drive's enable was held on locally, so the servo came
+            // up already enabled the instant its contactor closed.
+            // No Bypass_ToolAxis term needed: FC_ContactorControl ANDs the output with
+            // Btn_Contactor_Tool, which is already FALSE when the axis is bypassed.
+            "DB_HMI".Btn_Enable_Tool       := TRUE;
+            //
+            // Wait for all drives to report ready before issuing any motion command.
             // Physical contactor close + drive boot can take up to several hundred ms.
             // tonDriveReady is called unconditionally near the timer section (auto-resets on exit).
-            IF #fbPowerX.Status AND #fbPowerZ.Status THEN
+            //
+            // The tool term was added 2026-08-16 with the %Q8.1 enable output. Before that the
+            // machine confirmed X and Z were up and then started moving without ever checking
+            // the tool drive -- so a tool drive that failed to come up was found later, as a
+            // homing or motion failure, instead of here as 16#000C. Bypass_ToolAxis drops the
+            // term because with the bypass set Btn_Contactor_Tool is FALSE by design, so
+            // fbPowerTool.Status can never come TRUE and the start would hang to timeout.
+            IF #fbPowerX.Status AND #fbPowerZ.Status
+               AND (#fbPowerTool.Status OR "DB_MachineConfig".Bypass_ToolAxis) THEN
                 // Drives ready -- three-way decision: home, reposition, or load the sheet.
                 //
                 // The axis reference is TRUSTED only when every required axis reports
@@ -2404,10 +2452,18 @@ BEGIN
                     #State := STATE_SHEET_WAIT;
                 END_IF;
             ELSIF #tonDriveReady.Q THEN
-                // Timeout: drives did not become ready within 3s
+                // Timeout: drives did not become ready within Timeout_DriveReady.
+                // Name the offender -- with three axes in the test, 'a drive' is not actionable.
                 #newErrorFlag := TRUE;
                 #newErrorCode := 16#000C;
-                "DB_HMI".ErrorDetail    := 'Contactor closed but drive not enabled - check wiring';
+                IF NOT #fbPowerX.Status THEN
+                    "DB_HMI".ErrorDetail := 'X drive not ready - contactor closed but no enable/ready';
+                ELSIF NOT #fbPowerZ.Status THEN
+                    "DB_HMI".ErrorDetail := 'Z drive not ready - contactor closed but no enable/ready';
+                ELSE
+                    "DB_HMI".ErrorDetail := 'Tool drive not ready - check %Q8.1 enable and contactor';
+                END_IF;
+                "DB_Diagnostic".Error_Text := "DB_HMI".ErrorDetail;
                 #State := STATE_ERROR;
             END_IF;
         
@@ -2734,21 +2790,66 @@ BEGIN
             // drops) cannot immediately cancel bStopMoveX/Z on the same scan they are set.
             // When this check runs first, bStopMoveX/Z are still FALSE on the first scan of
             // STOPPING (no action), and the start-trigger below then sets them correctly.
+            //
+            // ITEM-56c (2026-08-16): Done and Error used to share one branch, so an axis that
+            // FAILED to reach the park cleared its flag exactly as if it had arrived -- no alarm,
+            // no ErrorDetail, and the machine reported a clean stop with an axis left wherever the
+            // fault dropped it. STATE_STOP_GOTOZERO (21) has always raised 16#0001 / 16#0002 for
+            // the identical failure, so the two stop paths disagreed. They now match.
+            //
+            // Not a safety change: on a variant that HAS a MandrelLock, it is deliberately left
+            // EXTENDED on this path. Phase 2 below is the only thing that releases it, and going to
+            // STATE_ERROR skips it, so the sheet stays clamped while the spindle coasts down; the
+            // operator's Ack then releases it through the ITEM-32 deferred path.
+            // On THIS machine there is no MandrelLock cylinder -- the sheet is clamped manually --
+            // so that consideration does not apply here either way.
             IF #bStopMoveX THEN
-                IF #fbMoveX_Stop.Done OR #fbMoveX_Stop.Error THEN
+                IF #fbMoveX_Stop.Done THEN
                     #bStopMoveX := FALSE;
+                ELSIF #fbMoveX_Stop.Error THEN
+                    #bStopMoveX := FALSE;
+                    #bStopMoveZ := FALSE;   // drop the sibling Execute too -- STATE_ERROR kills
+                                            // drive power anyway, so its move cannot complete
+                    #newErrorFlag := TRUE;
+                    #newErrorCode := 16#0001;  // X move failed
+                    "DB_HMI".ErrorDetail := CONCAT(
+                        IN1 := 'X could not reach sheet-load park on stop. TO:',
+                        IN2 := "FC_TO_ErrorText"(Code := #fbMoveX_Stop.ErrorID));
+                    "DB_Diagnostic".Error_Text :=
+                        'STOPPING: X park move failed - axis left short of SheetLoadPos_X';
+                    #State := STATE_ERROR;
                 END_IF;
             END_IF;
-            IF #bStopMoveZ THEN
-                IF #fbMoveZ_Stop.Done OR #fbMoveZ_Stop.Error THEN
+            // Z is checked only while the state is still STOPPING: if X just failed, its report
+            // stays on the HMI rather than being overwritten by a second one in the same scan.
+            IF #bStopMoveZ AND (#State = STATE_STOPPING) THEN
+                IF #fbMoveZ_Stop.Done THEN
                     #bStopMoveZ := FALSE;
+                ELSIF #fbMoveZ_Stop.Error THEN
+                    #bStopMoveX := FALSE;
+                    #bStopMoveZ := FALSE;
+                    #newErrorFlag := TRUE;
+                    #newErrorCode := 16#0002;  // Z move failed
+                    "DB_HMI".ErrorDetail := CONCAT(
+                        IN1 := 'Z could not reach sheet-load park on stop. TO:',
+                        IN2 := "FC_TO_ErrorText"(Code := #fbMoveZ_Stop.ErrorID));
+                    "DB_Diagnostic".Error_Text :=
+                        'STOPPING: Z park move failed - axis left short of SheetLoadPos_Z';
+                    #State := STATE_ERROR;
                 END_IF;
             END_IF;
             // Phase 1: wait for recipe executor to finish, then command spindle stop and
             // begin waiting for the spindle to reach zero speed before releasing MandrelLock.
             // MandrelLock stays extended (sheet clamped) while the spindle decelerates --
             // retracting while spinning could throw the sheet at the operator.
-            IF NOT #fbRecipeHandler.Busy AND NOT #bWaitingSpindleStop THEN
+            //
+            // The `#State = STATE_STOPPING` term (added with ITEM-56c) is what stops this block
+            // from re-arming the park move in the SAME scan that the completion check above sent
+            // the machine to STATE_ERROR: that check clears bStopMoveX/Z, which is exactly the
+            // condition phase 1 looks for. Same pattern STATE_STOP_GOTOZERO already uses at its
+            // own exit test. Do not drop it.
+            IF NOT #fbRecipeHandler.Busy AND NOT #bWaitingSpindleStop
+               AND (#State = STATE_STOPPING) THEN
                 #bSpindleStop             := TRUE;
                 #bSheetHolderRetractHold  := TRUE;  // Held: release sheet holder (may be extended if stopped during SHEET_WAIT Ph1/2)
                 #bSheetWaitPhase2         := FALSE;
@@ -2776,7 +2877,12 @@ BEGIN
             // Phase 2: release MandrelLock once proportional spindle decel timer has elapsed AND axes are parked.
             // Bypass_MandrelLock: no cylinder on this variant — skip decel wait, go directly to LOCK_RETRACT_WAIT.
             // No physical encoder -- ActualSpeed is a TO estimate only. tonSpindleStopWait is sole release condition.
+            // `#State = STATE_STOPPING` (added with ITEM-56c): without it, a park move that failed
+            // above would clear bStopMoveX/Z and this block would then release the MandrelLock and
+            // transition to LOCK_RETRACT_WAIT in the same scan -- overwriting the STATE_ERROR that
+            // was just set, and unclamping the sheet on a machine with a faulted axis.
             IF #bWaitingSpindleStop AND NOT #bStopMoveX AND NOT #bStopMoveZ
+               AND (#State = STATE_STOPPING)
                AND ("DB_MachineConfig".Bypass_MandrelLock OR #tonSpindleStopWait.Q) THEN
                 IF NOT "DB_MachineConfig".Bypass_MandrelLock THEN
                     "DB_Cylinder_MandrelLock".Cmd_Extend := FALSE;
@@ -2917,6 +3023,18 @@ BEGIN
             IF NOT #HW_PNP_X_Min AND NOT #HW_PNP_X_Max THEN #bHaltX_PNP := FALSE; END_IF;
             IF NOT #HW_PNP_Z_Min AND NOT #HW_PNP_Z_Max THEN #bHaltZ_PNP := FALSE; END_IF;
             IF NOT #bHaltX_PNP AND NOT #bHaltZ_PNP THEN
+                // ITEM-56h (2026-08-16): acknowledge the alarm here too. The machine state and the
+                // alarm are separate -- clearing one does not clear the other. This exit set
+                // State := STOPPED but told FB_AlarmManager nothing, so 16#0121..0124 stayed ACTIVE
+                // in DB_Error and the HMI showed a live red alarm on a machine reading "Stopped".
+                // The operator then had to press Reset purely to clear the red, on a machine that
+                // had already recovered by itself -- which is how operators learn to distrust
+                // alarms. The manual exit below has always done this; the two now match.
+                //
+                // Reachable in practice: MC_Halt decelerates, so the axis can come to rest right at
+                // the EDGE of the detection zone and vibration flickers the sensor FALSE.
+                #Error := FALSE;
+                #fbAlarmManager(NewError := FALSE, NewErrorCode := 0, AcknowledgeError := TRUE);
                 #State := STATE_STOPPED;
             END_IF;
             // Manual exit: operator presses AckError or Reset
@@ -2996,6 +3114,14 @@ BEGIN
             #bRecipeLoadExec := FALSE;   // a recipe copy must not stay in flight across an error ack
             #timerRunning := FALSE;  // Stop cycle timer
             #bResumeSpeedup := FALSE;  // Cancel any pending pause spin-up wait (e.g. fault during spin-up)
+            // Cancel any pending STOPPING spindle-decel wait. Added with ITEM-56c, but it also
+            // closes a route that already existed: STATE_STOPPING could be left for STATE_ERROR by
+            // an E-Stop or safety fault, and NOTHING cleared this flag on that path (only phase 2
+            // itself and the hard reset did). A stale TRUE makes the NEXT stop skip phase 1
+            // entirely -- no spindle stop command, no park move, no sheet-holder release -- and
+            // drop straight into phase 2 on a leftover spindleStopPT. Level-cleared here every
+            // scan while faulted, so no acknowledge path can miss it.
+            #bWaitingSpindleStop := FALSE;
             // Clear the BackSupport atmosphere valve — de-energises on error.
             // Cmd_Retract is deliberately NOT touched here: the end-of-recipe retract
             // block (bottom of this FB) owns it and needs it held for the retract window.
@@ -3107,18 +3233,24 @@ BEGIN
         "DB_HMI".StatusMsg    := 'Program Complete';
         // Single-writer: ErrorText is owned by FB_AlarmManager. Completion is a status,
         // not an error -- StatusMsg above already announces it ('Done!' write removed).
-        // ITEM-20: increment CycleCount exactly once per cycle, regardless of how many times
-        // Reset/Start is pressed from STATE_COMPLETE.
-        IF NOT #bCycleCountDone THEN
-            "DB_HMI".CycleCount := "DB_HMI".CycleCount + 1;
-            #bCycleCountDone    := TRUE;
-        END_IF;
+        // DB_HMI.CycleCount and its #bCycleCountDone one-shot were DELETED 2026-08-15.
+        // The counter was a duplicate of "DB_Production".TotalOK, and a broken one: the
+        // one-shot was cleared ONLY by the hard reset, and the normal cycle
+        // (COMPLETE -> Start -> RECIPE_LOAD -> ... -> COMPLETE) never passes through it,
+        // so CycleCount incremented once and then stayed put until somebody pressed
+        // Reset. The HMI now reads DB_Production directly -- Started / OK / NOK /
+        // Stopped / Aborted, which reconcile. Do not reintroduce a second parts counter
+        // in DB_HMI: two sources of truth for "how many parts" is what produced the bug.
+        // ITEM-56h (2026-08-16): the `ELSIF #fbInputs.Cmd_Reset` branch that used to sit here was
+        // DEAD CODE and is deleted. Cmd_Reset raises #bDoHardReset in the pre-CASE handler, which
+        // sets #State := STATE_STOPPED before this IF is evaluated -- so `#State = 100` was always
+        // already FALSE by the time a Reset could have been seen here. It claimed that Reset from
+        // COMPLETE re-loads and re-scans the recipe; it never did, and Reset from COMPLETE has
+        // always meant the same as Reset anywhere else: go to STOPPED. User confirmed 2026-08-16
+        // that no other meaning is wanted. Start / Restart below are the live re-run path.
         IF #fbInputs.Cmd_Start OR #restartEdge THEN
             #bResetRecipe := TRUE;      // Reset FB_RecipeHandler (state 99→0) before re-run
             #State := STATE_RECIPE_LOAD; // Restart/Start = immediate re-run, keeps drives on
-        ELSIF #fbInputs.Cmd_Reset THEN
-            #bResetRecipe := TRUE;      // Also reset recipe handler on manual reset
-            #State := STATE_RECIPE_LOAD; // Reset from COMPLETE re-loads then pre-scans (drives stay on)
         END_IF;
     END_IF;
 
@@ -3152,15 +3284,29 @@ BEGIN
     // what makes it safe for a Reset pressed in MANUAL to skip homing -- if the operator turned
     // drive power off to move something by hand, this catches it regardless of the state.
     //
-    // Covers X and Z only: there is no Btn_Enable_Tool, and Btn_Contactor_Tool is deliberately
-    // FALSE whenever Bypass_ToolAxis is set, which would latch this permanently. The tool axis
-    // is covered by its own StatusBits.HomingDone term in bRefTrusted.
+    // Tool axis added 2026-08-16, once Btn_Enable_Tool existed to pair with the contactor.
+    // The gap it closes: Btn_Contactor_Tool is an operator toggle on the MANUAL > MANAGE screen,
+    // so the tool contactor can be switched off on its own while X and Z stay powered. The
+    // turret is then de-energised and can be turned by hand, and because the axis is open-loop
+    // StatusBits.HomingDone stays TRUE -- so bRefTrusted is satisfied and the next start
+    // presents the wrong tool angle. Exactly the case this latch exists for.
+    //
+    // The Bypass_ToolAxis term is mandatory, not decorative: with the bypass set,
+    // Btn_Contactor_Tool is FALSE by design, so without it the latch would be permanently TRUE
+    // and a bypassed machine would home on every single start. That was the original reason the
+    // tool axis was left out entirely; one condition solves it.
+    //
+    // In auto this term cannot fire on its own -- STATE_STARTING sets all three contactor/enable
+    // pairs in the same scan and only E-Stop drops them, which drops X and Z too. It earns its
+    // place on the MANUAL path.
     //
     // Power-up consequence (intended): DB_HMI is NON_RETAIN, so these are FALSE until the first
     // STATE_STARTING asserts them -- the latch is held TRUE until the machine has been started
     // once and homed, which is exactly the required power-up behaviour.
     IF NOT ("DB_HMI".Btn_Contactor_X AND "DB_HMI".Btn_Enable_X)
-       OR NOT ("DB_HMI".Btn_Contactor_Z AND "DB_HMI".Btn_Enable_Z) THEN
+       OR NOT ("DB_HMI".Btn_Contactor_Z AND "DB_HMI".Btn_Enable_Z)
+       OR (NOT "DB_MachineConfig".Bypass_ToolAxis
+           AND NOT ("DB_HMI".Btn_Contactor_Tool AND "DB_HMI".Btn_Enable_Tool)) THEN
         #bRequireHoming := TRUE;
     END_IF;
 
@@ -3272,8 +3418,13 @@ BEGIN
         #bSheetHolderRetractHold := FALSE;
     END_IF;
     "DB_Cylinder_SheetHolder".Cmd_Retract  := #bSheetHolderRetractHold;
-    // Drive ready timeout: counts while in STARTING and drives not yet ready; auto-resets on exit
-    #tonDriveReady(IN := (#State = STATE_STARTING) AND NOT (#fbPowerX.Status AND #fbPowerZ.Status), PT := "DB_MachineConfig".Timeout_DriveReady);
+    // Drive ready timeout: counts while in STARTING and drives not yet ready; auto-resets on exit.
+    // Same tool term as the STARTING readiness test above -- the two must agree, or the state
+    // waits on a condition the timeout is not counting against (or vice versa).
+    #tonDriveReady(IN := (#State = STATE_STARTING)
+                         AND NOT (#fbPowerX.Status AND #fbPowerZ.Status
+                                  AND (#fbPowerTool.Status OR "DB_MachineConfig".Bypass_ToolAxis)),
+                   PT := "DB_MachineConfig".Timeout_DriveReady);
     // Spindle decel wait: blocks RunCmd from going TRUE until VFD ramp-down completes
     #tonSpindleDecel(IN := #bSpindleDecelWait, PT := "DB_MachineConfig".SpindleDecelTime);
     // Pause resume spin-up wait: counts while bResumeSpeedup (Continue pressed in PAUSED).
@@ -3301,8 +3452,25 @@ BEGIN
     // =========================================================================
     // PRODUCTION LOGGING - DB_Production
     // =========================================================================
-    // Edge: cycle start (enter PRE_SCAN)
-    IF (#State = STATE_PRE_SCAN) AND (#prevState <> STATE_PRE_SCAN) THEN
+    // Edge: cycle start (enter RECIPE_LOAD).
+    //
+    // This was the PRE_SCAN(12) edge until 2026-08-15. RECIPE_LOAD(11) runs one state
+    // EARLIER, and it is the first state every accepted Start press reaches -- from
+    // STOPPED, from MANUAL and from COMPLETE alike. Counting at PRE_SCAN meant a start
+    // that died in the recipe copy (16#0312 transfer refused, 16#0314 chunk never
+    // arrived, 16#0316 checksum mismatch) incremented nothing: TotalStarted had not
+    // fired yet, and CurrentActive was still FALSE so the STATE_ERROR edge below
+    // skipped it too. Those failures were invisible to the production counters --
+    // exactly the ones worth counting while the chunked transfer is still on trial.
+    //
+    // Counting here also makes CurrentStartTime the time of the Start press rather than
+    // the time the copy finished, and it is what makes the TotalStarted invariant in
+    // DB_Production hold: every accepted start now has an outcome bucket waiting for it.
+    //
+    // Safe as a single edge: RECIPE_LOAD is never re-entered from within a cycle (it
+    // exits to PRE_SCAN on Done or to ERROR on failure, and nothing loops back), so this
+    // fires exactly once per Start.
+    IF (#State = STATE_RECIPE_LOAD) AND (#prevState <> STATE_RECIPE_LOAD) THEN
         "DB_Production".CurrentActive := TRUE;
         "DB_Production".CurrentProgram := #activeProgram;
         "DB_Production".TotalStarted := "DB_Production".TotalStarted + 1;
@@ -3340,20 +3508,48 @@ BEGIN
         // in 02_DataBlocks.scl. Fault detail is retained in DB_AlarmHistory / DB_Error.
     END_IF;
 
-    // Edge: STOPPED via STOP sequence (STOPPING → LOCK_RETRACT_WAIT → STOPPED, or legacy paths)
-    IF (#State = STATE_STOPPED) AND
-       ((#prevState = STATE_STOPPING) OR (#prevState = STATE_STOP_GOHOME) OR (#prevState = STATE_STOP_GOTOZERO)
-        OR (#prevState = STATE_LOCK_RETRACT_WAIT)) AND
-       "DB_Production".CurrentActive THEN
-        "DB_Production".LastResult := 3;  // STOP
+    // Edge: cycle ended at STOPPED with a cycle still in flight.
+    //
+    // Trigger is ANY entry to STOPPED (#prevState <> STOPPED) with CurrentActive set --
+    // not a whitelist of "expected" previous states. It used to be a whitelist of
+    // {STOPPING, STOP_GOHOME, STOP_GOTOZERO, LOCK_RETRACT_WAIT}, which counted an
+    // operator STOP correctly and lost everything else: bDoHardReset sets
+    // State := STOPPED DIRECTLY from RUNNING / PAUSED / SHEET_WAIT / HOMING / whatever,
+    // so a Reset pressed mid-cycle hit no bucket at all, and left CurrentActive stranded
+    // TRUE until the next start happened to overwrite it. TotalStarted then permanently
+    // exceeded the sum of the outcomes with no record of where the difference went.
+    //
+    // A whitelist here fails OPEN -- a state added later that reaches STOPPED by a new
+    // route silently stops being counted. Counting every entry and then classifying it
+    // fails CLOSED: an unrecognised route lands in TotalAborted, which is visible and
+    // wrong-looking rather than invisible.
+    //
+    // No double-count risk: the two other terminal edges (COMPLETE and ERROR, above)
+    // both clear CurrentActive on the scan they fire, so the STOPPED that follows an
+    // error acknowledge or a stop-from-COMPLETE finds it already FALSE.
+    IF (#State = STATE_STOPPED) AND (#prevState <> STATE_STOPPED)
+       AND "DB_Production".CurrentActive THEN
         "DB_Production".LastProgram := #activeProgram;
         "DB_Production".LastDuration_s := "DB_HMI".ElapsedSeconds;
         "DB_Production".LastErrorCode := 0;
         "DB_Production".LastErrorLine := -1;
-        "DB_Production".TotalStopped := "DB_Production".TotalStopped + 1;
         #prodTimeStatus := RD_SYS_T(OUT => #prodTimeNow);
         "DB_Production".LastEndTime := #prodTimeNow;
         "DB_Production".CurrentActive := FALSE;
+        IF (#prevState = STATE_STOPPING) OR (#prevState = STATE_LOCK_RETRACT_WAIT)
+           OR (#prevState = STATE_STOP_GOHOME) OR (#prevState = STATE_STOP_GOTOZERO) THEN
+            // Operator pressed Stop: the machine ran its park sequence and the axes
+            // finished at the sheet-load position. A clean, planned end.
+            "DB_Production".LastResult := 3;  // STOP
+            "DB_Production".TotalStopped := "DB_Production".TotalStopped + 1;
+        ELSE
+            // Any other route to STOPPED with a cycle active -- in practice Reset
+            // pressed from an active state. Deliberately NOT merged into TotalStopped:
+            // a Stop parks the axes, a Reset does not, so the two say different things
+            // about where the machine was left and are worth telling apart.
+            "DB_Production".LastResult := 4;  // ABORT
+            "DB_Production".TotalAborted := "DB_Production".TotalAborted + 1;
+        END_IF;
         // History ring push removed 2026-07-31 (memory reclaim) -- see DB_Production
         // in 02_DataBlocks.scl. Last* summary above is the surviving record.
     END_IF;
@@ -3364,6 +3560,8 @@ BEGIN
         "DB_Production".TotalOK := 0;
         "DB_Production".TotalNOK := 0;
         "DB_Production".TotalStopped := 0;
+        "DB_Production".TotalAborted := 0;   // must be zeroed with the rest or the
+                                             // TotalStarted invariant breaks after a reset
         // Optionally also clear last cycle summary
         "DB_Production".LastResult := 0;
         "DB_Production".LastProgram := 0;
@@ -3646,16 +3844,34 @@ BEGIN
     // because its step 3 homes the tool.
     "DB_Manual".Btn_HomeAxis := "DB_Manual".Btn_Home AND NOT #bToolAxisBlocked;
 
+    // ITEM-56d (2026-08-16): refuse BLIND COORDINATE moves while halted in the PNP zone.
+    // The jog gate above blocks the direction that would drive deeper in, but MoveAbsolute,
+    // GoSafe and GoZero were passed through ungated -- they drive to a fixed coordinate with no
+    // knowledge of which sensor tripped, so from PNP_HALT the operator could send the axis
+    // straight back into the zone the machine had just halted for. GoZero is the clearest case:
+    // it targets 0,0, i.e. toward MIN, which is exactly the wrong way after a MIN trip.
+    //
+    // Home and HomeAll are DELIBERATELY NOT blocked. Homing is the escape, not a hazard -- it is
+    // the same action the Reset -> Start recovery performs, FB_ManualMode states 40/50 already
+    // pre-clear the min proximity zone before seeking (bClearX/Z := PNP_X/Z_Min), and the TO is
+    // configured to reverse at the hardware limit. Blocking them would remove the operator's
+    // manual way out and leave only the automatic one. An earlier draft of this item lumped all
+    // five buttons together; that was wrong. The distinction is blind coordinate move vs
+    // reference-seeking move -- keep it that way if this is ever revisited.
+    #bBlindMoveBlocked := (#State = STATE_PNP_HALT);
+
     #fbManualMode(Enable := (#State = STATE_MANUAL OR #State = STATE_PNP_HALT),
                   SelectedAxis := "DB_Manual".SelectedAxis,
-                  Jog_Plus := "DB_Manual".Jog_Plus, Jog_Minus := "DB_Manual".Jog_Minus, 
+                  Jog_Plus := "DB_Manual".Jog_Plus, Jog_Minus := "DB_Manual".Jog_Minus,
                   JogSpeed := "DB_Manual".JogSpeed,
-                  MoveAbsolute := "DB_Manual".Btn_MoveAbsolute AND NOT #bToolAxisBlocked,
+                  MoveAbsolute := "DB_Manual".Btn_MoveAbsolute AND NOT #bToolAxisBlocked
+                                  AND NOT #bBlindMoveBlocked,
                   TargetPosition := "DB_Manual".MoveToPosition,
                   HomeAxis := "DB_Manual".Btn_HomeAxis,
                   HomeAll := "DB_Manual".Btn_HomeAll AND NOT #bToolLockEngaged,
                   HomingMode := "DB_Manual".HomingMode, HomePosition := 0.0,
-                  GoSafe := "DB_Manual".Btn_GoSafe, GoZero := "DB_Manual".Btn_GoZero,
+                  GoSafe := "DB_Manual".Btn_GoSafe AND NOT #bBlindMoveBlocked,
+                  GoZero := "DB_Manual".Btn_GoZero AND NOT #bBlindMoveBlocked,
                   SafeToJog := #fbSafetyMonitor.SafeToJog, Reset := #fbInputs.Cmd_Reset,
                   PNP_X_Min := #HW_PNP_X_Min, PNP_Z_Min := #HW_PNP_Z_Min,
                   ToolStepCW := "DB_Manual".Btn_ToolStepCW, ToolStepCCW := "DB_Manual".Btn_ToolStepCCW,

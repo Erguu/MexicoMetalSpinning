@@ -179,7 +179,15 @@ flowchart LR
   ⚠️ Do **not** wire the spindle so that losing the pulse train faults the VFD on a normal stop — by
   design the PLC keeps pulsing and uses RunForward to start/stop (see project note
   `project_spindle_pto_keep_pulsing`). Configure the VFD accordingly.
-- `Output_Enable_X/Z` are separate drive-enable lines; Tool/Spindle have no separate enable output.
+- `Output_Enable_X/Z/Tool` are separate drive-enable lines. **Tool enable `%Q8.1` was commissioned
+  2026-08-16** — the cable had been wired from the drive to the panel since build but was never
+  landed on an output, and the drive's enable input was held on locally, so the tool servo came up
+  already enabled the instant its contactor closed. That ordering (enable present before drive
+  power) is the leading suspect for `16#000D`. **The tool servo is the same drive model as X and Z**
+  (user, 2026-08-16), so `%Q8.1` is wired and driven exactly like `%Q1.0`/`%Q1.1` — no inversion, no
+  settle delay. `Btn_Enable_Tool` has an HMI toggle exactly like X/Z, and STATE_STARTING also forces
+  it TRUE on every auto start. The Spindle is a VFD and still has no separate enable output — it uses
+  `PTO_RunForward_AxisS`.
 - ⚠️ `PTO_RunForward_AxisS` appears in the tag export at **both** `%Q0.7` and `%Q8.0`
   (`PTO_RunForward_AxisS(1)`). Confirm the single correct terminal during commissioning and remove
   the duplicate tag.
@@ -198,6 +206,7 @@ flowchart LR
 | PTO_RunForward_AxisS | %Q0.7 / %Q8.0 | Spindle VFD run-forward enable (confirm one) |
 | Output_Enable_X | %Q1.0 | X drive enable |
 | Output_Enable_Z | %Q1.1 | Z drive enable |
+| Output_Enable_Tool | %Q8.1 | Tool servo enable — added 2026-08-16, driven exactly like %Q1.0/%Q1.1 |
 | Homing_PNP_X | %I0.4 | X homing reference proximity (PNP NO) |
 | Homing_PNP_Z | %I0.1 | Z homing reference proximity (PNP NO) |
 | Homing_PNP_T | %I0.6 | Tool homing reference proximity (PNP NO) |
@@ -245,6 +254,7 @@ flowchart LR
 | %Q1.0 | Output_Enable_X | X drive enable | |
 | %Q1.1 | Output_Enable_Z | Z drive enable | |
 | %Q8.0 | PTO_RunForward_AxisS(1) | Spindle run-forward (dup) | confirm vs %Q0.7 |
+| %Q8.1 | Output_Enable_Tool | Tool servo enable | added 2026-08-16 — same drive as X/Z, wire as %Q1.0/%Q1.1 |
 | %Q8.4 | Output_Contactor_Spindle | Spindle contactor coil | |
 | %Q8.5 | Output_Contactor_X | X contactor coil | |
 | %Q8.6 | Output_Contactor_Z | Z contactor coil | |

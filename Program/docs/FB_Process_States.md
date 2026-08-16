@@ -33,7 +33,7 @@ Not compiled, not commissioned.
    retracted, hit the FB's `Timeout_Retract`, landed in State 4, saw `Cmd_Extend` still TRUE and
    **extended straight back out about a second later**.
 2. **SheetHolder retract coil is now time-bounded (ITEM-46 — closed).** `bSheetHolderRetractHold` is
-   released by a new TON `tonSheetHolderHold` (PT = `CylSheetHolder_RetractTime`, T#0.5S) instead of
+   released by a new TON `tonSheetHolderHold` (PT = `CylSheetHolder_RetractTime`, T#1S) instead of
    by the cylinder FB reaching State 4. The State-4 `Sol_B` latch (`PositioningMode=0 AND
    ValveType<>1`) is **deleted from FB_CylinderControl** — it applied to two cylinders and both
    already dodged it with `Timeout_Retract := T#24H`, so it protected nobody; State 4 now drives both
@@ -155,11 +155,11 @@ added so neither failure can ever be silent again: the loader **poisons** `DB_Se
 | 15  | HOMING             | "Homing..."                          | PRE_HOME_CLR, STARTING                  | 16 (POST_HOME_CLR), 999 (ERROR)                            |
 | 16  | POST_HOME_CLR      | "Sheet-load park move..."            | HOMING, STARTING (reposition)           | 14 (SHEET_WAIT), 999 (ERROR)                               |
 | 17  | LOCK_EXTEND_WAIT   | "Lock engaging..."                   | SHEET_WAIT, TOOL_WAIT                   | 20 (RUNNING), 999 (ERROR)                                  |
-| 18  | STOPPING           | "Stopping..."                        | Any auto state (Cmd_Stop)               | 29 (LOCK_RETRACT_WAIT)                                     |
+| 18  | STOPPING           | "Stopping..."                        | Any auto state (Cmd_Stop)               | 29 (LOCK_RETRACT_WAIT), or 999 if a park move fails (16#0001/2) |
 | 19  | STOP_GOHOME        | "Homing (post-stop)..."              | (legacy — no longer reached on normal stop) | 0 (STOPPED), 999 (ERROR)                              |
 | 20  | RUNNING            | "Running"                            | LOCK_EXTEND_WAIT                        | 25 (PAUSED), 29 (LOCK_RETRACT_WAIT), 100 (COMPLETE), 999  |
 | 21  | STOP_GOTOZERO      | "Returning to zero..."               | (legacy — never assigned; unreachable)  | 0 (STOPPED), 999 (ERROR)                                   |
-| 22  | PNP_HALT           | "PNP Halt - jog to escape..."        | Any auto state on PNP zone trigger      | 0 (STOPPED)                                                |
+| 22  | PNP_HALT           | "PNP Halt - jog to escape..."        | Any auto state on PNP zone trigger (not 10/11/12) | 0 (STOPPED) — recover with Reset then Start; homing clears the zone |
 | 25  | PAUSED             | "Paused"                             | RUNNING                                 | 20 (RUNNING)                                               |
 | 29  | LOCK_RETRACT_WAIT  | "Lock releasing..."                  | STOPPING, RUNNING (tool change)         | 0 (STOPPED) or 30 (TOOL_CHANGE)                            |
 | 30  | TOOL_CHANGE        | "Tool Change"                        | LOCK_RETRACT_WAIT (bLockAfterHoming=F)  | 35 (TOOL_WAIT)                                             |
@@ -276,7 +276,7 @@ Four PNP NO proximity sensors trigger STATE_PNP_HALT from any auto state:
 | `HW_PNP_Z_Min` | `0x0123` | "PNP limit: Z axis MIN zone" |
 | `HW_PNP_Z_Max` | `0x0124` | "PNP limit: Z axis MAX zone" |
 
-Bypassed in: HOMING (15), STOP_GOHOME (19), PRE_HOME_CLR (13), POST_HOME_CLR (16), MANUAL (5), STOPPED (0), PNP_HALT (22), ERROR (999).
+Bypassed in: HOMING (15), STOP_GOHOME (19), PRE_HOME_CLR (13), POST_HOME_CLR (16), MANUAL (5), STOPPED (0), PNP_HALT (22), ERROR (999), and — added 2026-08-16 — STARTING (10), RECIPE_LOAD (11), PRE_SCAN (12). Those three command no axis motion, and leaving them out meant the documented Reset → Start recovery re-tripped on the first scan of RECIPE_LOAD instead of reaching homing (see STATE 22).
 
 ### `Running` flag
 `Running := (State >= 10) AND (State < 999)`
@@ -319,8 +319,8 @@ Cmd_Stop vetoes RunCmd directly — spindle decelerates immediately when Stop is
 | `tonLockWait` | Hardcoded in FB_Process | T#5S | STATE_LOCK_RETRACT_WAIT: time-based wait for ToolHeadLock spring return (no retract sensor) |
 | `tonLockPreDelay` | Hardcoded in FB_Process | T#1S | STATE_LOCK_EXTEND_WAIT: brief delay before energising ToolHeadLock solenoid |
 | `tonMandrelWait` | Hardcoded in FB_Process | T#5S | STATE_SHEET_WAIT phase 2: open-loop wait for MandrelLock full stroke |
-| `tonSheetHolderRetract` | `DB_MachineConfig.CylSheetHolder_RetractTime` | T#0.5S | STATE_SHEET_WAIT phase 3: open-loop wait before advancing to LOCK_EXTEND_WAIT |
-| `tonSheetHolderHold` | `DB_MachineConfig.CylSheetHolder_RetractTime` (same value) | T#0.5S | **Any state.** How long `Sol_B` (`%Q12.3`) is energised for a SheetHolder retract before the latch drops and both coils go off. Gated on E-Stop OK. Must be ≥ the real retract stroke time (ITEM-46) |
+| `tonSheetHolderRetract` | `DB_MachineConfig.CylSheetHolder_RetractTime` | T#1S | STATE_SHEET_WAIT phase 3: open-loop wait before advancing to LOCK_EXTEND_WAIT |
+| `tonSheetHolderHold` | `DB_MachineConfig.CylSheetHolder_RetractTime` (same value) | T#1S | **Any state.** How long `Sol_B` (`%Q12.3`) is energised for a SheetHolder retract before the latch drops and both coils go off. Gated on E-Stop OK. Must be ≥ the real retract stroke time (ITEM-46). Raised from T#0.5S on 2026-08-15 — the 0.5 s was a leftover from the 5/2 spring era, where the spring did the work and the coil time did not matter |
 | `tonBSEndRetract` | `DB_MachineConfig.CylBackSupport_EndRetractTime` | T#2S | Terminal states (STOPPED / ERROR / COMPLETE): how long BackSupport `Sol_B` is held on the end-of-recipe retract before all coils drop. Gated on E-Stop OK |
 | `tonDriveReady` | Hardcoded in FB_Process | T#3S | STATE_STARTING: timeout if drives do not report ready |
 | `tonHomingTimeout` | Hardcoded in FB_Process | T#120S | STATE_HOMING, STATE_STOP_GOHOME: combined timeout for all three axes |
@@ -885,7 +885,7 @@ SHEET_WAIT. Renamed in intent 2026-08-03: it used to move only far enough to cle
   (which drops `Cmd_Extend` via the single-writer block)
 
 **Phase 3 — SheetHolder retract** (`bSheetWaitPhase3 = TRUE`):
-- `tonSheetHolderRetract` runs (open-loop — `DB_MachineConfig.CylSheetHolder_RetractTime`, **T#0.5S** from FC_LoadConfig)
+- `tonSheetHolderRetract` runs (open-loop — `DB_MachineConfig.CylSheetHolder_RetractTime`, **T#1S** from FC_LoadConfig)
 - On timer Q → **17** LOCK_EXTEND_WAIT
 - `tonSheetHolderHold` runs in parallel off the same config value and starts on the same scan, so
   the coil drops as the state advances. If the state advances while `Sol_B` is still on (they can
@@ -1016,12 +1016,26 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 
 **Axis park move — X and Z simultaneously (runs in parallel with spindle decel timer):**
 - `bStopMoveX` and `bStopMoveZ` are set together in Phase 1 — both axes move at the same time
-- When `fbMoveX_Stop.Done OR .Error` → `bStopMoveX = FALSE` (independent of Z)
-- When `fbMoveZ_Stop.Done OR .Error` → `bStopMoveZ = FALSE` (independent of X)
+- On `fbMoveX_Stop.Done` → `bStopMoveX = FALSE` (independent of Z)
+- On `fbMoveZ_Stop.Done` → `bStopMoveZ = FALSE` (independent of X)
+- On **`.Error`** → both flags cleared, `16#0001` (X) / `16#0002` (Z) reported with the decoded TO
+  code in `ErrorDetail`, → **999** STATE_ERROR. *(ITEM-56c, 2026-08-16. Before this, `Done OR Error`
+  shared one branch: a failed park cleared its flag exactly like a successful one and the machine
+  reported a clean stop with an axis left short of the park. STATE_STOP_GOTOZERO had always raised
+  these two codes for the identical failure.)*
 - Phase 2 release condition waits for BOTH flags to be FALSE (`NOT bStopMoveX AND NOT bStopMoveZ`)
 
+> **Why the MandrelLock stays clamped on the error exit.** Phase 2 is the only thing that releases
+> it, and STATE_ERROR skips phase 2 — so the sheet stays clamped while the spindle coasts down, and
+> the operator's Ack releases it through the ITEM-32 deferred wait. Correct for a stop that failed
+> with the spindle possibly still turning.
+
 **Phase 2 — Release MandrelLock once spindle timer elapsed AND axes parked:**
-- Condition: `bWaitingSpindleStop AND NOT bStopMoveX AND NOT bStopMoveZ AND (Bypass_MandrelLock OR tonSpindleStopWait.Q)`
+- Condition: `bWaitingSpindleStop AND NOT bStopMoveX AND NOT bStopMoveZ AND (State = STATE_STOPPING) AND (Bypass_MandrelLock OR tonSpindleStopWait.Q)`
+- The `State = STATE_STOPPING` term (and the matching one on Phase 1) exists because both blocks run
+  later in the scan than the completion check and both key off `bStopMoveX/Z` being FALSE — which is
+  exactly what the error branch does. Without it, a failed park would re-arm the move and then
+  release the MandrelLock, overwriting the STATE_ERROR set moments earlier in the same scan.
 - `tonSpindleStopWait` (proportional to captured RPM, max = `SpindleStopSafeTime`) is the **sole spindle release condition** — no speed check
   - No physical encoder on spindle. `ActualSpeed` is an unreliable TO estimate and is not used.
 - Action on condition met:
@@ -1036,6 +1050,7 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 | Condition | Next State |
 |-----------|-----------|
 | Spindle timer elapsed AND axes parked at `parkTarget` | **29** LOCK_RETRACT_WAIT |
+| `fbMoveX_Stop.Error` → `16#0001`, or `fbMoveZ_Stop.Error` → `16#0002` (ITEM-56c) | **999** ERROR |
 
 ---
 
@@ -1110,9 +1125,26 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 **Purpose:** Emergency stop when an axis enters a proximity (PNP NO) zone during auto motion. Axes are halted immediately. Only the escape jog direction is allowed.
 
 **How it is entered (before the CASE, every scan):**
-- Any of the four PNP sensors fires in an auto state (not HOMING, STOP_GOHOME, PRE/POST_HOME_CLR, MANUAL, STOPPED, PNP_HALT, ERROR)
+- Any of the four PNP sensors fires in an auto state — bypassed in HOMING, STOP_GOHOME,
+  PRE/POST_HOME_CLR, MANUAL, STOPPED, PNP_HALT, ERROR, and (**added 2026-08-16**) STARTING(10),
+  RECIPE_LOAD(11), PRE_SCAN(12)
 - MC_Halt FBs (`fbHaltX_PNP`, `fbHaltZ_PNP`) are activated with `Execute := bHaltX_PNP` / `bHaltZ_PNP`
 - An alarm is reported with the specific zone error code (0x0121–0x0124)
+
+> **Recovery is Reset → Start, and it did not work until 2026-08-16.** Reset acknowledges the alarm,
+> sets `State := STOPPED` and latches `bRequireHoming` (PNP_HALT is not in the `bDoHardReset`
+> motionless whitelist), so the next Start homes and drives the axis out of the zone — the TO is
+> configured to reverse at the hardware limit, so the seek recovers from either side.
+>
+> It could never get that far. STOPPED force-clears `bHaltX/Z_PNP` every scan while the sensor is
+> still TRUE (the axis has not moved), and Start lands in **RECIPE_LOAD(11)** — which was not on the
+> bypass list. The first scan re-fired `0x0121` and threw the machine straight back into PNP_HALT.
+> Reset → Start → instant re-trip, homing never reached, and the only way out was jogging clear by
+> hand from the manual page.
+>
+> The three added states command **no axis motion** — STARTING closes contactors and picks the next
+> state, RECIPE_LOAD runs `READ_DBL`, PRE_SCAN walks the recipe array — so there was never anything
+> for an `MC_Halt` to halt in them. Every state that *does* move was already on the list.
 
 **Runs every scan while in this state:**
 - `FB_ManualMode` is **enabled** (same Enable condition as STATE_MANUAL: `State = MANUAL OR State = PNP_HALT`)
@@ -1125,7 +1157,27 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 - Spindle commands from recipe are mirrored here (SpindleReqStop/Start) because the RUNNING CASE is skipped
 - `Running = FALSE` in this state
 
-**Auto-exit:** PNP sensors clear when axis moves away:
+**Manual buttons while halted here (ITEM-56d, 2026-08-16):**
+
+| Button | In PNP_HALT | Why |
+|--------|-------------|-----|
+| Jog +/- | **Allowed**, direction-filtered | Escape direction passes, direction into the zone is blocked |
+| `Btn_Home` / `Btn_HomeAll` | **Allowed** | Homing *is* the escape — same action the Reset → Start recovery performs. `FB_ManualMode` states 40/50 pre-clear the min zone (`bClearX/Z := PNP_X/Z_Min`) and the TO reverses at the hardware limit |
+| `Btn_MoveAbsolute` | **Refused** | Blind coordinate move — no knowledge of which sensor tripped |
+| `Btn_GoSafe` | **Refused** | Same; `SafePos` could lie in either direction |
+| `Btn_GoZero` | **Refused** | Targets 0,0 — i.e. toward MIN, exactly the wrong way after a MIN trip |
+
+Gate is `#bBlindMoveBlocked := (#State = STATE_PNP_HALT)`, ANDed into the three refused inputs at
+the `#fbManualMode` call. Feedback is `WarningID = 4` *"Blocked in proximity zone - use jog or Home
+to escape"* — a **warning, not an error**, so a refused button never demands a Reset (same rule as
+the ToolHeadLock interlock). The distinction that matters is **blind coordinate move vs
+reference-seeking move**; an earlier draft of 56d blocked all five buttons, which would have removed
+the operator's only manual way out.
+
+**Auto-exit:** PNP sensors clear when axis moves away (acknowledges the alarm as well — ITEM-56h,
+2026-08-16; the machine state and the alarm are independent, and this path used to clear only the
+state). Reachable in practice because `MC_Halt` decelerates, so the axis can stop at the **edge** of
+the detection zone and vibration flickers the sensor FALSE:
 - `IF NOT HW_PNP_X_Min AND NOT HW_PNP_X_Max → bHaltX_PNP = FALSE`
 - `IF NOT HW_PNP_Z_Min AND NOT HW_PNP_Z_Max → bHaltZ_PNP = FALSE`
 - When both cleared → **0** STOPPED
@@ -1134,7 +1186,7 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 
 | Condition | Next State |
 |-----------|-----------|
-| PNP zone cleared (axis jogged away) | **0** STOPPED |
+| PNP zone cleared (axis jogged away) | **0** STOPPED — **also acknowledges the alarm since 2026-08-16 (ITEM-56h)**; before that `16#0121`–`0124` stayed active in `DB_Error` and the HMI showed a live alarm on a machine reading *Stopped* |
 | `AckError` or `Cmd_Reset` AND `EStop_OK` | Clears PNP flags, clears alarm → **0** STOPPED |
 
 ---
@@ -1190,8 +1242,10 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 
 | Condition | Next State |
 |-----------|-----------|
-| `Cmd_Start` OR `restartEdge` | `CycleCount++`, `bResetRecipe = TRUE` → **12** PRE_SCAN |
-| `Cmd_Reset` | Same as above |
+| `Cmd_Start` OR `restartEdge` | `bResetRecipe = TRUE` → **11** RECIPE_LOAD |
+| `Cmd_Reset` | Same as above — but unreachable in practice: `Cmd_Reset` raises `bDoHardReset`, which sets `State := STOPPED` before this CASE runs, so `IF #State = 100` is already false |
+
+> `DB_HMI.CycleCount` used to be incremented here. It was **deleted 2026-08-15** — a duplicate of `DB_Production.TotalOK`, and broken (its one-shot cleared only on a hard reset, so it counted once per Reset press rather than once per part). `TotalOK` is incremented by the COMPLETE edge in the PRODUCTION LOGGING block instead.
 
 > `bSpindleStop` is intentionally NOT cleared in COMPLETE so the stop command propagates to FB_SpindleControl before the next run's SpindleOn.
 

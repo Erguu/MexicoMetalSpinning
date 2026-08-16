@@ -2,163 +2,310 @@
 
 Things only you can do. Branch `feat/recipe-slots-and-batching`.
 
-**Merge policy (your decision, 2026-08-14): the whole branch goes to master in one go, once the
-chunked recipe transfer passes on the real CPU.** Master stays behind until then; the branch is the
-source of truth.
+**Merge policy:** the whole branch goes to master in one go, once the 999-line recipe test passes on
+the real CPU. Until then master stays behind.
+
+## Where everything stands
+
+| # | Topic | State |
+|---|-------|-------|
+| 1 | Hardware recipe test | ⛔ **BLOCKING** — everything waits on this |
+| 2 | Before you download | ⛔ **BLOCKING** — skip these and the HMI breaks |
+| 3 | After you download | 🔧 Do same day |
+| 4 | Tool enable `%Q8.1` | ✅ Hardware done · 3 steps left |
+| 5 | `16#000D` field fault | 🔍 Investigating |
+| 6 | Recipes 2–5 | 💤 Not urgent |
+| 7 | Letter to CAM developer | 💤 Not urgent |
+| 8 | Fallback plan | 💤 Only if test 1 fails |
+
+**Approved and closed** (2026-08-14, no action left): cylinder & drive power fixes (ITEM-46…53,
+including the SheetHolder freeze-in-place on E-Stop), Spanish moved out of the PLC, `Bypass_EStop`
+permitting auto run.
+
+---
+---
+
+# 1 · HARDWARE RECIPE TEST
+
+### ⛔ BLOCKING — the merge gate
 
 ---
 
-## Approval state — 2026-08-14
+## Do this
 
-| Work group | State |
-|---|---|
-| Cylinder & drive power (ITEM-46…53) | **tested and approved** — includes the SheetHolder 5/3 blocked-centre behaviour (freezes in place on E-Stop / power loss instead of spring-retracting). That sign-off is now closed |
-| Spanish out of the PLC + WinCC text lists | **tested and approved** |
-| `Bypass_EStop` permits auto run | **tested and approved** — guarded by the WinCC service login |
-| Chunked recipe transfer (10 × 100) | **NOT approved.** Compiles, downloads and runs on the real 1214C as of 2026-08-14 — but a 15-line program, and `RetryTotal` was never read. The fault this replaces only ever appeared at 12 KB, so a short recipe not failing is not evidence |
+- [ ] **Import in this order.** `02b_RecipePrograms.scl` → `05_RecipeHandler.scl` →
+      `06_MainProcess.scl` → **every** `gcodes/DB_RecipeProgramN.scl`.
+- [ ] **Never skip the last step.** `02b` wipes all recipe data. The DBs are `UNLINKED`, so the wipe
+      is invisible online. You would only find out at cycle start, as `16#0310` or `16#0313`.
+- [ ] **Download. Select program 1. Press Start.**
 
-**The one gate:** a **999-line** chunked load on the physical 1214C, with `RetryTotal` recorded.
-Everything else is waiting on it. A 15-line program does exercise all ten 1200 B transfers and all
-ten poison verifies — the loader runs every chunk regardless of `LineCount` — so it is a real test
-of the mechanism, just not of the length that broke.
+## Then read these tags
 
----
+```
+"fbProcess".fbRecipeLoader.RetryTotal        <- the number that matters
+"fbProcess".fbRecipeLoader.ErrorChunk        <- only means anything on 16#0314
+DB_SelectedRecipe.Lines[6/99/100/200/900/998]
+DB_HMI.Checksum_Recipe / Checksum_Calculated
+```
 
-## 1. The hardware test
+- [ ] **Also read free work memory** while you are connected.
+      Online & diagnostics → Memory. One screen.
+      Nobody has ever read it. Every memory figure in the docs is a guess.
+      It decides whether more slots or recipe chaining are affordable.
 
-- [ ] Import in order: `02b_RecipePrograms.scl` → `05_RecipeHandler.scl`, `06_MainProcess.scl` →
-      **every** `gcodes/DB_RecipeProgramN.scl`. `02b` was regenerated at 10 slots, so importing it
-      zeroes every recipe until step 3 is done — and the DBs are `UNLINKED`, so you cannot see the
-      wipe online. The first symptom would be `16#0310` / `16#0313` on a cycle start.
-- [ ] **STILL OPEN — record the free work memory.** The project compiled and downloaded on
-      2026-08-14, so it *fits*; the percentage was not read and nobody knows by how much. Every
-      memory figure in the docs is still an estimate (10 slots × 11 call sites ≈ 12.6 KB, plus
-      1.2 KB staging). This is not urgent, it is the number that decides whether more slots, or
-      recipe chaining, or any future feature is affordable — and the answer is one screen away in
-      TIA (Online & diagnostics → Memory). **Read it the next time you are connected.**
-- [ ] Download, select program 1, press start, then read:
+## What the result means
 
-      "fbProcess".fbRecipeLoader.RetryTotal      <- the number that matters
-      "fbProcess".fbRecipeLoader.ErrorChunk      <- only meaningful on 16#0314
-      DB_SelectedRecipe.Lines[6/99/100/200/900/998]
-
-      DB_HMI.Checksum_Recipe / Checksum_Calculated   <- now on the HMI, see below
-
-**Program 1 is a 15-line test program as of 2026-08-14 15:46** (checksum `12109`, verified, no
-zeroed RPM or feed). That is a fine first run — the loader transfers **all ten chunks regardless of
-`LineCount`**, so every 1200 B transfer and every poison verify is exercised exactly as it would be
-at 999 lines. What it does *not* exercise is the checksum beyond line 14. **Run a 999-line recipe
-before declaring the transfer fixed** — the original fault showed opposite symptoms at 38 lines and
-at 999, and only the long case runs the machine.
-
-| Result | Meaning | Next |
+| Result | Meaning | What to do |
 |---|---|---|
-| `Done`, `RetryTotal = 0` | 1200 B transfers land first time | Approved → merge the branch to master |
-| `Done`, `RetryTotal > 0` | Only got there on retries; the chunk size is close to this CPU's limit | Halve it: `python tools/gen_recipe_slots.py` → option 2 → 50 |
-| `16#0314` | A chunk never arrived intact | Read `ErrorChunk`: same chunk every time = that recipe; different each time = the mechanism, halve the chunk size |
+| `Done`, `RetryTotal = 0` | Clean. Transfers land first time | **Approved — merge to master** |
+| `Done`, `RetryTotal > 0` | Worked, but only on retries. Chunk size is near the limit | Halve it: `python tools/gen_recipe_slots.py` → option 2 → 50 |
+| `16#0314` | A chunk never arrived | Read `ErrorChunk`. Same chunk every time = that recipe. Different each time = the mechanism, so halve the chunk size |
+| `16#0314` at every chunk size | Load memory unusable on this CPU | Go to topic 8, the fallback |
 
-On a failure, `DB_SelectedRecipe.Lines[].CMD` is now a map of what got in (the loader poisons the
-whole array with `16#FF` before it starts). Scroll it online and read:
+## Run a 999-line recipe
 
-| `CMD` value | Meaning |
+Program 1 is only 15 lines. That still tests all ten transfers — the loader runs every chunk
+whatever the `LineCount` is.
+
+But the original fault only ever showed at 12 KB. **A short recipe passing proves nothing about
+length.** Do not declare this fixed until a 999-line program has loaded.
+
+## If it fails: read the poison map
+
+The loader fills `DB_SelectedRecipe.Lines[].CMD` with `16#FF` before it starts. Scroll it online.
+
+| `CMD` reads | Meaning |
 |---|---|
-| `16#FF` | That chunk never arrived — nothing was written there |
-| `0` | The chunk arrived; the source really is zero at that line |
-| A valid CMD (0–99) | The chunk arrived intact |
+| `16#FF` | That chunk never arrived |
+| `0` | Chunk arrived. The source really is zero there |
+| 0–99 | Chunk arrived intact |
 
-Note the *pattern* — contiguous FF at the front, at the back, or scattered — and photograph it.
-That is the shape of the fault, and it is the one thing PLCSIM could never show.
+**Photograph the pattern.** Contiguous at the front, at the back, or scattered — that shape is the
+fault, and PLCSIM can never show it.
 
-### The checksum — nothing to do, it is automatic now
+## If you get `16#0316` instead
 
-`16#0316` catches what the poison cannot: everything arrived, and it is not the right data.
-**SpinningCam emits the checksum itself** as of 2026-08-14, cross-verified against our
-implementation on a real export — so no `--stamp` step is needed. `--stamp` survives only for a
-recipe exported before they implemented it, and `ProvidesChecksum = FALSE` simply skips the check.
+This is a checksum error, not a transfer error. **Do not chase `RetryTotal`.**
 
-If `16#0316` fires, **do not chase `RetryTotal`** — there is no transfer fault. Read
-`DB_HMI.Checksum_Recipe` against `DB_HMI.Checksum_Calculated` (both now on the HMI):
+Compare `DB_HMI.Checksum_Recipe` against `DB_HMI.Checksum_Calculated`, both on the HMI:
 
-- a **stable** value that simply differs → the PLC's implementation is wrong. Re-exporting the
-  recipe will not help. Send me both numbers.
-- a value that **changes between attempts on the same recipe** → the transfer is landing different
-  data each time, which is the original fault.
-- the usual cause is `02b_RecipePrograms.scl` imported without re-importing the recipe DBs —
-  exactly the mistake this error exists to catch.
+| What you see | Meaning |
+|---|---|
+| Stable value, just different | Our implementation is wrong. Re-exporting will not help. Send me both numbers |
+| Value changes between attempts | The transfer is landing different data each time. That is the original fault |
+| — | **Most likely cause: you imported `02b` and forgot to re-import the recipe DBs.** This error exists to catch exactly that |
 
-| `16#0314` on every chunk size | Load memory is unusable on this CPU | Switch to `fallback/work-memory-recipes` |
+Nothing to set up. SpinningCam emits the checksum itself since 2026-08-14.
 
-## 2. Recipes 2–5
+---
+---
 
-**Status as of 2026-08-14: all four are chunked and pass validation** (`python
-tools/split_recipe_db.py --check --all` reports every one ready). The earlier warning here — stale
-optimized-access exports, and program 5 declaring `DATA_BLOCK "DB_RecipeProgram1"` — no longer
-applies; they were re-exported.
+# 2 · BEFORE YOU DOWNLOAD
 
-They are **placeholders**, not production recipes (your note, 2026-08-14), so nothing below is
-urgent:
+### ⛔ BLOCKING — do these first or the HMI breaks
 
-- [ ] Programs 3–5 carry no `// CHUNKS` marker and no checksum — harmless, they simply load with the
-      check skipped. Re-export from SpinningCam whenever convenient to pick both up.
-- [ ] **Program 2 has real defects and should not be run on a part:** four `CMD=20 Param=0`
-      (spindle ON at 0 RPM → silently clamped to 100) and three `CMD=1 F=0` (G1 with no feed →
-      **executed at rapid speed**). Program 1 is clean.
+---
 
-## 3. Still outstanding from earlier work
+Two PLC tags were deleted. If you download first, the running HMI points at tags that no longer
+exist.
 
-- [ ] **Retain ticks** on `SheetLoadPos_X`, `SheetLoadPos_Z`, `SheetLoadTol` in the `DB_MachineConfig`
-      editor. Source import clears them every time. Without them the sheet-load park position
-      reverts to 200.0 / 170.0 on every power cycle.
-- [ ] Re-enter the sheet-load park position once after a download that re-initialises DBs
-- [ ] WinCC text lists for the Spanish messages (`tools/textlists/*.tsv`) — between download and
-      that work, Spanish messages are simply absent. English is unaffected.
-- [ ] Send `Program/docs/letter_spinningcam_checksum_followup.md` to the CAM developer. It confirms
-      the cross-check passed, **withdraws** the `UDINT#` request (tested — bare literals are safe at
-      any magnitude, see `Program/docs/udint_literal_test/`), declines `ChecksumXZ` for now, and
-      reports the zeroed RPM/feed defect. The two earlier letters are already sent and answered.
+- [ ] **Repoint the Cycle Count field** → `DB_Production.TotalOK`.
+      `DB_HMI.CycleCount` is deleted. It was a duplicate, and it counted Reset presses, not parts.
+      New production tags: `HMI_Tag_Guide.md` → "Production counters".
 
-## 4. Field complaint 2026-08-14 — re-home after every cycle
+- [ ] **Find any MandrelLock bypass switch** on the HMI.
+      `DB_HMI.Bypass_MandrelLock` is deleted. It was an orphan — nothing ever read it.
+      A switch bound to it looked like it worked and did nothing.
+      Either repoint it at `DB_MachineConfig.Bypass_MandrelLock`, or just delete it.
+      The PLC now forces that flag TRUE at every power-up, so no switch is needed here.
 
-Operator report, program 1: cycle ends at the sheet-load position → press Start → axes go to zero
-and come back → confirm the sheet → axes go to zero *again*, then machining starts. He also sees
-**"Tool drive power failed"** on the HMI after every successful run and has to press Reset each time.
+- [ ] **Add `WarningID = 4`** to the WinCC text list.
+      Text: *"Blocked in proximity zone - use jog or Home to escape"*.
+      Spanish is in `tools/hmi_texts.csv`.
+      Without it the operator sees a blank warning in PNP_HALT.
 
-Second trip to zero is the recipe: `DB_RecipeProgram1` lines 0 and 1 are both `G0 X0 Z0`, and the
-first real position is line 6 (`X=275.747 Z=181`). CAM artifact — decide whether SpinningCam drops
-them or we strip them PLC-side. **Confirmed still present in the 15-line re-export of 2026-08-14
-15:46**, byte for byte, so it is emitted by the post-processor on every export and not an accident
-of one file. Worth adding to the next letter.
+---
+---
 
-First trip is a consequence of the tool alarm, not of the homing logic:
-`16#000D` → `STATE_ERROR` (COMPLETE is not excluded from that guard) → `bRequireHoming := TRUE` →
-Reset → the next Start must home, and `AlwaysHomeOnAutoStart = FALSE` cannot suppress it by design.
-Fix the alarm and the re-home goes away on its own.
+# 3 · AFTER YOU DOWNLOAD
 
-- [ ] **Put `DB_Diagnostic.Require_Homing` on the HMI** (your call, 2026-08-14). Read it just before
-      pressing Start: TRUE = a re-home is already armed and the cycle will home whatever
-      `AlwaysHomeOnAutoStart` says.
-- [ ] **When "Tool drive power failed" appears, read and record:**
+### 🔧 Same day
 
-      DB_Diagnostic.TO_ErrorText     <- names the actual TO alarm; 16#000D is MC_Power.Error,
-                                        which means "TO alarm pending", NOT lost supply
-      Axis_Tool.ErrorID
-      Axis_Tool.StatusBits.Error / .ErrorBits
-      DB_MachineConfig.Bypass_ToolAxis   <- if TRUE, MC_Power on the tool axis is disabled and
-                                            this alarm should be impossible
+---
 
-      Without the alarm ID this cannot be diagnosed from source — every remaining candidate is
-      TIA/hardware config, not SCL.
-- [ ] **Does the message also appear once right after power-up, before the first Start?**
-      `Btn_Contactor_Tool` is written only in STATE_STARTING (`06_MainProcess.scl:2343`), while
-      `fbPowerTool` is enabled from power-up (`:1311`) — so until the first Start, MC_Power drives
-      the tool axis with its contactor open. If the tool drive's ready/alarm line is wired into the
-      TO, that alone latches the alarm. Answering this splits "power-up ordering bug in our code"
-      from "the drive really faults at the end of each run".
-- [ ] Confirm nobody back-drives the axes by hand between cycles (you doubt it — this closes it out).
+- [ ] **Tick the Retain boxes.** Full list and reasons: **`Program/docs/RETAINED_TAGS.md`**.
+      Source import clears them every single time. There is no way to set them from code.
+      Short version — tick these 8:
+      `DB_MachineConfig`: `SheetLoadPos_X`, `SheetLoadPos_Z`, `SheetLoadTol`
+      `DB_Production`: `TotalStarted`, `TotalOK`, `TotalNOK`, `TotalStopped`, `TotalAborted`
+      Do **not** tick `CurrentActive` / `CurrentProgram` / `CurrentStartTime`.
 
-## 5. Fallback, if the gate fails
+- [ ] **Re-enter the sheet-load park position.** A download that re-initialises DBs wipes it.
 
-`fallback/work-memory-recipes` — 5 × 350-line recipes in work memory, no `READ_DBL` anywhere. Fully
-merged with everything approved above. Needs recipes re-exported flat at ≤ 350 lines, which your
-current 999-line program cannot satisfy — see `Program/docs/PLAN_B_WORK_MEMORY.md` for the sizing
-table (`--recipes 2 --lines 1000` is the option for long programs).
+- [ ] **Set up the WinCC text lists** for Spanish (`tools/textlists/*.tsv`).
+      Until then Spanish messages are simply blank. English still works.
+
+---
+---
+
+# 4 · TOOL SERVO ENABLE `%Q8.1`
+
+### ✅ Hardware DONE — 3 steps left
+
+---
+
+## ✅ Already done on the machine (2026-08-16)
+
+- [x] ~~PLC tag `Output_Enable_Tool`, `Bool`, `%Q8.1` created~~
+- [x] ~~Wire landed on `%Q8.1`, drive's local enable link removed~~
+- [x] ~~HMI enable button added, writing `DB_HMI.Btn_Enable_Tool`~~ — maintained toggle, same as X/Z
+
+## Still to do
+
+- [ ] **Compile and download.** The SCL has never been compiled.
+- [ ] **Watch table check.** Add `Output_Contactor_Tool`, `Output_Enable_Tool`,
+      `DB_HMI.Btn_Enable_Tool`, `DB_HMI.Enable_Tool_On`.
+      Press Start → tool enable should come on with its contactor, same as X and Z.
+      Hit E-Stop → it should drop.
+- [ ] **Re-run Test A** in `Program/docs/errors/16-000D_tool_drive_power_failed.md`.
+      Record the result in §4 of that file. This is what answers topic 5.
+
+## Two things to know
+
+**If the drive faults on enable, tell me.** That would be the first evidence the tool axis needs
+different treatment from X/Z, and a settle delay goes back in. It is deliberately not there now.
+
+**STATE_STARTING now waits for the tool drive too.** If it does not come up you get `16#000C`
+*"Tool drive not ready — check %Q8.1 enable and contactor"* at Start, instead of a confusing homing
+failure later.
+
+---
+---
+
+# 5 · `16#000D` — "TOOL DRIVE POWER FAILED"
+
+### 🔍 Investigating — intermittent, about 1 in 10 runs
+
+---
+
+> **Everything for this error is in one file:**
+> **`Program/docs/errors/16-000D_tool_drive_power_failed.md`**
+> Tests, tag lists, and a table mapping what you read to what it means.
+>
+> **Two rules before you touch anything:**
+> 1. Read the values **before** pressing Reset. Reset fires `MC_Reset` on all four axes.
+> 2. Read them **before** any power cycle or download. `DB_Diagnostic` and `DB_Error` are
+>    `NON_RETAIN` — the evidence is gone.
+
+## Start here
+
+- [ ] **Read the CPU diagnostic buffer.** Online & diagnostics → Diagnostics buffer.
+      Every TO alarm lands there with a timestamp. It holds ~50 entries and survives power cycles.
+      **It probably already contains every occurrence from the past days.**
+      A 1-in-10 fault cannot be caught reliably any other way.
+
+## Then these, cheapest first
+
+- [ ] **Ask the operator which recipes fail and which never do.**
+      Free, and the highest-value data point.
+      "1 in 10" may just mean "one recipe in ten uses tool code 7".
+      Send me the failing recipe files.
+
+- [ ] **Check `TO_AxisTool` position limits in TIA.** Technology object → Position limits.
+      Is the positive software limit ≥ 360? Is modulo enabled?
+      One screen. Confirms or kills the slot-4 theory outright.
+
+- [ ] **Two-minute test.** Power-cycle the CPU. Do **not** press Start.
+      Watch `"fbProcess".fbPowerTool.Error` and `.ErrorID`.
+      If Error goes TRUE before the first Start, the fault is systematic and reproducible on demand.
+
+- [ ] **TIA trace on the E-Stop loop.** Trigger on `fbPowerTool.Error`.
+      Record `Safety_Estop`, `Safety_Estop_Ch1`, `Safety_Estop_Ch2`, `Output_Contactor_Tool`,
+      `fbPowerTool.ErrorID`.
+      **Tell-tale:** `16#000D` arriving *without* `16#0401` proves the PLC never sampled an E-Stop
+      drop.
+
+- [ ] **Put `DB_Diagnostic.Require_Homing` on the HMI.** Read it just before pressing Start.
+      TRUE = a re-home is already armed, whatever `AlwaysHomeOnAutoStart` says.
+
+- [ ] **Confirm nobody back-drives the axes by hand between cycles.** You doubt it. This closes it out.
+
+## What we think is happening
+
+**Leading suspect — probably fixed already.** The tool servo had no enable output, so it came up
+enabled the moment its contactor closed. That is topic 4, and the wire is now landed. Test A tells
+us whether it was the cause.
+
+**Working theory if it is not.** An electrical transient at program end. COMPLETE de-energises the
+MandrelLock, the atmosphere valve and the end-retract in a short window while the VFD decelerates —
+the biggest electrical event in the cycle. Coil collapse or a 24 V dip would alarm one axis
+sometimes and not others. The tool axis is the most exposed.
+
+**Two recipe-dependent theories.** The turret's target angles come from recipe data, so the trigger
+could be recipe-dependent. Full write-up in the error file. Short version: a recipe calling tool
+code 7 drives the turret to 360°, which may sit on the software limit; and `AutoCalcAngles = TRUE`
+changes what each slot number means between recipes.
+
+## Related field complaint — re-home after every cycle
+
+Operator sees: cycle ends → press Start → axes go to zero and back → confirm sheet → axes go to zero
+*again* → machining starts.
+
+**First trip is caused by this alarm**, not by the homing logic.
+`16#000D` → ERROR → `bRequireHoming` → Reset → next Start must home. Fix the alarm and it goes away.
+
+**Second trip is the recipe.** `DB_RecipeProgram1` lines 0 and 1 are both `G0 X0 Z0`. First real
+position is line 6. A CAM artifact, present in every export. Decide whether SpinningCam drops them
+or we strip them PLC-side.
+
+---
+---
+
+# 6 · RECIPES 2–5
+
+### 💤 Not urgent — these are placeholders, not production recipes
+
+---
+
+All four are chunked and pass validation (`python tools/split_recipe_db.py --check --all`).
+
+- [ ] **Re-export programs 3–5** from SpinningCam whenever convenient.
+      They carry no `// CHUNKS` marker and no checksum. Harmless — they just load with the check
+      skipped.
+
+- [ ] **Do not run program 2 on a part.** It has real defects:
+      4 × `CMD=20 Param=0` — spindle ON at 0 RPM, silently clamped to 100.
+      3 × `CMD=1 F=0` — G1 with no feed, **executed at rapid speed**.
+      Program 1 is clean.
+
+---
+---
+
+# 7 · LETTER TO THE CAM DEVELOPER
+
+### 💤 Not urgent — one file to send
+
+---
+
+- [ ] Send `Program/docs/letter_spinningcam_checksum_followup.md`.
+      It confirms the checksum cross-check passed, **withdraws** the `UDINT#` request (tested — bare
+      literals are safe at any size), declines `ChecksumXZ` for now, and reports the zeroed RPM/feed
+      defect in program 2.
+      The two earlier letters are already sent and answered.
+      Worth adding: the `G0 X0 Z0` duplicate lines from topic 5.
+
+---
+---
+
+# 8 · FALLBACK PLAN
+
+### 💤 Only touch this if topic 1 fails at every chunk size
+
+---
+
+Branch `fallback/work-memory-recipes`. 5 × 350-line recipes held in work memory. No `READ_DBL`
+anywhere. Already merged with everything approved.
+
+Catch: recipes must be re-exported flat at ≤ 350 lines, which your 999-line program cannot meet.
+Sizing table is in `Program/docs/PLAN_B_WORK_MEMORY.md` — use `--recipes 2 --lines 1000` for long
+programs.

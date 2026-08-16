@@ -34,7 +34,7 @@
 // │  DB_HMI.CurrentLine        (Int)         PLC→  Active recipe line       │
 // │  DB_HMI.ProgressPercent    (Real, %)     PLC→  Progress bar             │
 // │  DB_HMI.ElapsedSeconds     (DInt, s)     PLC→  Cycle elapsed time       │
-// │  DB_HMI.CycleCount         (Int)         PLC→  Completed cycle count    │
+// │  DB_Production.TotalOK     (DInt)        PLC→  Completed cycle count    │
 // └──────────────────────────────────────────────────────────────────────────┘
 //
 // ┌─ MAIN SCREEN / BUTTONS ──────────────────────────────────────────────────┐
@@ -98,11 +98,15 @@
 // │  DB_HMI.Btn_Contactor_Tool (Bool)        →PLC  Tool drive contactor     │
 // │  DB_HMI.Btn_Enable_X       (Bool)        →PLC  X drive enable signal    │
 // │  DB_HMI.Btn_Enable_Z       (Bool)        →PLC  Z drive enable signal    │
+// │  DB_HMI.Btn_Enable_Tool    (Bool)        →PLC  Tool drive enable signal │
 // │  DB_HMI.Contactor_X_On     (Bool)        PLC→  X contactor feedback     │
 // │  DB_HMI.Contactor_Z_On     (Bool)        PLC→  Z contactor feedback     │
 // │  DB_HMI.Enable_X_On        (Bool)        PLC→  X enable feedback        │
+// │  DB_HMI.Enable_Tool_On     (Bool)        PLC→  Tool enable feedback     │
 // │  NOTE: Contactor and Enable must be toggle buttons (maintained),         │
-// │        NOT momentary.                                                    │
+// │        NOT momentary. The Tool enable button is one of them -- it works   │
+// │        exactly like X/Z. STATE_STARTING additionally forces               │
+// │        Btn_Enable_Tool := TRUE on every auto start, same as X/Z.          │
 // └──────────────────────────────────────────────────────────────────────────┘
 //
 // ┌─ TOOL PAGE ──────────────────────────────────────────────────────────────┐
@@ -281,10 +285,16 @@ BEGIN
     //  ⚠️ MaxSpeed must not exceed motor or coupling component ratings
     // =========================================================================
     "DB_Spindle".MinSpeed       := 100.0;   // RPM -- lower limit
+    // 3000 is the real machine rating (user-confirmed 2026-08-16). This is the ONLY spindle
+    // limit -- pre-scan validates against it and FB_SpindleControl clamps to it. Note a recipe
+    // can never reach it: RecipeLine.Param is a byte encoding RPM/10, so 2550 is the highest
+    // speed any program can command. Raising the ceiling further would need the encoding changed.
     "DB_Spindle".MaxSpeed       := 3000.0;  // RPM -- upper limit (do not exceed motor max)
     "DB_Spindle".DefaultSpeed   := 1000.0;  // RPM -- manual mode initial value
     "DB_Spindle".SpeedTolerance := 5.0;     // % -- AtSpeed tolerance
     "DB_Spindle".SpeedOverride  := 100.0;   // % -- 100% at startup (normal)
+    // Denominator only -- NOT a limit. Deliberately below DB_Spindle.MaxSpeed: it makes the
+    // MandrelLock coast-down wait slightly longer than strictly needed. Do not raise it to 3000.
     "DB_MachineConfig".SpindleMaxRPM        := 2400.0;  // RPM -- denominator for proportional MandrelLock wait (ITEM-28)
     "DB_MachineConfig".SpindleStopSafeTime  := T#10S;   // Full-speed decel safety margin -- tune to measured VFD ramp + margin
 
@@ -407,7 +417,17 @@ BEGIN
     "DB_HMI".Bypass_ToolChanger  := FALSE;
     "DB_HMI".Bypass_ToolHeadLock := FALSE;  // TRUE = skip ToolHeadLock sensor wait (state 17); no 16#0012 timeout
     "DB_MachineConfig".Bypass_ToolAxis    := FALSE;  // Set TRUE if tool axis is not connected
-    "DB_MachineConfig".Bypass_MandrelLock := FALSE;  // Set TRUE on variants without MandrelLock cylinder
+    // TRUE on THIS machine (user, 2026-08-16): there is no MandrelLock cylinder -- the sheet is
+    // clamped manually by the operator, and has been for a long time. It was FALSE until now
+    // purely because nobody flipped it; the machine could not reveal the mistake, because the
+    // MandrelLock has NO sensor (PositioningMode=0) and every wait around it is an open-loop
+    // timer. Nothing faults, nothing hangs -- it just spent the time.
+    // What TRUE changes: SHEET_WAIT skips Ph2 (-0.5 s per sheet load) and STATE_STOPPING skips
+    // the proportional spindle-decel wait before LOCK_RETRACT_WAIT (-4..10 s per Stop). The
+    // spindle decelerates on its own either way -- that wait only ever delayed the MandrelLock
+    // release, so with no cylinder it delayed nothing but the HMI reading "Stopped".
+    // Set back to FALSE on a variant that actually has the cylinder.
+    "DB_MachineConfig".Bypass_MandrelLock := TRUE;
 
     // =========================================================================
     // SECTION 10 -- TIMER DEFAULTS
@@ -431,7 +451,14 @@ BEGIN
     // and the 5/3 blocked centre holds the piston. It must therefore be >= the real
     // retract stroke time, or the cylinder will be left parked mid-stroke. Raise it here
     // if the holder is not fully clear when the tool head engages.
-    "DB_MachineConfig".CylSheetHolder_RetractTime  := T#0.5S;
+    //
+    // T#1S (2026-08-15): raised from T#0.5S. The 0.5 s was inherited from the 5/2
+    // spring-return era, where a short pulse was enough because the spring did the work.
+    // With no spring, this value now bounds the physical stroke. Operator reports the
+    // cylinder is short and fast and normally retracts inside 0.5 s, so 1 s is margin,
+    // not a measured stroke time -- it costs 0.5 s of cycle and removes the case where a
+    // slow stroke leaves the holder parked in the way while the machine starts machining.
+    "DB_MachineConfig".CylSheetHolder_RetractTime  := T#1S;
     "DB_MachineConfig".CylToolHeadLock_PreDelay    := T#0.5S;
     "DB_MachineConfig".CylToolHeadLock_RetractTime := T#2S;
     // End-of-recipe BackSupport retract: Sol_B held this long, then all coils drop.

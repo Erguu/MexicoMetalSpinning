@@ -89,3 +89,4 @@ mdi,6,6,"CMD41: use Param 1,2,3","CMD41: use Param 1,2,3"
 warning,1,1,DANGER: E-Stop bypassed - machine runs unguarded,PELIGRO: paro de emergencia anulado - la maquina funciona sin proteccion
 warning,2,2,"Insert sheet, then press both start buttons",Inserte la lamina y presione ambos botones de inicio
 warning,3,3,Tool axis locked - ToolHeadLock is engaged,Eje de herramienta bloqueado - el seguro del portaherramientas esta aplicado
+warning,4,4,Blocked in proximity zone - use jog or Home to escape,Bloqueado en zona de proximidad - use el jog o Home para salir

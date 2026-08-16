@@ -305,11 +305,16 @@ no reset path themselves — but the three actuator flags they drive do.
       loss or E-Stop instead of spring-retracting. Rationale matches MandrelLock (do not release
       a blank while the spindle coasts), and Reset recovers it, but this must be confirmed
       against the risk assessment before shipping.
-- [ ] **OPEN — commissioning.** Verify `%Q12.3` is the retract coil, confirm the real retract
-      stroke time against `Timeout_Retract` (T#1S) and against the Ph3 advance timer
-      `CylSheetHolder_RetractTime` (T#0.5S, FC_LoadConfig `00:422`) — Ph3 hands over to
-      LOCK_EXTEND_WAIT after 0.5 s while the retract is still being driven, which was also true
-      of the old spring behavior but is worth re-timing now that the stroke is powered.
+- [ ] **OPEN — commissioning.** Verify `%Q12.3` is the retract coil and confirm the real retract
+      stroke time against `CylSheetHolder_RetractTime` (T#1S, FC_LoadConfig `00:441`), which is
+      both the Ph3 advance and the coil-hold window. Raised from T#0.5S on 2026-08-15: the 0.5 s
+      predated the 5/3 conversion, when the spring did the retracting and the coil time did not
+      matter. With no spring, this value bounds the powered stroke — if it is shorter than the
+      real stroke the blocked centre locks the holder part-way out and Ph3 hands over to
+      LOCK_EXTEND_WAIT anyway. Operator reports the cylinder is short and fast (normally well
+      under 0.5 s), so T#1S is margin rather than a measured figure — still worth timing on the
+      machine. `DB_Cylinder_SheetHolder.Timeout_Retract` (T#5S) is only a backstop and must stay
+      comfortably above this value, or the two timers race to end the same retract.
 
 **Result: PASS on all four checkpoints** (2 open items: fail-safe sign-off, commissioning timings)
 
@@ -700,8 +705,17 @@ reset-path behaviour**, so it gets its own checkpoint pass.
 - [x] **Compensating trigger added.** The latch now also arms on
       `NOT (Btn_Contactor_X AND Btn_Enable_X)` or the Z pair — loss of drive power, level
       triggered. This covers the one thing `StatusBits.HomingDone` cannot: an open-loop axis moved
-      by hand while its contactor is open. X/Z only (no `Btn_Enable_Tool`; `Btn_Contactor_Tool` is
-      FALSE under `Bypass_ToolAxis` and would latch permanently).
+      by hand while its contactor is open.
+- [x] **Tool pair added 2026-08-16**, once `Btn_Enable_Tool` existed to pair with the contactor:
+      `NOT Bypass_ToolAxis AND NOT (Btn_Contactor_Tool AND Btn_Enable_Tool)`. **The bypass term is
+      mandatory** — with the bypass set `Btn_Contactor_Tool` is FALSE by design and the latch would
+      be permanently TRUE, homing on every start. That risk was the original reason the tool axis
+      was excluded; it is one condition, not a reason to leave the gap. The gap: `Btn_Contactor_Tool`
+      is an operator toggle on MANUAL > MANAGE, so the tool contactor can be dropped alone while
+      X/Z stay powered — the turret is then back-drivable and, being open-loop, keeps
+      `StatusBits.HomingDone` TRUE, so `bRefTrusted` passes and the next start uses a wrong tool
+      angle. In auto the term cannot fire alone (STARTING sets all three pairs in one scan; only
+      E-Stop drops them, and that drops X/Z too), so it adds no spurious homing cycles.
 - [x] **STATE_MANUAL exit no longer clears `Btn_Contactor_*` / `Btn_Enable_*`.** With ITEM-49's
       `modePermit` retired, that clear had lost its justification and was de-energising the drives
       on every manual visit. Removing it is what makes whitelisting MANUAL meaningful. Checkpoint 3
@@ -712,6 +726,9 @@ reset-path behaviour**, so it gets its own checkpoint pass.
 - [ ] **OPEN — commissioning.** Confirm on the machine that a Reset from idle followed by Start
       takes the fast path (no homing seek), and that each of E-Stop / fault / drive-power-off /
       power-up still forces one. `DB_Diagnostic.Require_Homing` is the tag to watch.
+- [ ] **OPEN — commissioning (2026-08-16).** Switch the **tool** contactor off alone on
+      MANUAL > MANAGE and confirm `Require_Homing` goes TRUE. Then set `Bypass_ToolAxis` and
+      confirm it does **not** — that is the condition that would otherwise home on every start.
 
 **Result: PASS on all four checkpoints** (1 open commissioning check)
 
@@ -745,3 +762,108 @@ New `FB_CylinderControl` input, written by FB_Process for the SheetHolder only.
       together.
 
 **Result: PASS on all four checkpoints** (2 open items: download side effect, commissioning check)
+
+---
+
+## Tool servo enable %Q8.1 (2026-08-16) — NOT COMPILED (wire landed, tag and HMI button exist)
+
+New physical output `Output_Enable_Tool` (`%Q8.1`), new `DB_HMI.Btn_Enable_Tool` /
+`Enable_Tool_On`. Closes the enable-before-power ordering on the tool axis — leading suspect for
+`16#000D`. **No new timer and no new config value:** the tool servo is the same drive model as X and
+Z, so it is treated identically to them. (A `ToolEnableDelay` / `tonToolEnable` pair was written and
+removed the same day — X/Z assert enable in the same scan as their contactor and have always worked.
+Do not re-introduce it without field evidence.)
+
+### `Btn_Enable_Tool` — reset paths
+
+- [x] **Checkpoint 1 — hard reset.** Nothing to add, and this matches `Btn_Enable_X/Z`, which are
+      likewise never cleared. Deliberate since 2026-08-09: drive power stays on while the machine
+      is idle, and clearing enable on reset is exactly the behaviour that was retired with the
+      `modePermit` interlock. Power-up safety comes from `DB_HMI` being `NON_RETAIN` — the flag is
+      FALSE until the first STATE_STARTING, which is the property that fixes the `16#000D` suspect.
+      **Do not add a clear in `bDoHardReset`.**
+- [x] **Checkpoint 2 — recipe reset.** `FB_RecipeHandler` writes no drive-power field. Unchanged.
+- [x] **Checkpoints 3 & 4 — STATE_STOPPED / STATE_ERROR.** Nothing to clear, same as X/Z. E-Stop
+      and STATE_ERROR drop the *physical* output through `drivePermit` in `FC_ContactorControl`
+      without touching the flag, which is the established pattern for all three axes.
+
+### `Btn_Enable_Tool` — single writer
+
+- [x] Written by the PLC in exactly one place: STATE_STARTING, beside `Btn_Enable_X/Z`. Not written
+      by `FC_LoadConfig`. **The HMI also writes it** — a maintained toggle on MANUAL > MANAGE,
+      identical to the X/Z enable buttons (user, 2026-08-16). That is the same shared ownership
+      `Btn_Enable_X/Z` have always had: the operator can switch it off, and STATE_STARTING forces it
+      back on at the next auto start. Switching it off is caught by the `bRequireHoming` latch, which
+      is exactly what that latch is for.
+- [x] **No `Bypass_ToolAxis` term, deliberately.** `FC_ContactorControl` ANDs the physical output
+      with `Btn_Contactor_Tool`, which is already FALSE when the axis is bypassed — so `%Q8.1`
+      cannot energise a bypassed drive. A second bypass test on the flag was written and removed
+      as redundant; the bypass is enforced in one place, at the output, for all three axes.
+
+### `Output_Enable_Tool` — physical output
+
+- [x] **Assigned every scan** in `FC_ContactorControl`, never latched:
+      `Btn_Enable_Tool AND Btn_Contactor_Tool AND drivePermit AND modePermit` — identical shape to
+      `Output_Enable_X/Z`.
+- [x] **E-Stop drops it.** `drivePermit := eStopOK` is a term, so E-Stop de-energises the enable
+      together with every contactor. No separate path needed.
+- [x] **Contactor interlock.** The `Btn_Contactor_Tool` term means the enable output physically
+      cannot be high while the tool contactor command is low, independently of the timer — a second
+      barrier against the ordering fault, not a duplicate of the first.
+
+### `STATE_STARTING` readiness test — two sites that must agree
+
+- [ ] **Not a reset-path item, but a coupling to preserve.** The readiness `IF` and the
+      `tonDriveReady` `IN` both carry `AND (#fbPowerTool.Status OR Bypass_ToolAxis)`. If the two
+      ever diverge, STARTING waits on a condition the timeout is not counting against and the state
+      hangs with no error. Change both or neither.
+- [x] **`Bypass_ToolAxis` cannot hang the start.** With the bypass set, `Btn_Contactor_Tool` is
+      FALSE by design, so `fbPowerTool.Status` can never come TRUE — the `OR Bypass_ToolAxis` term
+      is what stops that becoming a guaranteed `16#000C` on every start.
+
+---
+
+## STATE_STOPPING failed park move → ERROR (ITEM-56c, 2026-08-16) — NOT COMPILED
+
+A failed park move in STATE_STOPPING now reports `16#0001` / `16#0002` and goes to STATE_ERROR
+instead of being cleared as if the axis had arrived. No new VAR, no new timer, no new actuator
+command — the reset surface is one existing flag whose clear path was incomplete.
+
+### `bWaitingSpindleStop` — the flag this fix had to finish
+
+- [x] **Checkpoint 1 — hard reset.** Already cleared (`06_MainProcess.scl`, `bDoHardReset` block).
+- [x] **Checkpoint 2 — recipe reset.** Not written by `FB_RecipeHandler`. Nothing to do.
+- [x] **Checkpoint 3 — STATE_STOPPED.** Not needed: the only producer is STATE_STOPPING phase 1 and
+      the only consumer is phase 2, both gated on `State = STATE_STOPPING`. A stale TRUE cannot act
+      while idle.
+- [x] **Checkpoint 4 — STATE_ERROR. THIS WAS MISSING, and it was missing before this fix too.**
+      STATE_STOPPING could already be left for STATE_ERROR by an E-Stop or a safety fault, and
+      nothing cleared the flag on that path — only phase 2 itself and the hard reset did. A stale
+      TRUE makes the *next* stop skip phase 1 entirely (no spindle stop command, no park move, no
+      sheet-holder release) and fall straight into phase 2 on a leftover `spindleStopPT`.
+      `#bWaitingSpindleStop := FALSE` is now driven every scan in the STATE_ERROR block, beside
+      `bResumeSpeedup`, so no acknowledge path can miss it.
+
+### Same-scan ordering — the part that is easy to get wrong
+
+- [x] Phase 1 and phase 2 both run **later in the scan** than the completion check, and both key off
+      `bStopMoveX/Z` being FALSE — exactly what the new error branch produces. Both therefore carry
+      `AND (#State = STATE_STOPPING)`. Without it, phase 1 re-arms the park move and phase 2
+      releases the MandrelLock and transitions to LOCK_RETRACT_WAIT, **overwriting the STATE_ERROR
+      set moments earlier and unclamping the sheet on a machine with a faulted axis.**
+      `STATE_STOP_GOTOZERO` already used the same guard on its own exit test.
+- [x] The Z check is additionally gated on `#State = STATE_STOPPING` so an X failure reported in the
+      same scan is not overwritten by a second report.
+
+### Actuators
+
+- [x] **MandrelLock deliberately stays extended on this exit.** Phase 2 is its only release and
+      STATE_ERROR skips phase 2, so the sheet stays clamped while the spindle coasts down. The
+      operator's Ack releases it through the ITEM-32 deferred `SpindleStopSafeTime` wait. This is the
+      intended behaviour, not an oversight — do not add a release here.
+- [x] `bStopMoveX/Z` are both cleared by either error branch, so no `MC_MoveAbsolute` Execute is left
+      asserted. STATE_STOPPED clears them again on the way out.
+- [x] `bSheetHolderRetractHold` is untouched: if phase 1 already ran it is latched and bounded by
+      `tonSheetHolderHold`; if it had not run yet the holder was never extended on this path.
+
+**Result: PASS on all four checkpoints** (checkpoint 4 required a fix, which is included).
