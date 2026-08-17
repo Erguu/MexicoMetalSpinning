@@ -8,15 +8,24 @@ a clean, safe, runnable state — regardless of where the machine was when it fa
 
 **Rule reference:** See "Reset-Path Rule" section in `CLAUDE.md` for the four mandatory checkpoints.
 
-## FB_Process — ToolHeadLock tool-axis interlock (2026-08-14) — CLEARED
+## FB_Process — ToolHeadLock tool-axis interlock (2026-08-14, extended 2026-08-17) — CLEARED
 
-- **No reset path required, by construction.** `#bToolLockEngaged` and `#bToolAxisBlocked` are
-  recomputed unconditionally every scan from `DB_Cylinder_ToolHeadLock.Sol_A` / `.AtSetpoint` and
-  `DB_Manual.SelectedAxis`, exactly like `#bJogBlockPlus/Minus` beside them. No latch, no timer, so
+- **No reset path required, by construction.** `#bToolLockEngaged`, `#bToolAxisBlocked` and
+  `#bToolStepBlocked` are recomputed unconditionally every scan from
+  `DB_Cylinder_ToolHeadLock.Sol_A` / `.AtSetpoint`, `DB_Manual.SelectedAxis` and the two
+  `Btn_ToolStep*` buttons, exactly like `#bJogBlockPlus/Minus` beside them. No latch, no timer, so
   nothing can survive a Reset, a Stop or an error acknowledgement.
 - **The warning clears itself.** `WarningID = 3` is written in the same every-scan if/else chain as
   the E-Stop bypass banner, whose `ELSE` branch drives `HasWarning`/`WarningText`/`WarningID` to
   FALSE/''/0. A blocked jog cannot leave a banner behind.
+- **The 2026-08-17 turret-step gate adds nothing to clear.** It is an `AND NOT #bToolLockEngaged`
+  term on two `#fbManualMode` input parameters. One caveat worth knowing rather than fixing: a
+  turret-step button held down while the lock is engaged produces a **rising edge at the moment the
+  lock releases**, because `FB_ManualMode`'s `prevToolStepCW/CCW` edge memory tracks the *gated*
+  input. The turret then steps once, unprompted. This matches the pre-existing behaviour of the
+  gated `MoveAbsolute` (`prevMoveAbs` sees the gated level too), so it is consistent rather than
+  new — but it is a real one-step surprise if an operator leans on the button waiting for the lock
+  to drop. Fixing it means passing the raw button in and gating the edge inside the FB.
 - **No new physical output.** The interlock only withdraws permission from existing manual commands;
   it never drives a coil.
 - **Fail-safe direction:** sensor stuck ON → tool jogging refused (safe, and escapable with
@@ -867,3 +876,43 @@ command — the reset surface is one existing flag whose clear path was incomple
       `tonSheetHolderHold`; if it had not run yet the holder was never extended on this path.
 
 **Result: PASS on all four checkpoints** (checkpoint 4 required a fix, which is included).
+
+---
+
+## Drive-power alarm naming + two diagnostic tags (2026-08-17)
+
+Three changes in `FB_Process`'s drive-power block, plus one removal in `FB_RecipeHandler`. Added:
+error code `16#000E`, `DB_Diagnostic.Power_Tool_ErrorID`, and a guarded `Error_ProcessState`
+capture. No new actuator, no new timer, no new HMI *control*.
+
+### Checkpoints
+
+- [x] **1 — hard reset.** No new FB_Process VAR. The three existing edge memories
+      (`prevDriveFaultX/Z/Tool`) are now assigned unconditionally every scan from the live
+      `fbPower*.Error` outputs instead of inside the fault branches, so they cannot be left stale by
+      any path — strictly safer than before, and still absent from `bDoHardReset` for the same
+      reason they always were.
+- [x] **2 — recipe reset.** `FB_RecipeHandler` writes none of these. The one line it did write
+      (`Error_ProcessState := #state`) is removed; it recorded this FB's own state number, from a
+      different numbering space, and in that branch it was always 999.
+- [x] **3 & 4 — STATE_STOPPED / STATE_ERROR.** Nothing to clear. `Power_*_ErrorID` and
+      `Error_ProcessState` are **deliberately latched and never cleared** — that is the whole point
+      of a fault trail that has to survive until someone goes online, and it matches the existing
+      `Power_X_ErrorID` / `Power_Z_ErrorID` precedent. `DB_Diagnostic` is `NON_RETAIN`, so a power
+      cycle clears them and "non-zero" always means *this* power cycle. **Do not add a clear path
+      to any of them.**
+- [x] **No actuator, no motion.** The block raises an alarm and may set `State := STATE_ERROR` —
+      unchanged behaviour, and the exclusion list (`ERROR`, `0`, `PRE_SCAN`, `RECIPE_LOAD`) is
+      carried over verbatim, now evaluated once instead of three times.
+- [x] **`16#000E` needs no severity mapping change.** It falls inside the existing
+      `16#0001..16#002F` range → tier 3 / source `'Axis'`, same as the three codes it can replace.
+
+### HMI
+
+- [ ] **OPEN — before download.** `16#000E` needs a WinCC error text-list row or the operator gets a
+      blank alarm. Text and Spanish are in `tools/hmi_texts.csv`; the task is in `Human_TODO.md`
+      topic 2.
+- [x] **No repointing needed for the new tag.** `DB_Diagnostic` is optimized-access, so appending
+      `Power_Tool_ErrorID` shifts no offsets. Binding it to a display is optional.
+
+**Result: PASS on all four checkpoints** (1 open HMI task, blocking download only)

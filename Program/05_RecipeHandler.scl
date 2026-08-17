@@ -1815,7 +1815,10 @@ BEGIN
             #bMoveZ := FALSE;
             #bHaltTrig := TRUE;   // Safely stop both axes (was FALSE -- BUG FIX)
             // Ensure diagnostic block contains the latest recipe error context
-            "DB_Diagnostic".Error_ProcessState := #state;
+            // Error_ProcessState is NOT written here (removed 2026-08-17): #state is this
+            // FB's own state number, a different numbering space from FB_Process's, and in
+            // this branch it is always 999 anyway. It read as a nonsense process state.
+            // FB_Process captures the real one at alarm time.
             "DB_Diagnostic".Error_Code := #ErrorID;
             "DB_Diagnostic".Error_Line := #lineIndex;
     END_CASE;

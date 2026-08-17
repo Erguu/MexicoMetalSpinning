@@ -286,6 +286,10 @@ BEGIN
                 16#000B: #ActiveErrorText := 'Homing timeout - check ref switch';
                 16#000C: #ActiveErrorText := 'Drive ready timeout - check contactor/enable wiring';
                 16#000D: #ActiveErrorText := 'Tool drive power failed';           // ITEM-29
+                // Raised instead of 0009/000A/000D when more than one axis reports a
+                // drive-power fault in the SAME scan -- see the drive-power block in
+                // FB_Process. ErrorDetail names the axes and their TO codes.
+                16#000E: #ActiveErrorText := 'Drive power failed on several axes - check 24V/E-Stop';
                 16#0012: #ActiveErrorText := 'ToolHeadLock: extend timeout - check cylinder/sensor';
                 16#0010: #ActiveErrorText := 'User pressed STOP';
                 // TO (Technology Object) fault poller (FB_Process, StatusBits.Error rising edge)
@@ -495,7 +499,8 @@ BEGIN
     SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0006), N := 5) OR
     SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0007), N := 6) OR
     SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#0008), N := 7) OR
-    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#000D), N := 8);  // ITEM-29: tool drive power fault
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#000D), N := 8) OR  // ITEM-29: tool drive power fault
+    SHL(IN := BOOL_TO_WORD("DB_Error".Code = 16#000E), N := 9);    // multi-axis drive power fault
 
     // AlarmWord_Limits: Bits 0-3 soft, 4-7 hardware
     "DB_HMI_Errors".AlarmWord_Limits :=
@@ -1096,6 +1101,12 @@ VERSION : 4.0
         bJogBlockMinus     : Bool;  // Manual soft-limit jog gate: block jog- (recomputed every scan)
         bToolLockEngaged   : Bool;  // ToolHeadLock is (or may be) holding the turret
         bToolAxisBlocked   : Bool;  // Manual motion on the tool axis refused because of it
+        bToolStepBlocked   : Bool;  // A turret-step button is pressed while the lock is engaged.
+                                    // Separate from bToolAxisBlocked because the ToolStep buttons
+                                    // ignore SelectedAxis: folding them into bToolAxisBlocked would
+                                    // block an X jog while the operator holds a turret-step button.
+                                    // Banner only -- the refusal itself is a NOT bToolLockEngaged
+                                    // term on the FB inputs.
         // ITEM-56d: blind coordinate moves (MoveAbsolute / GoSafe / GoZero) refused while halted
         // in a PNP zone. Home/HomeAll are NOT included -- homing is the escape. Level-computed
         // every scan from #State alone, like bToolAxisBlocked above, so it needs no reset path.
@@ -1321,56 +1332,97 @@ BEGIN
     // fault from a previous run or a transient after TO reset -- not a new startup failure.
     // The drive ready check (tonDriveReady) and MC_Home.Error in STATE_STARTING handle genuine
     // startup faults. Firing STATE_ERROR in PRE_SCAN would abort the recipe validation for no reason.
+    //
+    // NAMING (2026-08-17): this used to be three independent blocks, one per axis, each
+    // writing the SINGLE #newErrorFlag/#newErrorCode pair that FB_AlarmManager consumes
+    // once per scan. X wrote 16#0009, Z overwrote it with 16#000A, Tool overwrote that
+    // with 16#000D -- so a fault that hit more than one axis in the same scan ALWAYS
+    // came out as "Tool drive power failed", whatever actually happened, and the two
+    // earlier codes were lost entirely (no history entry, because only one NewError
+    // edge ever reached the alarm manager). Field evidence 2026-08-17: X and Z both
+    // latched Power_*_ErrorID = 16#8007 while DB_Error held one single 16#000D and
+    // TotalErrorCount = 1.
+    //
+    // Now: per-axis ErrorID latching stays per-axis, but the ALARM is chosen once, from
+    // what is actually in fault this scan. Exactly one axis -> that axis's own code.
+    // More than one -> 16#000E, because no single axis name would be true and
+    // "several drives at once" is the diagnostically useful message (shared 24 V,
+    // contactor circuit, E-Stop, or the TOs still starting up).
+    // Do not split this back into per-axis blocks while #newErrorCode is a single
+    // variable -- that is the bug.
+
+    // Per-axis latches: independent of which alarm gets reported, so all three survive
+    // even when only one of them is the headline. Never cleared -- non-zero means that
+    // axis faulted at some point this power cycle. Power_Tool_ErrorID added 2026-08-17;
+    // before that the tool's code was recoverable only from the volatile FB output,
+    // which Reset erases.
     IF #fbPowerX.Error THEN
         "DB_Diagnostic".Power_X_ErrorID := #fbPowerX.ErrorID;
-        "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #fbPowerX.ErrorID);
-        IF NOT #prevDriveFaultX THEN
-            #newErrorFlag := TRUE;
-            #newErrorCode := 16#0009;
-            "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
-            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN
-               AND #State <> STATE_RECIPE_LOAD THEN
-                #State := STATE_ERROR;
-            END_IF;
-        END_IF;
-        #prevDriveFaultX := TRUE;
-    ELSE
-        #prevDriveFaultX := FALSE;
     END_IF;
-
     IF #fbPowerZ.Error THEN
         "DB_Diagnostic".Power_Z_ErrorID := #fbPowerZ.ErrorID;
-        "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #fbPowerZ.ErrorID);
-        IF NOT #prevDriveFaultZ THEN
-            #newErrorFlag := TRUE;
-            #newErrorCode := 16#000A;
-            "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
-            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN
-               AND #State <> STATE_RECIPE_LOAD THEN
-                #State := STATE_ERROR;
-            END_IF;
-        END_IF;
-        #prevDriveFaultZ := TRUE;
-    ELSE
-        #prevDriveFaultZ := FALSE;
+    END_IF;
+    IF #fbPowerTool.Error THEN
+        "DB_Diagnostic".Power_Tool_ErrorID := #fbPowerTool.ErrorID;
     END_IF;
 
-    // ITEM-29: tool axis drive power fault monitoring (mirrors X/Z pattern above)
-    IF #fbPowerTool.Error THEN
-        "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #fbPowerTool.ErrorID);
-        IF NOT #prevDriveFaultTool THEN
-            #newErrorFlag := TRUE;
-            #newErrorCode := 16#000D;
-            "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
-            IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN
-               AND #State <> STATE_RECIPE_LOAD THEN
-                #State := STATE_ERROR;
-            END_IF;
+    // One alarm per scan, on the rising edge of ANY of the three.
+    IF (#fbPowerX.Error AND NOT #prevDriveFaultX)
+       OR (#fbPowerZ.Error AND NOT #prevDriveFaultZ)
+       OR (#fbPowerTool.Error AND NOT #prevDriveFaultTool) THEN
+
+        // Fault trail: name every axis in drive-power fault right now, with its TO code.
+        // A common-mode event is then visible as such even if the headline code is read
+        // in isolation later. Built one CONCAT at a time, and TO_ErrorText is used as the
+        // scratch for each FC result -- both deliberate, to keep every construct here
+        // identical to ones already used elsewhere in this file. TO_ErrorText is given
+        // its final, authoritative value in the headline block below.
+        "DB_Diagnostic".Error_Text := 'DrivePower:';
+        IF #fbPowerX.Error THEN
+            "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #fbPowerX.ErrorID);
+            "DB_Diagnostic".Error_Text := CONCAT(IN1 := "DB_Diagnostic".Error_Text, IN2 := ' X=');
+            "DB_Diagnostic".Error_Text := CONCAT(IN1 := "DB_Diagnostic".Error_Text, IN2 := "DB_Diagnostic".TO_ErrorText);
         END_IF;
-        #prevDriveFaultTool := TRUE;
-    ELSE
-        #prevDriveFaultTool := FALSE;
+        IF #fbPowerZ.Error THEN
+            "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #fbPowerZ.ErrorID);
+            "DB_Diagnostic".Error_Text := CONCAT(IN1 := "DB_Diagnostic".Error_Text, IN2 := ' Z=');
+            "DB_Diagnostic".Error_Text := CONCAT(IN1 := "DB_Diagnostic".Error_Text, IN2 := "DB_Diagnostic".TO_ErrorText);
+        END_IF;
+        IF #fbPowerTool.Error THEN
+            "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #fbPowerTool.ErrorID);
+            "DB_Diagnostic".Error_Text := CONCAT(IN1 := "DB_Diagnostic".Error_Text, IN2 := ' Tool=');
+            "DB_Diagnostic".Error_Text := CONCAT(IN1 := "DB_Diagnostic".Error_Text, IN2 := "DB_Diagnostic".TO_ErrorText);
+        END_IF;
+
+        // Headline code: single axis -> that axis. Two or three -> 16#000E.
+        #newErrorFlag := TRUE;
+        IF #fbPowerX.Error AND NOT #fbPowerZ.Error AND NOT #fbPowerTool.Error THEN
+            #newErrorCode := 16#0009;
+            "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #fbPowerX.ErrorID);
+        ELSIF #fbPowerZ.Error AND NOT #fbPowerX.Error AND NOT #fbPowerTool.Error THEN
+            #newErrorCode := 16#000A;
+            "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #fbPowerZ.ErrorID);
+        ELSIF #fbPowerTool.Error AND NOT #fbPowerX.Error AND NOT #fbPowerZ.Error THEN
+            #newErrorCode := 16#000D;
+            "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := #fbPowerTool.ErrorID);
+        ELSE
+            // Unreachable with none in fault: the edge above guarantees at least one.
+            #newErrorCode := 16#000E;
+            "DB_Diagnostic".TO_ErrorText := 'MultiAxis';
+        END_IF;
+
+        "DB_HMI".ErrorDetail := "DB_Diagnostic".Error_Text;
+
+        IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN
+           AND #State <> STATE_RECIPE_LOAD THEN
+            #State := STATE_ERROR;
+        END_IF;
     END_IF;
+
+    // Edge memories: updated every scan, after the alarm decision has read them.
+    #prevDriveFaultX    := #fbPowerX.Error;
+    #prevDriveFaultZ    := #fbPowerZ.Error;
+    #prevDriveFaultTool := #fbPowerTool.Error;
 
     // =========================================================================
     // TO (Technology Object) FAULT POLLER
@@ -1652,15 +1704,19 @@ BEGIN
     // it is the only sign that the machine will run unguarded, so it outranks a
     // transient interlock message. A blocked tool jog therefore shows no banner while
     // the bypass is on; the jog is still refused, which is the part that matters.
-    "DB_HMI".HasWarning := "DB_HMI".Bypass_EStop OR #bToolAxisBlocked OR #bBlindMoveBlocked;
+    "DB_HMI".HasWarning := "DB_HMI".Bypass_EStop OR #bToolAxisBlocked
+                           OR #bToolStepBlocked OR #bBlindMoveBlocked;
     IF "DB_HMI".Bypass_EStop THEN
         "DB_HMI".WarningText    := 'DANGER: E-Stop bypassed - machine runs unguarded';
         "DB_HMI".WarningID      := 1;
-    ELSIF #bToolAxisBlocked THEN
+    ELSIF #bToolAxisBlocked OR #bToolStepBlocked THEN
         // Shown as soon as the tool axis is selected with the lock engaged, not only
         // after a button press: the operator learns why before pushing, and the
         // message explains the refusal if they push anyway. No latch, no timer --
         // it clears itself when the lock releases or another axis is selected.
+        // The turret-step buttons (#bToolStepBlocked) have no "selection" to hook, so
+        // for them the banner is necessarily press-driven and shares WarningID 3 --
+        // same cause, same wording, no new text-list row needed.
         "DB_HMI".WarningText    := 'Tool axis locked - ToolHeadLock is engaged';
         "DB_HMI".WarningID      := 3;
     ELSIF #bBlindMoveBlocked THEN
@@ -1708,6 +1764,18 @@ BEGIN
     // =========================================================================
     // NOTE: Acknowledge is done only on edge (ackEdge), not level.
     // This keeps ActiveError/HMI bools visible until the operator actually presses Ack.
+    //
+    // Error_ProcessState: captured HERE, guarded, and nowhere else (2026-08-17). It used
+    // to be assigned #State unconditionally a few lines below, every scan -- which made it
+    // a duplicate of DB_Diagnostic.Process_State and destroyed the thing it was named for.
+    // Every diagnostic doc read it as "the state the machine was in when it faulted"; it
+    // never held that. One guard here covers all ~30 alarm sites, because they all funnel
+    // through #newErrorFlag. Do not add a second writer -- the two that existed
+    // (STATE_ERROR in this file, FB_RecipeHandler state 999) both wrote a constant.
+    IF #newErrorFlag THEN
+        "DB_Diagnostic".Error_ProcessState := #State;
+    END_IF;
+
     #fbAlarmManager(NewError         := #newErrorFlag,
                     NewErrorCode     := #newErrorCode,
                     AcknowledgeError := #ackEdge OR #fbInputs.Cmd_Reset,
@@ -1717,7 +1785,8 @@ BEGIN
     
     // Debug helpers: copy alarm/diagnostic info into DB_Diagnostic for easy tracing
     // This ensures a snapshot of the latest active error code is always visible for debugging.
-    "DB_Diagnostic".Error_ProcessState := #State;
+    // (Error_ProcessState is NOT written here any more -- see the guarded capture above.
+    //  The live state is DB_Diagnostic.Process_State, written at the bottom of this FB.)
     "DB_Diagnostic".Error_Code := #fbAlarmManager.ActiveErrorCode;
     // If recipe reported a line error, keep that; otherwise -1
     IF "DB_Diagnostic".Error_Line < 0 THEN
@@ -3145,7 +3214,9 @@ BEGIN
             "DB_HMI".ResumeLine := #savedLineIndex;   // HMI shows which line will be resumed on next Start
             
             // Debug: populate DB_Diagnostic with error context for easier troubleshooting
-            "DB_Diagnostic".Error_ProcessState := #State;
+            // Error_ProcessState is deliberately NOT written here: this block only runs in
+            // STATE_ERROR, so it could only ever record 999. It is captured at alarm time
+            // instead -- see the guarded write before the FB_AlarmManager call.
             "DB_Diagnostic".Error_Code := #fbAlarmManager.ActiveErrorCode; // primary error source
             // If recipe handler provided an error line, prefer that
             IF "DB_Diagnostic".Recipe_CurrentLine >= 0 THEN
@@ -3812,6 +3883,15 @@ BEGIN
     // that is a normal machining condition, not a fault.
     #bToolAxisBlocked := #bToolLockEngaged AND "DB_Manual".SelectedAxis = 2;
 
+    // The turret-step buttons are gated on the lock ALONE, like HomeAll: FB_ManualMode's
+    // ToolStepCW/CCW branches (state 0) do not test SelectedAxis at all -- they drive
+    // MC_MoveRelative on Axis_Tool whatever axis is selected. Gating them on
+    // bToolAxisBlocked would leave the hole open for every selection except 2.
+    // This flag exists only to raise the banner; the refusal is the NOT bToolLockEngaged
+    // term on the FB inputs below.
+    #bToolStepBlocked := #bToolLockEngaged
+        AND ("DB_Manual".Btn_ToolStepCW OR "DB_Manual".Btn_ToolStepCCW);
+
     #bJogBlockPlus :=
         ("DB_Manual".SelectedAxis = 0 AND #Axis_X.StatusBits.HomingDone
          AND #Axis_X.ActualPosition >= "DB_MachineConfig".SoftLimit_MaxX) OR
@@ -3874,7 +3954,11 @@ BEGIN
                   GoZero := "DB_Manual".Btn_GoZero AND NOT #bBlindMoveBlocked,
                   SafeToJog := #fbSafetyMonitor.SafeToJog, Reset := #fbInputs.Cmd_Reset,
                   PNP_X_Min := #HW_PNP_X_Min, PNP_Z_Min := #HW_PNP_Z_Min,
-                  ToolStepCW := "DB_Manual".Btn_ToolStepCW, ToolStepCCW := "DB_Manual".Btn_ToolStepCCW,
+                  // Turret-step buttons: the most direct way to rotate the turret from the
+                  // panel, and they were the one hole left in the 2026-08-14 interlock.
+                  // Gated on the lock alone -- see #bToolStepBlocked above.
+                  ToolStepCW  := "DB_Manual".Btn_ToolStepCW  AND NOT #bToolLockEngaged,
+                  ToolStepCCW := "DB_Manual".Btn_ToolStepCCW AND NOT #bToolLockEngaged,
                   ToolStepAngle := "DB_Manual".ToolStepAngle, ToolStepSpeed := "DB_Manual".ToolStepSpeed,
                   Axis_X := #Axis_X, Axis_Z := #Axis_Z, Axis_Tool := #Axis_Tool, Axis_Spindle := #Axis_Spindle);
     

@@ -1,7 +1,64 @@
 # `16#000D` — Tool drive power failed
 
 **Status:** OPEN. Reported 2026-08-14, roughly **1 in 10 cycles**, usually at program end.
-**Last updated:** 2026-08-15.
+**Last updated:** 2026-08-17.
+
+---
+
+## ⚠️ 2026-08-17 — the alarm text was lying. Read this before anything below.
+
+An online dump taken while the alarm was displayed (values in `Human_TODO.md` §5) showed
+`Power_X_ErrorID = Power_Z_ErrorID = 16#8007`. **X and Z faulted too.**
+
+`FB_Process` has one `#newErrorFlag`/`#newErrorCode` pair, consumed once per scan by
+FB_AlarmManager. The three drive-power blocks ran in sequence X → Z → Tool, each overwriting the
+last. Any fault touching more than one axis in the same scan therefore came out as
+**"Tool drive power failed"**, always, and the X and Z codes vanished with no history entry.
+
+**So every occurrence of this alarm to date is unreliable as evidence that the tool axis was
+involved.** The operator's "1 in 10, at program end" report is built on that text.
+
+**Fixed 2026-08-17** (not compiled): the alarm is now chosen once, from what is actually in fault.
+One axis → `16#0009` / `16#000A` / `16#000D`. Two or more → new code **`16#000E`**
+*"Drive power failed on several axes - check 24V/E-Stop"*, with `ErrorDetail` naming each axis and
+its TO code. Needs a WinCC text-list row for `0x000E` (`tools/hmi_texts.csv`).
+
+### What the dump says happened
+
+| Reading | Consequence |
+|---|---|
+| `TotalErrorCount = 1`, `History_Count = 1` | One alarm edge all power cycle → all three rising edges were in the **same scan** |
+| `Recipe_LoadedProgram = 0`, `PreScan_Complete = FALSE`, `Axis_X/Z_Homed = FALSE` | No recipe ever loaded, never homed → **not at program end.** Fired at power-up |
+| `Process_State = 0` + `DB_Error.Active = TRUE` | Never reached ERROR, and nothing was acked (Ack clears `Active`) → it fired in STOPPED, before any Start. **This is Test A, and it came back positive** |
+| `fbPowerTool`: `Status TRUE`, `Error FALSE`, `ErrorID 16#0000` | Self-cleared with no `MC_Reset` |
+| No `16#0021`/`0022`/`0023` ever logged | The TO poller never fired → **the TOs were never in error state.** The error existed only on the `MC_Power` instruction |
+
+**Leading candidate now:** `MC_Power` called with `Enable = TRUE` (`bDrivesEnable` is TRUE from
+scan 1) while the technology objects are still starting up. Fits all three axes at once, the same
+ErrorID, self-clearing without `MC_Reset`, TOs never faulted, and no Start needed. The
+intermittency is a timing race against the TO restart window.
+
+**Cause 1 below is not supported by this dump** — a tool-only enable asymmetry cannot make X and Z
+fault with the same code in the same scan. `%Q8.1` is still right to have; it will not fix this.
+
+`16#8007` is not in `FC_TO_ErrorText` (hence `TO_ErrorText = 'UnknownTO'`). Looking it up in TIA's
+TO diagnostics is the single most valuable next step — it names the mechanism.
+
+### Two diagnostic gaps closed the same day
+
+Both were found while fixing the naming, and both made this fault harder to read than it needed
+to be. Neither is a fix for the fault itself.
+
+- **`Power_Tool_ErrorID` did not exist.** The one axis the alarm named was the one axis whose TO
+  code survived nowhere — `fbPowerTool.ErrorID` is volatile and Reset erases it. Added to
+  `DB_Diagnostic`, latched exactly like the X and Z ones. **Two or three of them non-zero is now the
+  direct signature of a common-mode event.**
+- **`Error_ProcessState` was a live mirror, not a snapshot.** Assigned `#State` every scan, which
+  made it a duplicate of `Process_State` and destroyed the one thing it was named for. Now captured
+  once, guarded on `#newErrorFlag`, just before the `FB_AlarmManager` call — one line covering all
+  ~30 alarm sites. The two writers that *tried* to snapshot it both wrote constants and were
+  removed: the `STATE_ERROR` block here could only ever record 999, and `FB_RecipeHandler` state 999
+  was writing its **own** state number, from a different numbering space.
 
 The PLC raises this when `MC_Power` on `TO_AxisTool` reports an error — i.e. the turret drive says
 it is not ready. It is a *report from the drive*, not a decision the program makes, so the cause is
@@ -137,7 +194,7 @@ survives power cycles. For a 1-in-10 fault it is worth more than every live tag 
 | `"fbProcess".fbPowerTool.ErrorID` | `16#0000` | **The single most important number. Stored nowhere else — Reset erases it.** `16#8014` DriveNotReady · `16#8015` STOActive · `16#8501` PowerRemoved · `16#8604` DriveFault · `16#8600/8601` soft-limit · `16#8100` ConfigError |
 | `"fbProcess".fbPowerX.ErrorID` | `16#0000` | Non-zero **at the same instant** = common-mode drive event, not a tool fault |
 | `"fbProcess".fbPowerZ.ErrorID` | `16#0000` | Same |
-| `DB_Diagnostic.Error_ProcessState` | — | **Which state it faulted in.** Needed before trusting the decision table |
+| `DB_Diagnostic.Error_ProcessState` | — | **Which state it faulted in.** True as of the 2026-08-17 fix — before that it was assigned `#State` every scan and only ever showed the *current* state, so **any reading taken from a CPU running older firmware than that fix is worthless**. The live state is `Process_State`. Cross-check with `Recipe_LoadedProgram` / `PreScan_Complete` / `Axis_*_Homed` if in doubt |
 | `TO_AxisTool.ErrorBits` | all FALSE | Expand and **write down which bit is TRUE** — names vary by firmware. A software-limit bit points at slot-4/360°; a drive/ready bit at wiring |
 | `DB_Error.History_Code[1..10]` | — | Does `16#0009` (X) or `16#000A` (Z) or `16#0401` (E-Stop) appear next to `16#000D`? |
 
@@ -152,7 +209,7 @@ survives power cycles. For a 1-in-10 fault it is worth more than every live tag 
 | `DB_ToolConfig.Tool4_Position` | `360.0` = the recipe's angle table is in force |
 | `DB_MachineConfig.ToolCount` | `3` is the physical machine. `4` = the loaded recipe overrode it in PRE_SCAN |
 | `DB_MachineConfig.Bypass_ToolAxis` | `FALSE` normally. `TRUE` **and the alarm anyway** = new finding, tell me |
-| `DB_Diagnostic.Power_X_ErrorID` / `Power_Z_ErrorID` | Latched and never cleared → non-zero means that axis faulted at some point this power cycle. **There is no `Power_Tool_ErrorID`** — that gap is a proposed change, not approved |
+| `DB_Diagnostic.Power_X_ErrorID` / `Power_Z_ErrorID` / `Power_Tool_ErrorID` | Latched and never cleared → non-zero means that axis faulted at some point this power cycle. **`Power_Tool_ErrorID` added 2026-08-17** — before that the tool's code survived nowhere, which is why the one axis the alarm named was the one axis whose code you could not recover. **More than one of the three non-zero = common-mode event** |
 | `DB_Diagnostic.Require_Homing` | Expected `TRUE` before you press Reset. STATE_ERROR arms it — the Reset press is not what causes the re-home |
 
 ---

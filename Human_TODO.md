@@ -1,5 +1,13 @@
 # Human TODO
 
+load mem 62
+work mem 3
+Error ID: 13
+Tool drive power failed.
+no TO error
+no buffer error
+
+
 Things only you can do. Branch `feat/recipe-slots-and-batching`.
 
 **Merge policy:** the whole branch goes to master in one go, once the 999-line recipe test passes on
@@ -119,6 +127,11 @@ exist.
       Either repoint it at `DB_MachineConfig.Bypass_MandrelLock`, or just delete it.
       The PLC now forces that flag TRUE at every power-up, so no switch is needed here.
 
+- [ ] **Add error `0x000E`** to the WinCC error text list.
+      Text: *"Drive power failed on several axes - check 24V/E-Stop"*.
+      Spanish is in `tools/hmi_texts.csv`.
+      New code, added 2026-08-17. Without it the operator gets a blank alarm.
+
 - [ ] **Add `WarningID = 4`** to the WinCC text list.
       Text: *"Blocked in proximity zone - use jog or Home to escape"*.
       Spanish is in `tools/hmi_texts.csv`.
@@ -188,6 +201,46 @@ failure later.
 
 ---
 
+## ⚠️ 2026-08-17 — the values you copied below changed the picture
+
+**The alarm text was wrong. It was never proof the tool axis was involved.**
+
+Your dump shows `Power_X_ErrorID` and `Power_Z_ErrorID` both at `16#8007`. X and Z faulted too.
+The PLC had one alarm slot and the tool block wrote to it last, so any fault hitting more than one
+axis came out as "Tool drive power failed", every time.
+
+**Fixed in code 2026-08-17.** One axis now reports that axis. Two or more report the new
+`0x000E` *"Drive power failed on several axes"*. Needs the text-list row in topic 2.
+
+Your dump also shows this one fired **at power-up, in Stopped, before any Start** — not at program
+end. `Recipe_LoadedProgram = 0` and both axes unhomed. That is Test A below, and it came back
+positive without you having to run it.
+
+Leading candidate is now `MC_Power` being enabled while the technology objects are still starting
+up — all three axes, same code, cleared itself with no Reset, and the TOs never entered error state.
+
+**Two things worth doing at the machine:**
+
+- [ ] **Look up `16#8007`** in TIA → Online & diagnostics → TO diagnostics. It is not in our decode
+      table, which is why you saw `UnknownTO`. This one number names the mechanism.
+- [ ] **Power-cycle, do not press Start.** Watch `fbPowerX.Error`, `fbPowerZ.Error`,
+      `fbPowerTool.Error` and the three `Axis_*.StatusBits.Error`. Errors that pulse and clear while
+      `StatusBits.Error` stays FALSE = confirmed.
+
+Full write-up: `Program/docs/errors/16-000D_tool_drive_power_failed.md`.
+
+**Two diagnostic tags were also fixed, so next time you read less and learn more:**
+
+`DB_Diagnostic.Power_Tool_ErrorID` is new. The tool was the only axis whose TO code survived
+nowhere — Reset erased it. Now latched like X and Z. **Two or three of the three non-zero = the
+fault is common to all the drives, not one of them.**
+
+`DB_Diagnostic.Error_ProcessState` now really is the state it faulted in. It used to be overwritten
+every scan and only showed the current state. **Any reading you took before this download is
+meaningless** — including the `0` in your dump.
+
+---
+
 > **Everything for this error is in one file:**
 > **`Program/docs/errors/16-000D_tool_drive_power_failed.md`**
 > Tests, tag lists, and a table mapping what you read to what it means.
@@ -219,6 +272,36 @@ failure later.
       Watch `"fbProcess".fbPowerTool.Error` and `.ErrorID`.
       If Error goes TRUE before the first Start, the fault is systematic and reproducible on demand.
 
+fbPowerTool	"FB_Axis_Power"		
+Input			
+Enable	Bool	false	TRUE
+Output			
+Status	Bool	false	TRUE
+Error	Bool	false	FALSE
+ErrorID	Word	16#0	16#0000
+InOut			
+Axis	TO_PositioningAxis		
+Static			
+MC_Power_Instance	MC_Power		
+FB_Power
+Input			
+Axis	TO_Axis		
+Enable	Bool	false	TRUE
+StartMode	Int	1	1
+StopMode	Int	0	0
+Output			
+Status	Bool	false	TRUE
+Busy	Bool	false	TRUE
+Error	Bool	false	FALSE
+ErrorID	Word	16#0	16#0000
+ErrorInfo	Word	16#0	16#0000
+InOut			
+Static			
+FB_ID	DInt	0	10
+
+
+
+
 - [ ] **TIA trace on the E-Stop loop.** Trigger on `fbPowerTool.Error`.
       Record `Safety_Estop`, `Safety_Estop_Ch1`, `Safety_Estop_Ch2`, `Output_Contactor_Tool`,
       `fbPowerTool.ErrorID`.
@@ -227,6 +310,104 @@ failure later.
 
 - [ ] **Put `DB_Diagnostic.Require_Homing` on the HMI.** Read it just before pressing Start.
       TRUE = a re-home is already armed, whatever `AlwaysHomeOnAutoStart` says.
+DB_Diagnostic
+Process_State	Int	0	0
+Process_SafeToRun	Bool	false	TRUE
+Process_DrivesEnable	Bool	false	TRUE
+Recipe_CurrentProgram	Int	0	1
+Recipe_LoadedProgram	Int	0	0
+Recipe_CurrentLine	Int	0	0
+Recipe_TotalLines	Int	0	0
+Recipe_TargetX	Real	0.0	0.0
+Recipe_TargetZ	Real	0.0	0.0
+Recipe_Velocity	Real	0.0	0.0
+PreScan_Complete	Bool	false	FALSE
+PreScan_Valid	Bool	false	FALSE
+PreScan_ErrorLine	Int	0	0
+MoveX_Busy	Bool	false	FALSE
+MoveX_Done	Bool	false	FALSE
+MoveX_Error	Bool	false	FALSE
+MoveZ_Busy	Bool	false	FALSE
+MoveZ_Done	Bool	false	FALSE
+MoveZ_Error	Bool	false	FALSE
+bMoveX	Bool	false	FALSE
+bMoveZ	Bool	false	FALSE
+Axis_X_Pos	Real	0.0	0.0
+Axis_Z_Pos	Real	0.0	0.0
+Axis_X_Enabled	Bool	false	TRUE
+Axis_Z_Enabled	Bool	false	TRUE
+Axis_X_Homed	Bool	false	FALSE
+Axis_Z_Homed	Bool	false	FALSE
+Require_Homing	Bool	false	TRUE
+Error_ProcessState	Int	0	0
+Error_Line	Int	0	0
+Error_Code	Word	16#0	16#000D
+MoveX_ErrorID	Word	16#0	16#0000
+MoveZ_ErrorID	Word	16#0	16#0000
+HomeX_ErrorID	Word	16#0	16#0000
+HomeZ_ErrorID	Word	16#0	16#0000
+HomeTool_ErrorID	Word	16#0	16#0000
+Power_X_ErrorID	Word	16#0	16#8007
+Power_Z_ErrorID	Word	16#0	16#8007
+Spindle_TO_ErrorID	Word	16#0	16#0000
+Error_Text	String[100]	''	''
+TO_ErrorText	String[60]	''	'UnknownTO'
+
+DB_Error
+Active	Bool	FALSE	TRUE
+Code	Word	0	16#000D
+Severity	Byte	0	16#03
+Source	String[20]	''	'Axis'
+Line	Int	-1	-1
+TimeStamp	DTL	DTL#1970-01-01-00:00:00	DTL#2012-01-17-20:59:35.179542
+Details	String[120]	''	'Tool drive power failed'
+History_Code	Array[1..10] of Word		
+History_Code[1]	Word	16#0	16#000D
+History_Code[2]	Word	16#0	16#0000
+History_Code[3]	Word	16#0	16#0000
+History_Code[4]	Word	16#0	16#0000
+History_Code[5]	Word	16#0	16#0000
+History_Code[6]	Word	16#0	16#0000
+History_Code[7]	Word	16#0	16#0000
+History_Code[8]	Word	16#0	16#0000
+History_Code[9]	Word	16#0	16#0000
+History_Code[10]	Word	16#0	16#0000
+History_Time	Array[1..10] of DTL		
+History_Time[1]	DTL	DTL#1970-01-01-00:00:00	DTL#2012-01-17-20:59:35.179542
+History_Time[2]	DTL	DTL#1970-01-01-00:00:00	DTL#1970-01-01-00:00:00
+History_Time[3]	DTL	DTL#1970-01-01-00:00:00	DTL#1970-01-01-00:00:00
+History_Time[4]	DTL	DTL#1970-01-01-00:00:00	DTL#1970-01-01-00:00:00
+History_Time[5]	DTL	DTL#1970-01-01-00:00:00	DTL#1970-01-01-00:00:00
+History_Time[6]	DTL	DTL#1970-01-01-00:00:00	DTL#1970-01-01-00:00:00
+History_Time[7]	DTL	DTL#1970-01-01-00:00:00	DTL#1970-01-01-00:00:00
+History_Time[8]	DTL	DTL#1970-01-01-00:00:00	DTL#1970-01-01-00:00:00
+History_Time[9]	DTL	DTL#1970-01-01-00:00:00	DTL#1970-01-01-00:00:00
+History_Time[10]	DTL	DTL#1970-01-01-00:00:00	DTL#1970-01-01-00:00:00
+History_Source	Array[1..10] of String[20]		
+History_Source[1]	String[20]	''	'Axis'
+History_Source[2]	String[20]	''	''
+History_Source[3]	String[20]	''	''
+History_Source[4]	String[20]	''	''
+History_Source[5]	String[20]	''	''
+History_Source[6]	String[20]	''	''
+History_Source[7]	String[20]	''	''
+History_Source[8]	String[20]	''	''
+History_Source[9]	String[20]	''	''
+History_Source[10]	String[20]	''	''
+History_Details	Array[1..10] of String[40]		
+History_Details[1]	String[40]	''	'Tool drive power failed'
+History_Details[2]	String[40]	''	''
+History_Details[3]	String[40]	''	''
+History_Details[4]	String[40]	''	''
+History_Details[5]	String[40]	''	''
+History_Details[6]	String[40]	''	''
+History_Details[7]	String[40]	''	''
+History_Details[8]	String[40]	''	''
+History_Details[9]	String[40]	''	''
+History_Details[10]	String[40]	''	''
+History_Index	Int	0	1
+History_Count	Int	0	1
+TotalErrorCount	DInt	0	1
 
 - [ ] **Confirm nobody back-drives the axes by hand between cycles.** You doubt it. This closes it out.
 
@@ -255,8 +436,11 @@ Operator sees: cycle ends → press Start → axes go to zero and back → confi
 `16#000D` → ERROR → `bRequireHoming` → Reset → next Start must home. Fix the alarm and it goes away.
 
 **Second trip is the recipe.** `DB_RecipeProgram1` lines 0 and 1 are both `G0 X0 Z0`. First real
-position is line 6. A CAM artifact, present in every export. Decide whether SpinningCam drops them
-or we strip them PLC-side.
+position is line 6. A CAM artifact, present in every export.
+
+✅ **Fixed on the CAM side 2026-08-17 (user).** New exports no longer carry the leading zero moves.
+Nothing changes on the machine until every recipe is **re-exported and re-imported** — the DBs in
+the CPU still hold the old lines. Nothing was changed PLC-side.
 
 ---
 ---
@@ -292,7 +476,8 @@ All four are chunked and pass validation (`python tools/split_recipe_db.py --che
       literals are safe at any size), declines `ChecksumXZ` for now, and reports the zeroed RPM/feed
       defect in program 2.
       The two earlier letters are already sent and answered.
-      Worth adding: the `G0 X0 Z0` duplicate lines from topic 5.
+      ~~Worth adding: the `G0 X0 Z0` duplicate lines from topic 5.~~ Already fixed in the CAM
+      2026-08-17 — drop that point from the letter.
 
 ---
 ---

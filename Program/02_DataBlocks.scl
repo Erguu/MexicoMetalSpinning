@@ -641,6 +641,12 @@ NON_RETAIN
         HomeTool_ErrorID : Word;  // MC_Home Tool axis TO code
         Power_X_ErrorID : Word;   // MC_Power X axis TO code
         Power_Z_ErrorID : Word;   // MC_Power Z axis TO code
+        // Added 2026-08-17. Its absence is why the one axis the alarm named was the one
+        // axis whose TO code could not be recovered after the fact -- fbPowerTool.ErrorID
+        // is volatile and Reset (MC_Reset) erases it. Latched like X/Z: written whenever
+        // MC_Power reports an error, never cleared, so non-zero means "this axis faulted
+        // at some point this power cycle".
+        Power_Tool_ErrorID : Word; // MC_Power Tool axis TO code
         Spindle_TO_ErrorID : Word; // MC_Power/MC_MoveVelocity/MC_Halt spindle TO code
         Error_Text   : String[100];
         // Error_Detail removed -- not written anywhere, Error_Text is used instead

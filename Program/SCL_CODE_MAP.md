@@ -284,9 +284,9 @@ The largest file in the project. Contains multiple FBs.
 | `FB_InputManager` | 1–60 | OR-combines HMI + panel + remote inputs, produces rising edges |
 | `FB_SafetyMonitor` | 61–130 | E-Stop, door, air pressure, drive ready check |
 | `FB_LimitMonitor` | ~120–190 | Soft-limit position check — only for HOMED axes (Homed_X/Z inputs); un-homed axis never trips |
-| `FB_ManualMode` | ~130+ | Manual jog, homing, step, tool step, spindle manual. MoveAbsolute rejects targets outside soft limits (homed axes only) |
+| `FB_ManualMode` | ~130+ | Manual jog, homing, step, tool step, spindle manual. MoveAbsolute rejects targets outside soft limits (homed axes only). **The `ToolStepCW`/`ToolStepCCW` branches in state 0 do not test `SelectedAxis`** — they move `Axis_Tool` whatever axis is selected, which is why FB_Process gates them on the lock alone |
 | `FB_AlarmManager` | middle section | Consumes DB_SystemEvents queue, severity-priority latch on DB_Error (higher tier preempts display, same/lower tier → history only), updates DB_Error + DB_HMI_Errors |
-| `FB_Process` | last large block | Main state machine — orchestrates all modes. Includes TO fault poller (StatusBits.Error → 16#0021-0024), manual soft-limit jog gating, and the ToolHeadLock interlock that refuses tool-axis jog/MoveAbsolute/Home (and HomeAll) while the lock is engaged → `WarningID = 3` |
+| `FB_Process` | last large block | Main state machine — orchestrates all modes. Includes TO fault poller (StatusBits.Error → 16#0021-0024), manual soft-limit jog gating, and the ToolHeadLock interlock that refuses tool-axis jog/MoveAbsolute/Home (and HomeAll, and the turret-step buttons) while the lock is engaged → `WarningID = 3`. The ToolStep buttons ignore `SelectedAxis`, so they are gated on the lock alone |
 
 #### `FB_SafetyMonitor` — Safety Priority Order
 ```
@@ -761,8 +761,10 @@ text; the queue path (`FC_ReportError`) shows its `Details` string as the EN tex
 | 0x0006 | ManualMode | Tool axis move error |
 | 0x0007 | ManualMode | Tool axis homing failed |
 | 0x0008 | RecipeHandler | Motion 30s timeout |
-| 0x0009 | FB_Process | X drive power failed |
-| 0x000A | FB_Process | Z drive power failed |
+| 0x0009 | FB_Process | X drive power failed — **only when X is the sole axis in drive-power fault this scan** |
+| 0x000A | FB_Process | Z drive power failed — sole-axis rule as 0x0009 |
+| 0x000D | FB_Process | Tool drive power failed — sole-axis rule as 0x0009 |
+| 0x000E | FB_Process | **Drive power failed on 2+ axes in the same scan.** `ErrorDetail` / `DB_Diagnostic.Error_Text` name every faulted axis and its TO code (`DrivePower: X=… Z=… Tool=…`). Points at the shared 24 V, the contactor circuit, E-Stop, or the TOs still starting up — not at one drive |
 | 0x0021 | FB_Process (TO poller) | X axis TO fault (StatusBits.Error, no active MC command) |
 | 0x0022 | FB_Process (TO poller) | Z axis TO fault |
 | 0x0023 | FB_Process (TO poller) | Tool axis TO fault |

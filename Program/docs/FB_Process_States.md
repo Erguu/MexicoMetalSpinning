@@ -1,7 +1,9 @@
 # FB_Process State Machine Reference
 
 **Source file:** `Program/06_MainProcess.scl`
-**Last updated:** 2026-08-14 — **MANUAL(5): tool-axis motion is interlocked against the ToolHeadLock.** Jog, MoveAbsolute and Home on the tool axis are refused while the lock is engaged, and HomeAll is refused outright (its step 3 homes the tool). New warning `WarningID = 3`. Not compiled. See STATE 5 below.
+**Last updated:** 2026-08-17 — **MANUAL(5): the ToolHeadLock interlock now also covers the turret-step buttons.** `Btn_ToolStepCW`/`Btn_ToolStepCCW` were passed to `FB_ManualMode` ungated and their state-0 branches never test `SelectedAxis`, so the one hole left in the 2026-08-14 interlock was the most direct way to rotate the turret. Gated on `#bToolLockEngaged` alone, like `HomeAll`. Not compiled. See STATE 5 below.
+
+**Previously, 2026-08-14 — **MANUAL(5): tool-axis motion is interlocked against the ToolHeadLock.** Jog, MoveAbsolute and Home on the tool axis are refused while the lock is engaged, and HomeAll is refused outright (its step 3 homes the tool). New warning `WarningID = 3`. See STATE 5 below.
 
 **Previously, 2026-08-13 (second revision) — **RECIPE_LOAD(11) transfers the recipe in 10 chunks of 100 lines.** A single 12 KB `READ_DBL` lands partially on the real CPU with `RET_VAL = 0`; the holes are scattered and differ between attempts. Each chunk is now pulled into `DB_RecipeChunk`, verified line by line against a `16#FF` poison (complete coverage), retried up to 3 times, and only then copied into `DB_SelectedRecipe`. Failure = `16#0314` with `ErrorChunk`. Not compiled, not commissioned.
 
@@ -601,14 +603,31 @@ with the lock engaged, which is normal machining, not a fault.
 | `MoveAbsolute` | `#bToolAxisBlocked` |
 | `Btn_HomeAxis` | `#bToolAxisBlocked` |
 | `HomeAll` | `#bToolLockEngaged` — whatever axis is selected, because step 3 homes the tool |
+| `Btn_ToolStepCW` / `Btn_ToolStepCCW` | `#bToolLockEngaged` — same reason (2026-08-17) |
+
+**Why the turret-step buttons are gated on the lock alone (added 2026-08-17).** They were the hole in
+the original interlock: passed to `FB_ManualMode` ungated, and their state-0 branches
+(`06_MainProcess.scl:737-748`) set `#bMoveTool := TRUE` and fire `MC_MoveRelative` on `Axis_Tool`
+**without testing `SelectedAxis` at all**. The 2026-08-14 gate therefore only stopped an operator who
+rotated the turret the indirect way — jog or MoveAbsolute with axis 2 selected — while the dedicated
+CW/CCW buttons went straight through. Gating them on `#bToolAxisBlocked` would have left the hole open
+for every selection except 2. Conversely they must **not** be folded *into* `#bToolAxisBlocked`: that
+flag feeds the jog gate, so an X jog would be refused while the operator held a turret-step button.
+Hence the separate banner-only flag `#bToolStepBlocked`.
 
 Feedback is a **warning, not an error**: `DB_HMI.HasWarning` + `WarningID = 3`
 (*"Tool axis locked - ToolHeadLock is engaged"*). A refused jog should not demand a Reset. It appears
 as soon as the tool axis is selected with the lock engaged — before the operator presses anything —
 and clears itself when the lock releases or another axis is selected. No latch, no timer, so it needs
-no reset-path entry. It sits **below** the E-Stop bypass banner in the warning priority chain: that
-banner is never suppressed, so with the bypass on the jog is still refused but the reason is not
-displayed.
+no reset-path entry. The turret-step case has no "selection" to hook, so there the banner is
+necessarily **press-driven**; it shares `WarningID = 3` (same cause, same wording, no new text-list
+row). It sits **below** the E-Stop bypass banner in the warning priority chain: that banner is never
+suppressed, so with the bypass on the jog is still refused but the reason is not displayed.
+
+**Known cosmetic quirk:** `#bToolAxisBlocked` / `#bToolStepBlocked` are assigned near the bottom of
+the FB but read by the banner chain near the top, so the banner shows the *previous* scan's value —
+the same one-scan lag already noted for `#bBlindMoveBlocked`. Harmless for the selection-driven case
+(the condition is held for many scans) and invisible for the press-driven one.
 
 **Residual gap, by design:** a pin stuck mid-stroke with the coil off and the sensor not made is not
 detected. This cylinder has no retract sensor — OB1 wires only `Sen_AtSetpoint`, and `AtRetract`

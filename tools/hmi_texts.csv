@@ -12,6 +12,7 @@ error,0x000A,10,Z drive power failed,Fallo de potencia variador Z
 error,0x000B,11,Homing timeout - check ref switch,Tiempo de referenciado excedido - revisar sensor
 error,0x000C,12,Drive ready timeout - check contactor/enable wiring,Tiempo de espera variador - revisar contactor/cableado
 error,0x000D,13,Tool drive power failed,Fallo de potencia variador herramienta
+error,0x000E,14,Drive power failed on several axes - check 24V/E-Stop,Fallo de potencia en varios variadores - revisar 24V/paro de emergencia
 error,0x0010,16,User pressed STOP,Operador presiono PARO
 error,0x0012,18,ToolHeadLock: extend timeout - check cylinder/sensor,Bloqueo cabezal: tiempo de extension excedido - revisar cilindro/sensor
 error,0x0021,33,X axis TO fault - check TO diagnostics,Fallo TO eje X - revisar diagnostico TO
