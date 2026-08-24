@@ -916,3 +916,56 @@ capture. No new actuator, no new timer, no new HMI *control*.
       `Power_Tool_ErrorID` shifts no offsets. Binding it to a display is optional.
 
 **Result: PASS on all four checkpoints** (1 open HMI task, blocking download only)
+
+---
+
+## 2026-08-25 — PAUSED(25) resume: ToolHeadLock verification (`bResumeLockChk`)
+
+**Change:** `Btn_Continue` in STATE_PAUSED no longer arms the spindle spin-up directly. It sets a
+new FB_Process VAR `bResumeLockChk`, which runs the same three-way lock test as
+STATE_LOCK_EXTEND_WAIT(17) — `Bypass_ToolHeadLock` OR `AtSetpoint` → pass (arms `bResumeSpeedup`);
+`ToolHeadLock.Error` → `16#0012` → STATE_ERROR. Phase 2 (spin-up → RUNNING) is unchanged.
+
+### Four checkpoints
+
+- [x] **1 — hard reset (`bDoHardReset`).** `#bResumeLockChk := FALSE;` added directly beneath the
+      existing `#bResumeSpeedup := FALSE;`. Same placement, same reasoning: a Continue that was
+      mid-verification must not survive a Reset.
+- [x] **2 — recipe reset.** Not applicable. `bResumeLockChk` is an FB_Process VAR, not a CMD-handler
+      flag; `FB_RecipeHandler` neither reads nor writes it. The pause hand-off it *does* care about
+      is `bPauseActive`, which is untouched by this change and still drops only in phase 2.
+- [x] **3 — STATE_STOPPED.** `#bResumeLockChk := FALSE;` added beside the existing
+      `#bResumeSpeedup := FALSE;` in the STOPPED block.
+- [x] **4 — STATE_ERROR.** Same, beside the `bResumeSpeedup` clear that ITEM-56c added. This matters
+      more than the others: the fault path *itself* can be the thing that leaves the flag set.
+- [x] **No new timer.** Deliberate. The wait is bounded by the cylinder FB's own `Timeout_Extend`
+      (T#6S on the ToolHeadLock) raising `Error`, exactly as state 17 relies on. `Cmd_Extend` is
+      asserted for the whole of PAUSED, so the FB always reaches `AtSetpoint` or `Error` — it cannot
+      hang. Adding a second timer here would be a second thing to keep in sync with state 17.
+- [x] **No actuator command added or changed.** The ToolHeadLock `Cmd_Extend` assignment at the
+      bottom of the FB is untouched: it was already TRUE for the whole of PAUSED. This change adds
+      the *wait*, not the command.
+- [x] **Spindle stays stopped on the failure path.** The `RunCmd` gate keys off
+      `State = PAUSED AND NOT bResumeSpeedup`, and phase 1 leaves `bResumeSpeedup` FALSE. A lock that
+      never confirms therefore reaches ERROR without the spindle having restarted — verified by
+      reading the gate, not assumed.
+- [x] **Error code reuse is intentional.** `16#0012` already means "tool head lock not confirmed"
+      and already has its severity mapping and (pending) text-list row. `Error_Text` and `ErrorDetail`
+      name the resume path, so the online trail still separates this from a state-17 failure.
+
+### Known gap (not closed by this change)
+
+- [ ] **OPEN.** If the operator *holds* Retract Full through the check, the cylinder FB oscillates
+      (State 3 → 2 → 0 → 1 → 3) and `AtSetpoint` is TRUE for one scan on each pass, so the check can
+      pass on a flicker. The fix is to gate `FC_CylinderDispatch`'s command routing on machine state
+      so the manual buttons are inert outside MANUAL — a separate change, still open. State 17 has
+      the same exposure and always has.
+
+### HMI
+
+- [x] **No new tag, no new status value.** `StatusID` stays 88 for the whole of PAUSED. Phase 1 is
+      normally sub-second; it only stretches toward `Timeout_Extend` when something is actually
+      wrong, and that ends in a `16#0012` alarm which the operator does see. A dedicated
+      "verifying lock" status would need a new WinCC text-list row for no routine benefit.
+
+**Result: PASS on all four checkpoints** (1 pre-existing gap logged, not introduced here)

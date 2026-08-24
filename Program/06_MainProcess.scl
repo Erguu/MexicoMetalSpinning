@@ -1063,6 +1063,10 @@ VERSION : 4.0
         // holds at the pause-retract point (state 802).
         bResumeSpeedup   : Bool;   // TRUE while waiting for spindle to spin back up after Continue
         tonResumeSpeedup : TON;    // Spin-up wait timer (PT = DB_MachineConfig.SpindleResumeSpeedupTime)
+        // Pause resume phase 1: confirm the ToolHeadLock is engaged BEFORE the spindle spins
+        // back up. Set by continueEdge, cleared when the lock confirms (which arms
+        // bResumeSpeedup) or when the cylinder faults (which goes to STATE_ERROR).
+        bResumeLockChk   : Bool;   // TRUE while verifying ToolHeadLock on resume from PAUSED
         bStopMoveX, bStopMoveZ : Bool;       // Flags for moving to position 0 after stop
         // Sequential homing (startup): home X then Z then Tool in active mode (mode 3)
         bHomeXExec : Bool;
@@ -1865,6 +1869,7 @@ BEGIN
         #Error           := FALSE;
         #bPauseActive    := FALSE;
         #bResumeSpeedup  := FALSE;   // Cancel any pending pause spin-up wait
+        #bResumeLockChk  := FALSE;   // Cancel any pending pause lock verification
         #savedLineIndex  := -1;
         #savedProgram    := -1;
         "DB_HMI".ResumeLine := -1;
@@ -1979,6 +1984,7 @@ BEGIN
             #bSpindleDecelWait   := FALSE;
             #bSpindlePendingStart := FALSE;
             #bResumeSpeedup      := FALSE;  // Cancel any pending pause spin-up wait
+            #bResumeLockChk      := FALSE;  // Cancel any pending pause lock verification
             // MandrelLock: clear Cmd_Extend (spring retracts on EStop/power-loss).
             // Cmd_Retract is pulsed by bMandrelRetractPulse (set in STATE_STOPPING only — safe path) to
             // force FB out of State 3 — Mode=0 does not auto-retract on Cmd_Extend=FALSE alone.
@@ -3135,16 +3141,51 @@ BEGIN
             // Stop elapsed time counting while paused
             #timerRunning := FALSE;
             // Spindle is stopped while paused (RunCmd gated off below on State=PAUSED
-            // when NOT bResumeSpeedup). On Continue, restart the spindle and wait
-            // SpindleResumeSpeedupTime for it to reach speed BEFORE releasing the axes:
-            //   • bResumeSpeedup=TRUE  → RunCmd gate re-enables the spindle (spin-up)
-            //   • bPauseActive stays TRUE → FB_RecipeHandler holds at the retract point (802)
-            // When the timer elapses, drop bPauseActive → FB_RecipeHandler returns to the
-            // interruption point (803) and machining resumes.
+            // when NOT bResumeSpeedup). On Continue the resume runs in TWO phases:
+            //   Phase 1 (bResumeLockChk) → confirm the ToolHeadLock is actually engaged
+            //   Phase 2 (bResumeSpeedup) → restart the spindle and wait
+            //                              SpindleResumeSpeedupTime for it to reach speed
+            //                              BEFORE releasing the axes
+            // bPauseActive stays TRUE across BOTH phases → FB_RecipeHandler holds at the
+            // retract point (802). When the spin-up timer elapses, drop bPauseActive →
+            // FB_RecipeHandler returns to the interruption point (803) and machining resumes.
             // Only Btn_Continue resumes (Pause button does NOT toggle).
             IF #continueEdge THEN
-                #bResumeSpeedup := TRUE;
+                #bResumeLockChk := TRUE;
             END_IF;
+
+            // --- Phase 1: ToolHeadLock verification ------------------------------------
+            // Cmd_Extend is held TRUE for the whole of PAUSED (see the ToolHeadLock section
+            // at the bottom of this FB), so the lock is already COMMANDED in the entire time
+            // the machine sits paused. This phase adds the WAIT, not the command.
+            //
+            // Why it is needed: PAUSED used to go straight to RUNNING, so nothing re-checked
+            // the lock on resume. FC_CylinderDispatch is not gated on machine state, so an
+            // operator can retract the lock from the manual cylinder page while paused — in
+            // cylinder FB State 3 the Cmd_Retract/Cmd_RetractFull test comes BEFORE the
+            // process's Cmd_Extend, so the HMI button wins. It also catches a purely
+            // mechanical failure to re-engage, which no HMI-side gate would ever see.
+            //
+            // Same three-way test and same error code as STATE_LOCK_EXTEND_WAIT (17), so the
+            // two lock-confirm paths cannot drift apart. It cannot hang: Cmd_Extend is
+            // asserted throughout, so the cylinder FB reaches either AtSetpoint or its own
+            // Timeout_Extend → Error. Error_Text/ErrorDetail name the resume path so the
+            // online trail still distinguishes this from a state-17 failure.
+            IF #bResumeLockChk THEN
+                IF "DB_HMI".Bypass_ToolHeadLock OR "DB_Cylinder_ToolHeadLock".AtSetpoint THEN
+                    #bResumeLockChk := FALSE;
+                    #bResumeSpeedup := TRUE;      // lock confirmed → start the spindle spin-up
+                ELSIF "DB_Cylinder_ToolHeadLock".Error THEN
+                    #bResumeLockChk := FALSE;
+                    #newErrorFlag := TRUE;
+                    #newErrorCode := 16#0012;
+                    "DB_Diagnostic".Error_Text := 'PauseResume: ToolHeadLock not engaged - CylFB.Error=TRUE, AtSetpoint=FALSE';
+                    "DB_HMI".ErrorDetail    := 'Tool head lock not engaged on resume - check cylinder/sensor';
+                    #State := STATE_ERROR;
+                END_IF;
+            END_IF;
+
+            // --- Phase 2: spindle spin-up ----------------------------------------------
             IF #bResumeSpeedup AND #tonResumeSpeedup.Q THEN
                 #bResumeSpeedup := FALSE;
                 #bPauseActive   := FALSE;
@@ -3183,6 +3224,7 @@ BEGIN
             #bRecipeLoadExec := FALSE;   // a recipe copy must not stay in flight across an error ack
             #timerRunning := FALSE;  // Stop cycle timer
             #bResumeSpeedup := FALSE;  // Cancel any pending pause spin-up wait (e.g. fault during spin-up)
+            #bResumeLockChk := FALSE;  // Cancel any pending pause lock verification
             // Cancel any pending STOPPING spindle-decel wait. Added with ITEM-56c, but it also
             // closes a route that already existed: STATE_STOPPING could be left for STATE_ERROR by
             // an E-Stop or safety fault, and NOTHING cleared this flag on that path (only phase 2

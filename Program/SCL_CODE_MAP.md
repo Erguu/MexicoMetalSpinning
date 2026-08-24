@@ -334,7 +334,7 @@ STATE 19   STOP_GOHOME          → Home X → Z → Tool — legacy, no longer 
 STATE 20   RUNNING              → FB_RecipeHandler running
 STATE 21   STOP_GOTOZERO        → Move axes to zero post-stop
 STATE 22   PNP_HALT             → PNP zone: halt active, reverse jog allowed. Recovery is Reset → Start: Reset acks the alarm, goes to STOPPED and latches bRequireHoming, and the next Start homes the axis out of the zone. Works only because STARTING(10)/RECIPE_LOAD(11)/PRE_SCAN(12) joined the PNP bypass list on 2026-08-16 — before that, Start re-tripped on the first scan of RECIPE_LOAD and homing was never reached. Those three command no motion; every state that does move was already bypassed
-STATE 25   PAUSED               → Paused (feed hold): axes retract clear of tool + spindle stops (RunCmd gated off, RunForward drops, no MC_Halt). On Continue: spindle spins up for SpindleResumeSpeedupTime (default T#5S) with axes held at retract point, then bPauseActive drops → axes return (RecipeHandler 803) → RUNNING
+STATE 25   PAUSED               → Paused (feed hold): axes retract clear of tool + spindle stops (RunCmd gated off, RunForward drops, no MC_Halt). On Continue, TWO phases: (1) bResumeLockChk confirms ToolHeadLock (same three-way test + same 16#0012 as state 17; fails → ERROR, spindle never restarts), then (2) spindle spins up for SpindleResumeSpeedupTime (default T#5S) with axes held at retract point, then bPauseActive drops → axes return (RecipeHandler 803) → RUNNING
 STATE 29   LOCK_RETRACT_WAIT    → ToolHeadLock releasing (T#3S spring-return wait); exits to STOPPED (normal stop) or TOOL_CHANGE
 STATE 30   TOOL_CHANGE          → FB_ToolChanger running
 STATE 35   TOOL_WAIT            → Waiting for FB_ToolChanger

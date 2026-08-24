@@ -1,7 +1,9 @@
 # FB_Process State Machine Reference
 
 **Source file:** `Program/06_MainProcess.scl`
-**Last updated:** 2026-08-17 — **MANUAL(5): the ToolHeadLock interlock now also covers the turret-step buttons.** `Btn_ToolStepCW`/`Btn_ToolStepCCW` were passed to `FB_ManualMode` ungated and their state-0 branches never test `SelectedAxis`, so the one hole left in the 2026-08-14 interlock was the most direct way to rotate the turret. Gated on `#bToolLockEngaged` alone, like `HomeAll`. Not compiled. See STATE 5 below.
+**Last updated:** 2026-08-25 — **PAUSED(25): resume now confirms the ToolHeadLock before spinning the spindle back up.** `Btn_Continue` no longer goes straight to the spin-up wait; it runs a phase-1 check (`bResumeLockChk`) using the same three-way test and the same `16#0012` code as STATE_LOCK_EXTEND_WAIT(17), and faults to ERROR if the lock never confirms. Nothing re-checked the lock on resume before this, and the manual cylinder buttons are live while paused. Not compiled. See STATE 25 below.
+
+**Prior update:** 2026-08-17 — **MANUAL(5): the ToolHeadLock interlock now also covers the turret-step buttons.** `Btn_ToolStepCW`/`Btn_ToolStepCCW` were passed to `FB_ManualMode` ungated and their state-0 branches never test `SelectedAxis`, so the one hole left in the 2026-08-14 interlock was the most direct way to rotate the turret. Gated on `#bToolLockEngaged` alone, like `HomeAll`. Not compiled. See STATE 5 below.
 
 **Previously, 2026-08-14 — **MANUAL(5): tool-axis motion is interlocked against the ToolHeadLock.** Jog, MoveAbsolute and Home on the tool axis are refused while the lock is engaged, and HomeAll is refused outright (its step 3 homes the tool). New warning `WarningID = 3`. See STATE 5 below.
 
@@ -162,7 +164,7 @@ added so neither failure can ever be silent again: the loader **poisons** `DB_Se
 | 20  | RUNNING            | "Running"                            | LOCK_EXTEND_WAIT                        | 25 (PAUSED), 29 (LOCK_RETRACT_WAIT), 100 (COMPLETE), 999  |
 | 21  | STOP_GOTOZERO      | "Returning to zero..."               | (legacy — never assigned; unreachable)  | 0 (STOPPED), 999 (ERROR)                                   |
 | 22  | PNP_HALT           | "PNP Halt - jog to escape..."        | Any auto state on PNP zone trigger (not 10/11/12) | 0 (STOPPED) — recover with Reset then Start; homing clears the zone |
-| 25  | PAUSED             | "Paused"                             | RUNNING                                 | 20 (RUNNING)                                               |
+| 25  | PAUSED             | "Paused"                             | RUNNING                                 | 20 (RUNNING), 999 (ERROR — lock not confirmed on resume)   |
 | 29  | LOCK_RETRACT_WAIT  | "Lock releasing..."                  | STOPPING, RUNNING (tool change)         | 0 (STOPPED) or 30 (TOOL_CHANGE)                            |
 | 30  | TOOL_CHANGE        | "Tool Change"                        | LOCK_RETRACT_WAIT (bLockAfterHoming=F)  | 35 (TOOL_WAIT)                                             |
 | 35  | TOOL_WAIT          | "Tool Change Wait"                   | TOOL_CHANGE                             | 17 (LOCK_EXTEND_WAIT), 999 (ERROR)                         |
@@ -996,19 +998,26 @@ Cmd_Extend := (State = RUNNING) OR (State = PAUSED)
 
 > Retract offsets and velocity are HMI-editable (`DB_MachineConfig.PauseRetract_X/Z/_Vel`). Offset 0 on an axis = that axis does not move on pause (legacy behavior). Implemented 2026-07-08 — see `docs/CHANGELOG.md`.
 
-**Resume (Continue) sequence — spindle spins up before axes return:**
-1. `continueEdge` sets `bResumeSpeedup = TRUE`. `bPauseActive` stays TRUE, so `FB_RecipeHandler` holds at the retract point (state 802) — axes remain clear of the workpiece.
-2. `bResumeSpeedup = TRUE` re-enables the spindle `RunCmd` gate → spindle restarts and ramps up. `tonResumeSpeedup` counts `DB_MachineConfig.SpindleResumeSpeedupTime` (default `T#5S`, HMI-editable).
-3. When `tonResumeSpeedup.Q`: clear `bResumeSpeedup`, clear `bPauseActive`, go to **20** RUNNING. `FB_RecipeHandler` (Pause released) now runs 802 → 803 return-to-point → resume machining.
+**Resume (Continue) sequence — TWO phases: lock confirmed, then spindle spins up, then axes return:**
+1. `continueEdge` sets `bResumeLockChk = TRUE`. `bPauseActive` stays TRUE for **both** phases, so `FB_RecipeHandler` holds at the retract point (state 802) — axes remain clear of the workpiece.
+2. **Phase 1 — ToolHeadLock verification (added 2026-08-25).** Same three-way test as STATE_LOCK_EXTEND_WAIT (17): `Bypass_ToolHeadLock` or `AtSetpoint` → pass; `Cylinder.Error` → `16#0012` → **999** ERROR. The spindle stays stopped throughout (the `RunCmd` gate keys off `NOT bResumeSpeedup`, which is still FALSE here), so a failed lock never spins the spindle back up. Passing sets `bResumeSpeedup = TRUE`.
+3. **Phase 2 — spindle spin-up.** `bResumeSpeedup = TRUE` re-enables the spindle `RunCmd` gate → spindle restarts and ramps up. `tonResumeSpeedup` counts `DB_MachineConfig.SpindleResumeSpeedupTime` (default `T#5S`, HMI-editable).
+4. When `tonResumeSpeedup.Q`: clear `bResumeSpeedup`, clear `bPauseActive`, go to **20** RUNNING. `FB_RecipeHandler` (Pause released) now runs 802 → 803 return-to-point → resume machining.
 
 **Transitions:**
 
 | Condition | Next State |
 |-----------|-----------|
-| `Btn_Continue` rising edge (`continueEdge`) | Start spindle spin-up wait (`bResumeSpeedup = TRUE`); stay in **25** |
+| `Btn_Continue` rising edge (`continueEdge`) | Start lock verification (`bResumeLockChk = TRUE`); stay in **25** |
+| `bResumeLockChk` AND (`Bypass_ToolHeadLock` OR `ToolHeadLock.AtSetpoint`) | `bResumeLockChk = FALSE`, `bResumeSpeedup = TRUE`; stay in **25** |
+| `bResumeLockChk` AND `ToolHeadLock.Error` | `16#0012` → **999** ERROR |
 | `bResumeSpeedup AND tonResumeSpeedup.Q` (spin-up elapsed) | `bResumeSpeedup = FALSE`, `bPauseActive = FALSE` → **20** RUNNING |
 
 > Cmd_Stop is accepted while PAUSED and triggers STOPPING normally.
+
+> **Why phase 1 exists (2026-08-25).** PAUSED went straight to RUNNING, so nothing re-checked the lock on resume — state 17 is entered only from 10, 16 and 35, never from 25. `FC_CylinderDispatch` is **not** gated on machine state, so an operator can retract the ToolHeadLock from the manual cylinder page while the machine is paused: in cylinder FB State 3 the `Cmd_Retract`/`Cmd_RetractFull` test comes *before* the process's `Cmd_Extend`, so the HMI button wins. The check also catches a purely mechanical failure to re-engage, which no HMI-side gate would see. It reuses `16#0012` deliberately so the two lock-confirm paths cannot drift apart; `Error_Text`/`ErrorDetail` name the resume path so the online trail still distinguishes them.
+>
+> **Known gap:** if the operator *holds* Retract Full through the check, the cylinder FB oscillates (State 3 → 2 → 0 → 1 → 3) and `AtSetpoint` is TRUE for one scan on each pass, so the check can pass on a flicker. Closing that needs the dispatch gated on machine state — a separate change, still open.
 
 ---
 
