@@ -1601,6 +1601,14 @@ block does *not* protect against it, because `Cmd_ExtendFull` is a different fie
 `Cmd_Extend`. Requires an HMI button that latches (or a selection change mid-press) to reach, which
 is why it has never been seen.
 
+> **UPDATE 2026-08-25 — it is reachable, and the ping-pong above has been reported from the machine.**
+> The "requires an HMI button that latches" caveat is satisfied: the WinCC cylinder page has an
+> **InvertBit toggle** bound to `Btn_CylExtendFull` (user, 2026-08-25), alongside the press/release
+> buttons on the same tag. InvertBit latches the bit TRUE, which is exactly the trigger this item
+> predicted. The operator complaint that surfaced it was "extend/retract doesn't work every press".
+> See **ITEM-58**, which carries the full HMI-side analysis and the dispatch fix; the all-cylinders
+> pre-clear described below is part of that work.
+
 **Fix when someone touches this FC:** clear the three command fields on *all* cylinders before the
 `CASE` writes the selected one — four lines each, no behaviour change for the selected cylinder
 because it is rewritten in the same scan. An `ELSE` branch in the `CASE` is not enough; the stale
@@ -2277,3 +2285,259 @@ Recorded so the next reviewer does not re-derive them:
   changed, this becomes a real bug.
 - **STATE_LOCK_EXTEND_WAIT cannot hang.** `DB_Cylinder_ToolHeadLock.Timeout_Extend = T#6S` gives it
   an exit via `16#0012`.
+
+---
+
+## ITEM-57 — SAFETY: manual turret step desyncs `CurrentTool`; a recipe can then machine with the wrong tool
+
+**Found:** 2026-08-25 (during the pause-to-manual design review) |
+**Status: OPEN — branch `feat/pause-to-manual`, not started**
+
+**This is live on the machine today.** It is not introduced by the pause-to-manual work and does not
+depend on it.
+
+### The defect
+
+`#CurrentTool` in FB_Process is written in exactly three places:
+
+| Site | Write |
+|------|-------|
+| `06_MainProcess.scl:2588` | homing complete → `CurrentTool := 1` |
+| `06_MainProcess.scl:2614` | homing complete → `CurrentTool := 1` |
+| `06_MainProcess.scl:3207` | tool change complete → `CurrentTool := fbToolChanger.CurrentTool` |
+
+**The manual turret-step buttons write none of them.** `Btn_ToolStepCW` / `Btn_ToolStepCCW` rotate
+`Axis_Tool` through `FB_ManualMode` without any notion of slot numbering, so after a manual step the
+physical turret and `CurrentTool` disagree and nothing in the program knows it.
+
+That value is then used to *skip* work — `06_MainProcess.scl:2762`:
+
+```
+ELSIF #fbRecipeHandler.ToolReqNumber = #CurrentTool THEN   // already have it, skip the change
+```
+
+So: operator steps the turret from slot 2 to slot 3 in manual, starts a recipe whose first tool
+command asks for slot 2, the test passes because `CurrentTool` still says 2, no tool change runs, and
+the machine cuts with tool 3.
+
+### Why nothing catches it
+
+- `bRequireHoming` is **not** armed by a manual turret step. That latch watches drive power and
+  E-Stop, not turret position, so the next Start can legitimately take the fast (no-homing) path and
+  inherit the stale value.
+- The tool axis is open-loop; `StatusBits.HomingDone` stays TRUE through a manual step, so
+  `bRefTrusted` passes.
+- The 2026-08-14/17 ToolHeadLock interlock does **not** cover this. It refuses ToolStep while the
+  lock is *engaged*; in STATE_MANUAL the lock is retracted (state is not 17/20/25, spring return), so
+  ToolStep is permitted — which is the point of the interlock, not a bug in it.
+
+Consequence is a wrong-tool cut: scrapped part, possible tool/mandrel crash. Not an injury path.
+
+### Candidate fixes (decide before implementing)
+
+1. **Arm `bRequireHoming` on any manual turret step.** Smallest change, and it reuses a mechanism
+   that already exists and is already tested. The next auto start then homes, and homing sets
+   `CurrentTool := 1` — self-consistent by construction. Cost: a homing cycle after any manual turret
+   work, which is exactly what ITEM-51 spent effort *removing* for the Reset case. Acceptable here
+   because a turret step is rare and deliberate, unlike an operator pressing Reset out of habit.
+2. **Track the step in `CurrentTool` directly** (increment/decrement on each step, wrap at
+   `ToolCount`). No homing cost, but it assumes every commanded step actually completed and that the
+   turret started where we thought — on an open-loop axis with no slot feedback that assumption is
+   the whole problem restated.
+3. **Invalidate rather than track**: set `CurrentTool := 0` (or a new `bToolUnknown` flag) on a manual
+   step, and make the `:2762` skip test fail closed so the next tool command always runs a real
+   change. Cheaper than homing, and honest about what is actually known.
+
+**Recommendation: (1), with (3) as the fallback if the homing cost turns out to bother the
+operator.** (2) is the one to avoid — it looks the cheapest and is the only one that can be silently
+wrong.
+
+### Reset-path note
+
+Whichever is chosen, `CurrentTool` (or any new flag) must be covered by the four checkpoints in
+`CLAUDE.md`. Note that `CurrentTool` is currently **never** reset by the hard-reset block — it
+survives a Reset by design, because a Reset does not move the turret.
+
+---
+
+## ITEM-58 — `FC_CylinderDispatch` is not gated on machine state; manual cylinder buttons are live in every state
+
+**Found:** 2026-08-25, from an operator complaint: "the extend/retract buttons don't trigger properly
+every press" |
+**Status: OPEN — branch `feat/pause-to-manual`, not started**
+
+**ITEM-52 is a subset of this** and its "never been seen" caveat is now withdrawn — see the update on
+that item.
+
+### What the operators are actually hitting
+
+Several independent causes, which is why the symptom looks random. Ranked by how much they matter:
+
+**1. The manual buttons are live in every machine state.** `FC_CylinderDispatch` is called
+unconditionally from OB1 (`08_Main_OB1.scl:356`). It is not gated on `MachineState`, on
+`ManualModeActive`, or on anything else. The buttons therefore work during a running recipe and while
+paused. Already flagged for `Btn_CylRetractFull` in `HMI_Tag_Guide.md:357-360`; the gate was never
+added.
+
+**2. What competes with the button is state-dependent.** The button always reaches the cylinder, but:
+
+| Machine state | What fights the button |
+|---------------|------------------------|
+| STOPPED (0) | SheetHolder `Cmd_Release` asserted every scan (`06:3483`) — the holder will not stay latched; BackSupport `Cmd_Retract` held TRUE for `CylBackSupport_EndRetractTime` (2 s) on entry (`06:3761-3774`) |
+| ERROR (999) | Same `Cmd_Release`; MandrelLock `SafetyOK` deliberately stays TRUE |
+| MANUAL (5) | Nothing — the only state where manual commands are unopposed |
+| PAUSED (25) | ToolHeadLock `Cmd_Extend` held TRUE, but **the button wins** — see below |
+
+So the same press behaves differently depending on a state the operator has no reason to connect to
+the cylinder page. That is the "sometimes it works" report.
+
+**3. In cylinder FB State 3, a manual retract outranks the process's extend.** The State 3 priority
+chain (`09_Sensors_Actuators.scl:639-655`) is `Cmd_Retract`/`Cmd_RetractFull` → `Cmd_ExtendFull` →
+5/2 spring → `Cmd_Release`. The retract test is **first**, so `Btn_CylRetractFull` beats FB_Process's
+`Cmd_Extend`. **On the ToolHeadLock while PAUSED this is a collision path** — the operator can pull
+the lock pin mid-recipe. The resume-side half of this is already fixed (`cb3aa0e`, state 25 phase 1);
+the command-side half is this item.
+
+**4. States 1 and 2 are direction-locked.** State 1 (EXTENDING) tests no retract command at all, and
+State 2 tests no extend command. So a reversal press during a stroke is not deferred — it is never
+looked at. Harmless while both commands are momentary and mutually exclusive; becomes a trap the
+moment one of them latches (see the HMI section).
+
+**5. `Btn_CylExtend` and `Btn_CylRetract` are dead tags.** The dispatch routes only
+`Cmd_ExtendFull` / `Cmd_RetractFull` / `Cmd_GotoPos`. `Cmd_Extend` / `Cmd_Retract` on all four
+cylinders are written solely by FB_Process and FB_RecipeHandler. `Program/docs/cylinder.md:531-534`
+still shows the two missing dispatch lines as though they exist — the doc is right, the code is
+missing them. **User decision 2026-08-25: consolidate the HMI onto the `*Full` tags rather than add
+the missing lines.** On this machine that costs nothing on BackSupport / SheetHolder / MandrelLock
+(all `PositioningMode = 0`, where `Cmd_Extend` and `Cmd_ExtendFull` are literally the same code path)
+but the ToolHeadLock (`PositioningMode = 1`) loses sensor-verified manual extend — `Cmd_ExtendFull`
+ignores `Sen_AtSetpoint` and treats its 6 s timeout as *success*. The automatic path still uses
+`Cmd_Extend` (`06:4085`) and keeps the verification, so this is a commissioning-display concern, not
+a safety one. Record it in the commissioning notes.
+
+> **Watch item:** `PositioningMode` is HMI-writable at runtime (`SelCyl_SetType` + `Btn_ApplyType`,
+> `09:956-967`), and BackSupport Mode 3 is documented as restorable if the ruler hardware returns
+> (`08_Main_OB1.scl:268-270`). "Extend Full is identical" is true of today's config only. Under Mode 2
+> or 3 it ignores the ruler and drives full stroke past the target.
+
+### HMI side (not PLC — but it is half the fault)
+
+- **An InvertBit toggle is bound to `Btn_CylExtendFull`**, alongside press/release buttons on the same
+  tag. It latches the bit TRUE, which is the trigger ITEM-52 predicted. **User decision 2026-08-25:
+  delete the toggle.** The latch it was providing already exists for free — on the three
+  `PositioningMode = 0` cylinders, holding Extend Full past `Timeout_Extend` reaches FB State 3, which
+  drives `Sol_A := TRUE` with no button held (`09:856-859`). Operator instruction becomes "hold until
+  it stops moving, then let go". The ToolHeadLock deliberately cannot latch (5/2 spring return, State
+  3 drives `Sol_A := Cmd_Extend OR Cmd_ExtendFull`) — correct for a safety lock, do not work around it.
+- **The press/release buttons are two one-shot write jobs** (Press → SetBit, Release → ResetBit), not
+  `SetBitWhileKeyPressed`. A lost release write latches the bit TRUE with nothing to clear it.
+  Migrating to `SetBitWhileKeyPressed` is in progress; note it takes **Tag + Bit**, and `DB_Manual` is
+  optimized access (`02_DataBlocks.scl:669`) so there is no absolute bit offset — the plan is to pass
+  the Bool tag with bit 0. When testing, watch all five `Btn_Cyl*` tags, not just the one pressed:
+  `Btn_CylGotoPos` is rising-edge triggered and a stray bit write there would command a real move.
+- **`Manual_Cyl` exists in both `Screens\Eng\` and `Screens\Mex\`** with drifted object names
+  (ENG `Button_5..8/16/17` vs MEX `Button_10..14`). Fix both trees, identify buttons by caption and
+  tag, never by number. See `tools/es_twin_audit.csv`.
+- **The CMD=41 atmosphere buttons only work in STATE_MANUAL (5).** `Btn_Cmd41_AtmoOn/_AtmoOff/
+  _Release` are handled only in the MANUAL branch, and STOPPED/ERROR clear the flags every scan.
+  Pressed from any other state they do nothing and say nothing. Rising-edge is correct here and
+  deliberate (`HMI_Tag_Guide.md:342-348`) — the state gate is the trap, not the tag style.
+
+### Fix
+
+Gate the **command routing** in `FC_CylinderDispatch` on machine state, leaving the `SelCyl_*` status
+mirroring ungated so the screen still shows live cylinder state in every state.
+
+**Which states may command a cylinder is the open question, and it is the same question as
+ITEM-59** — do not decide it here in isolation. Straw man: MANUAL (5) always; PAUSED (25) for
+BackSupport / SheetHolder but **never** the ToolHeadLock; nothing anywhere else.
+
+Fold in the ITEM-52 pre-clear at the same time: clear the three command fields on *all* cylinders
+before the `CASE` writes the selected one.
+
+**A PLC-side hold bound is worth adding regardless of the HMI work** — if a manual command bit has
+been TRUE continuously past `Timeout_Extend` + margin, stop routing it until it goes FALSE again.
+That is the only protection against a dropped write job, which no panel-side configuration can rule
+out. Note `FC_CylinderDispatch` is a `FUNCTION` with no static memory, so this means converting it to
+an FB with an instance DB (touches the OB1 call at `08_Main_OB1.scl:356`; ~100 B of work memory).
+
+---
+
+## ITEM-59 — FEATURE: allow MANUAL from PAUSED and back, without losing the recipe
+
+**Raised:** 2026-08-25 (user) |
+**Status: DESIGN — branch `feat/pause-to-manual`, not started**
+
+### Why
+
+Today `STATE_MANUAL` is assigned from exactly one place, inside the STOPPED branch
+(`06_MainProcess.scl:2018`). There is no PAUSED → MANUAL route. Leaving manual sends the machine to
+STOPPED (`:2211`), and Start from manual sets `bResetRecipe := TRUE` (`:2216`), so the recipe restarts
+**from line 0**. Going to manual mid-job costs the part.
+
+`FB_ManualMode` is enabled only in states 5 and 22 (`:3943`), so axis motion is unavailable while
+paused — but the cylinder buttons are (ITEM-58). **The dangerous action is possible and the benign one
+is not.** That asymmetry is very likely why operators are using the cylinder page while paused: it is
+the only manual action available to them there.
+
+### What already exists in our favour
+
+- `FB_RecipeHandler` already captures the interruption point and has return-before-resume built
+  (800 → 801 retract → 802 hold → 803 return). `bPauseActive` holds it at 802 indefinitely. The hard
+  part — "remember where we were" — is done.
+- `#savedLineIndex`, `#savedProgram` and `DB_HMI.ResumeLine` already exist as FB_Process vars, set to
+  `-1` on restart and hard reset. **Investigate these first** — something resume-from-line-shaped may
+  be half-built already, and it would change the design.
+
+### Shape
+
+**A new state (e.g. 26 PAUSED_MANUAL), not a reuse of MANUAL(5).** `STATE_MANUAL` appears in ~14
+tests — PNP bypass lists, soft-limit gating, the `bRequireHoming` exemption at `:1860`, contactor
+logic, the STOPPED-only entry. Making 5 mean two things forces an audit of every one for "is this
+still right with a live recipe underneath". A distinct state leaves them all correct by default and
+you opt in where wanted. Entry from 25 on `ManualModeActive`, exit back to 25 when it drops;
+`bPauseActive` stays TRUE throughout so the handler never leaves 802.
+
+### The five coupled decisions (user positions recorded 2026-08-25)
+
+1. **Spindle must never restart automatically.** Agreed. Its `RunCmd` gate keys off
+   `State = PAUSED`, so a new state 26 falls *outside* it and the spindle would restart on entry to
+   manual. Add 26 to the gate. Expect this to be the first thing that bites.
+
+2. **Return path.** After manual jogging the axes are somewhere arbitrary, so the pause retract
+   offset is meaningless — you cannot safely offset from an unknown position. Return to a known point
+   first. User: go to safe/zero, X then Z, or home. See 3 — homing gets more for the same move.
+
+3. **Home on return.** User spotted that the turret is not tracked across manual mode; homing fixes
+   both position *and* tool identity in one already-tested path (`:2588`/`:2614` set
+   `CurrentTool := 1`). **Depends on ITEM-57** — do not design this until ITEM-57 picks its approach,
+   because if ITEM-57 chooses invalidate-rather-than-home the return path may not need homing at all.
+   The return move from home to the interruption point still needs a defined path; it is far more
+   predictable than from an arbitrary jogged position but it is not automatically safe.
+
+4. **ToolHeadLock: keep it extended in state 26.** Simpler — one term added to the existing
+   `Cmd_Extend` assignment (`:4085`) versus relying on the resume check to catch a retracted pin. It
+   also gives the operator feedback for free: the MANUAL interlock already refuses tool jog, home,
+   HomeAll and ToolStep while the lock is engaged, with `WarningID = 3`. That interlock must be
+   extended to cover state 26. Note this deliberately blocks turret stepping in state 26 — which is
+   the very thing that desyncs `CurrentTool` (ITEM-57), so the two decisions reinforce each other.
+
+5. **Soft limits — include 26 in the MANUAL bypass list.** User's position was "manual is manual,
+   don't bother the operator", and reaching that requires *adding* 26 to the list, not leaving it out.
+   `STATE_MANUAL` is in the **bypass** list at `06_MainProcess.scl:1531`; bypass does not mean "no
+   limits", it means manual enforces them by refusing the jog instead of faulting, so the operator can
+   always jog back into range. A state left *out* of that list gets the auto treatment and **faults**.
+   Three sites: `:1531`, and the two around `:1562` and `:1597`.
+
+### Before building any of it
+
+**Ask the operators what they are actually trying to do mid-pause.** "Clear a chip" and "the tool is
+rubbing, back it off" have completely different answers — the first needs no motion at all, the second
+needs jog plus a safe return. The requirement is currently being inferred from a workaround, and the
+workaround exists partly because cylinders are the only thing that works while paused (ITEM-58). That
+question is free and it decides between a ~20-line gate and a new state with a five-item audit.
+
+### Related
+
+`cb3aa0e` (state 25 phase-1 lock check) is the foundation this builds on — it is what makes any
+return from manual to a paused recipe verifiable. ITEM-57 and ITEM-58 are both prerequisites.
