@@ -1,3 +1,54 @@
+DB_Diagnostic
+Process_State	Int	0	0
+Process_SafeToRun	Bool	false	TRUE
+Process_DrivesEnable	Bool	false	TRUE
+Recipe_CurrentProgram	Int	0	1
+Recipe_LoadedProgram	Int	0	0
+Recipe_CurrentLine	Int	0	0
+Recipe_TotalLines	Int	0	0
+Recipe_TargetX	Real	0.0	0.0
+Recipe_TargetZ	Real	0.0	0.0
+Recipe_Velocity	Real	0.0	0.0
+PreScan_Complete	Bool	false	FALSE
+PreScan_Valid	Bool	false	FALSE
+PreScan_ErrorLine	Int	0	0
+MoveX_Busy	Bool	false	FALSE
+MoveX_Done	Bool	false	FALSE
+MoveX_Error	Bool	false	FALSE
+MoveZ_Busy	Bool	false	FALSE
+MoveZ_Done	Bool	false	FALSE
+MoveZ_Error	Bool	false	FALSE
+bMoveX	Bool	false	FALSE
+bMoveZ	Bool	false	FALSE
+Axis_X_Pos	Real	0.0	0.0
+Axis_Z_Pos	Real	0.0	0.0
+Axis_X_Enabled	Bool	false	TRUE
+Axis_Z_Enabled	Bool	false	TRUE
+Axis_X_Homed	Bool	false	FALSE
+Axis_Z_Homed	Bool	false	FALSE
+Require_Homing	Bool	false	TRUE
+Error_ProcessState	Int	0	0
+Error_Line	Int	0	0
+Error_Code	Word	16#0	16#000D
+MoveX_ErrorID	Word	16#0	16#0000
+MoveZ_ErrorID	Word	16#0	16#0000
+HomeX_ErrorID	Word	16#0	16#0000
+HomeZ_ErrorID	Word	16#0	16#0000
+HomeTool_ErrorID	Word	16#0	16#0000
+Power_X_ErrorID	Word	16#0	16#8007
+Power_Z_ErrorID	Word	16#0	16#8007
+Spindle_TO_ErrorID	Word	16#0	16#0000
+Error_Text	String[100]	''	''
+TO_ErrorText	String[60]	''	'UnknownTO'
+
+
+
+
+
+
+
+
+
 # Human TODO
 
 load mem 62
@@ -21,7 +72,7 @@ the real CPU. Until then master stays behind.
 | 2 | Before you download | ⛔ **BLOCKING** — skip these and the HMI breaks |
 | 3 | After you download | 🔧 Do same day |
 | 4 | Tool enable `%Q8.1` | ✅ Hardware done · 3 steps left |
-| 5 | `16#000D` field fault | 🔍 Investigating |
+| 5 | `16#000D` field fault | ⚠️ Not new, harmless — **but press Ack after power-up or it hides other alarms** |
 | 6 | Recipes 2–5 | 💤 Not urgent |
 | 7 | Letter to CAM developer | 💤 Not urgent |
 | 8 | Fallback plan | 💤 Only if test 1 fails |
@@ -45,7 +96,34 @@ permitting auto run.
       `06_MainProcess.scl` → **every** `gcodes/DB_RecipeProgramN.scl`.
 - [ ] **Never skip the last step.** `02b` wipes all recipe data. The DBs are `UNLINKED`, so the wipe
       is invisible online. You would only find out at cycle start, as `16#0310` or `16#0313`.
-- [ ] **Download. Select program 1. Press Start.**
+- [ ] **Download.**
+- [ ] **⚠️ Press Ack once, before anything else.** See the box below. Skip it and this whole test
+      can lie to you.
+- [ ] **Select program 1. Press Start.**
+
+---
+
+### ⚠️ Press Ack after every power-up, before you test
+
+**Why.** A power-up alarm (`16#000D`, topic 5) latches every time the machine is switched on.
+Nobody acknowledges it, because it blocks nothing.
+
+While it sits there, **the HMI cannot show you a recipe error.** The alarm display only replaces a
+message with a *higher-priority* one. Recipe errors are lower priority. They go to the log and never
+reach the screen.
+
+So if the chunk transfer fails, you would see:
+
+> Tool drive power failed
+
+instead of `16#0314` or `16#0316`. You would be debugging the wrong thing.
+
+**Fix: press Ack once after power-up.** That clears the slot. Takes two seconds.
+
+**If you forget** — the evidence is still in `DB_Diagnostic.Error_Text` and
+`DB_Error.History_Code[1..10]`. Read those, not the screen.
+
+---
 
 ## Then read these tags
 
@@ -197,7 +275,143 @@ failure later.
 
 # 5 · `16#000D` — "TOOL DRIVE POWER FAILED"
 
-### 🔍 Investigating — intermittent, about 1 in 10 runs
+### 🔍 Not a new fault. Not urgent. But it hides other alarms.
+
+---
+
+## 📌 2026-08-24 — what this actually is
+
+**It is not new.** You told me this alarm has been in the WinCC alarm manager since the machine was
+first built. The HMI language work added a text field to the auto recipe page, and that is the only
+reason you started seeing it. Same alarm. New field.
+
+**It does not block the machine.** The code skips the jump to ERROR when the machine is in Stopped,
+which is where it always fires. Ignoring it and carrying on is safe.
+
+**But it blocks other alarms.** This is the part that matters:
+
+> While this alarm is unacknowledged, the HMI cannot show you any recipe error, axis error,
+> soft limit, or PNP alarm. Only E-Stop / door / air can push past it.
+
+The machine still stops correctly. It just tells you the wrong reason.
+
+### What to do
+
+- [ ] **Press Ack once after every power-up.** Two seconds. Clears the slot. Do this before any
+      testing — see topic 1.
+- [ ] **Run the three power cycles below** when you have five minutes. It tells us whether the fault
+      is our code or electrical.
+
+**Not doing:** deleting this alarm from the list. It is the only warning you get for a real loss of
+drive power, and removing the message would not fix the blocking problem anyway.
+
+Full reasoning: `Program/docs/errors/16-000D_tool_drive_power_failed.md`.
+
+---
+
+## ~~🔬 Startup-halt test~~ — DONE 2026-08-19 · **NEGATIVE**
+
+**Result: our startup code is NOT the cause.** Test run correctly — `fbPowerX.Status` went FALSE,
+Reset pressed, `Power_X_ErrorID` and `Power_Z_ErrorID` both stayed `16#0`.
+
+So `MC_Halt` sent to a non-enabled axis does **not** raise an error on this CPU. Theory dead.
+Do not re-run this test. Original procedure kept below for reference only.
+
+<details>
+<summary>Original test procedure (superseded)</summary>
+
+**Question: is our own startup code causing the power-up alarm?**
+
+On the first scan after power-up the PLC sends a Halt to X, Z and Tool.
+The drives are not enabled yet at that moment. A Halt to a drive that is not
+enabled gets refused, and that refusal is what reaches you as the alarm.
+
+You can create the same condition by hand. No power cycle needed.
+
+### Before you start
+
+Machine idle. Nothing running. E-Stop released.
+
+Park the axes where they cannot drop or spring back. **Step 4 removes holding torque.**
+
+### Watch table
+
+```
+DB_Diagnostic.Power_X_ErrorID
+DB_Diagnostic.Power_Z_ErrorID
+DB_Error.TotalErrorCount
+DB_Error.Code
+"fbProcess".fbPowerX.Status
+"fbProcess".State
+```
+
+### Steps
+
+1. Write down `TotalErrorCount`.
+2. **Modify** `Power_X_ErrorID` and `Power_Z_ErrorID` to `16#0`.
+3. Wait 5 seconds. Both must stay `16#0`. If they do not, stop and tell me.
+4. **Modify** `"fbProcess".State` to `999`.
+5. Check that `fbPowerX.Status` went FALSE.
+6. Press the **physical Reset button** on the panel.
+7. Read `Power_X_ErrorID` and `Power_Z_ErrorID`.
+
+Step 6 puts State back to 0 by itself. Do not leave it at 999.
+
+### What the answer means
+
+| What you read | Meaning | Next |
+|---|---|---|
+| Both `16#8007`, count +1, Code `16#000D` | **Confirmed. Our startup code causes it** | Tell me — one line fixes it |
+| Both still `16#0` | Not the startup code | Tell me — my theory is wrong |
+| A different `16#8xxx` | Still the startup code, other reason | **Send me the number** |
+
+Either way, send me `TotalErrorCount` and `DB_Error.Code`.
+
+</details>
+
+---
+
+## 🔬 DO THIS NEXT — 2026-08-19 · no download
+
+The startup-halt theory is dead. Two measurements, both cheap, neither needs a code change.
+
+### A · The diagnostic buffer will NOT show this — corrected 2026-08-19
+
+Checked and empty of faults. **That is expected, not a miss.**
+
+On the S7-1200, motion technology-object alarms do not go into the CPU diagnostic buffer.
+That is S7-1500 behaviour. An empty buffer does not clear the axes of anything.
+
+TO errors on this CPU live in two places, **both live-only, no history**:
+
+```
+Axis TO → Online & diagnostics → Status and error bits
+TO_AxisX.ErrorDetail.Number   /  .Reaction   /  StatusBits.Error
+```
+
+**And we keep no history either.** `DB_Error`, `DB_Diagnostic` and `DB_SystemEvents` are all
+`NON_RETAIN` — every trace is wiped at each power cycle. This fault currently has no persistent
+record anywhere on the machine. That is the real gap.
+
+Still worth a glance: the buffer does log **power-on and STOP→RUN**. Those timestamps tell you how
+many restarts happened. A STOP you did not command, or a module fault, would matter.
+If the buffer looks completely empty, check the event-class filter above the list.
+
+### B · Power cycle three times ← do this one
+
+After each one, before touching anything, read:
+
+```
+DB_Diagnostic.Power_X_ErrorID
+DB_Diagnostic.Power_Z_ErrorID
+DB_Error.TotalErrorCount
+```
+
+| Result | Meaning |
+|---|---|
+| 3 of 3 show `16#8007` | Happens every power-up. Deterministic |
+| 1 of 3 | Genuinely intermittent. Points at electrical, not code |
+| 0 of 3 | The dump caught something rarer. The buffer in A is the only way in |
 
 ---
 

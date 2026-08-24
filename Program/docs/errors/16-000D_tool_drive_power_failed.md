@@ -1,7 +1,162 @@
 # `16#000D` — Tool drive power failed
 
-**Status:** OPEN. Reported 2026-08-14, roughly **1 in 10 cycles**, usually at program end.
-**Last updated:** 2026-08-17.
+**Status:** OPEN, but **downgraded**. Not a regression, does not block the machine. The urgent part
+is the alarm-slot side effect in the 2026-08-24 section, not the fault itself.
+**Last updated:** 2026-08-24.
+
+---
+
+## ⚠️ 2026-08-24 — never a regression. And the real cost is not the message.
+
+Operator report (user, 2026-08-24): a power-related alarm has been sitting in the **WinCC alarm
+manager since the machine was first commissioned** — inactive-looking, blocking nothing, ignored.
+The HMI language work of ~2026-08-10 (ITEM-55 stage 1) added a string I/O field to the **auto recipe
+page**. Only then did the text start appearing in front of the operator. **Same error, new field.**
+
+**So the whole "which of our changes caused this" search was chasing a phantom.** No PLC change
+introduced it. An HMI change made it visible. Every dated candidate in the sections below was being
+matched against a start date that does not exist.
+
+### Why it shows on the auto page and not in Stopped
+
+Three lines, and they explain the symptom exactly:
+
+| Line | What it does |
+|---|---|
+| `06_MainProcess.scl:1798` | `DB_HMI.ErrorText` is a **continuous mirror** of `fbAlarmManager.ActiveErrorText`, rewritten every scan |
+| `FB_AlarmManager:477` | `ActiveErrorText` is cleared **only** by Acknowledge. Nothing else clears it |
+| `06_MainProcess.scl:1962` | `DB_HMI.ErrorText` is blanked in **STATE_STOPPED, and only while `SafeToRun`** |
+
+The power-up alarm latches and is never acknowledged. Sitting in STOPPED, line 1962 blanks the
+display every scan and you see nothing. Start a recipe, leave STOPPED, line 1962 stops running, and
+line 1798 repaints the stale latched text forever. **It is not an active alarm — it is a latched
+text that STOPPED was hiding.**
+
+### Why it does not block — by design, not luck
+
+`06_MainProcess.scl:1416`:
+
+```scl
+IF #State <> STATE_ERROR AND #State <> 0 AND #State <> STATE_PRE_SCAN
+   AND #State <> STATE_RECIPE_LOAD THEN
+    #State := STATE_ERROR;
+END_IF;
+```
+
+At power-up `#State` is **0**. The ERROR transition is explicitly skipped. The alarm fires, the text
+latches, the state machine never moves. A field test of "ignore it and keep going" will pass — that
+outcome is already provable from the code and does not need running.
+
+### 🔴 The real cost — the alarm slot is occupied for the whole session
+
+`16#000D` falls in `16#0001..16#002F` → **Severity 3** (`FB_AlarmManager:375`). The display latch at
+`FB_AlarmManager:405`:
+
+```scl
+IF NOT "DB_Error".Active OR (#ActiveSeverity > "DB_Error".Severity) THEN
+```
+
+A new error reaches the HMI only if its tier is **strictly higher**. With an unacknowledged
+severity-3 error latched from power-up, everything below tier 4 goes to history and **never reaches
+the screen** for the rest of the power-on session:
+
+| Masked until someone acknowledges | Tier |
+|---|---|
+| All recipe errors — `16#0313` corrupt, `16#0314` chunk transfer failed, `16#0316` checksum mismatch, `16#0312` | 2 |
+| Tool configuration `16#0310`, `16#0311` | 2 |
+| All axis move/homing failures `16#0001`–`16#0008`, TO poller `16#0021`–`16#0024` | 3 |
+| Soft limits, PNP zone, spindle, ToolHeadLock timeout `16#0012` | 3 |
+
+Only safety tier (E-Stop, door, air, HW limit) can push through. The machine still *stops* correctly
+— the state transitions are independent of the display latch — but **the operator is told the wrong
+reason**.
+
+### ⚠️ This directly threatens the pending hardware recipe test
+
+The merge gate for `feat/recipe-slots-and-batching` is the chunked recipe transfer passing on the
+real CPU. Recipe errors are **tier 2**. With `16#000D` latched from power-up, a failed transfer
+raising `16#0314` or `16#0316` **will not appear on the HMI** — the screen will still read
+*"Tool drive power failed"*.
+
+**Mitigation, no code change, do this before the test:** press **Ack once after power-up**. That
+clears `DB_Error.Active` and restores the display. Free, immediate, and it unblocks the test that
+actually matters. `DB_Diagnostic.Error_Text` and the `DB_Error` history are written unconditionally,
+so the evidence exists either way — but only if someone thinks to look there instead of at the HMI.
+
+### What this revives: the first-scan `MC_Halt`
+
+The hypothesis was killed earlier for one reason — it predicts a fault on **every** power-up, and
+the operator reported it as intermittent. **That objection is gone.** The intermittency was an
+artifact of when the screen was being looked at.
+
+Re-scored against every observation:
+
+| Observation | First-scan `MC_Halt` predicts |
+|---|---|
+| Present since first commissioning | ✔ the code predates git history (ITEM-31, 2026-05-24) |
+| All three axes, same scan (`TotalErrorCount = 1`) | ✔ all three halts fire in one scan |
+| Self-clears, blocks nothing | ✔ `Execute` drops after one scan |
+| Nothing in the CPU diagnostic buffer | ✔ S7-1200 motion TO alarms do not go there |
+
+Mechanism: the first-scan block (`:1256`) sets `bHaltAllAxes`, and also sets `bDoHardReset`, whose
+block at `:1863` sets it **again**. `MC_Power` is called at `:1322`, the three `MC_Halt` calls at
+`:3805`–`:3807` — later in the same scan, on axes whose `MC_Power.Status` has not come up yet.
+**Any fix must handle both setters; deleting one line is not enough.**
+
+### The test that was run, and why it did not settle it
+
+2026-08-19: `"fbProcess".State` forced to 999, `fbPowerX.Status` confirmed FALSE, physical Reset
+pressed. `Power_X_ErrorID` / `Power_Z_ErrorID` stayed `16#0`. **Negative.**
+
+That fired the same halt on the same axes, so *"`MC_Halt` to a switched-off axis errors"* is
+genuinely disproven. What it did **not** cover is *"`MC_Halt` to a technology object that is still
+initialising"* — in the test the TO had been running for hours and was merely disabled. That
+distinction is now the only thread holding the hypothesis together, and it is a thin one. Recorded
+as such deliberately.
+
+### PTO changes the ITEM-31 premise
+
+The axes are driven **PTO, pulse + direction** (user, 2026-08-24). The servo has no homing
+intelligence — the S7-1200 technology object generates the pulses and watches the reference switch.
+Nothing homing-related lives in the drive. Consequences:
+
+| Scenario | Can a home survive it? |
+|---|---|
+| Reset during homing, CPU still running | **Yes** — the TO keeps its job. This is the real ITEM-31 bug, and the Reset-path halt is the correct fix |
+| Drive power cycled, CPU still running | **Yes** — the TO keeps pulsing into a dead drive; the axis moves when power returns. Same fix |
+| Full CPU power cycle | **No** — the TO is PLC firmware and re-initialises. There is no pending job to abort |
+
+**So the first-scan halt at `:1258` guards a case that cannot happen.** The Reset-path halt at
+`:1863` is still needed and must stay.
+
+Second consequence: with PTO there is **no feedback path from the drive at all**. `MC_Power` cannot
+be reporting a servo condition — it can only be reporting the technology object or the pulse
+generator it is bound to. Worth checking once: TIA → Device configuration → **Pulse generators
+(PTO/PWM)** — four TOs (X, Z, Tool, Spindle) against a 1214C's four channels is the ceiling. Confirm
+each is enabled, has its own channel, and none of the output addresses collide.
+
+### Decision and sequencing
+
+1. **Now, no download:** Ack once after power-up before the hardware recipe test. Non-negotiable —
+   otherwise the test is run through a blinded display.
+2. **5 minutes, no download:** power-cycle three times, reading `Power_X_ErrorID`, `Power_Z_ErrorID`
+   and `TotalErrorCount` before touching anything each time. 3 of 3 → deterministic → the first-scan
+   halt is the prime suspect. 1 of 3 → electrical, and the halt is exonerated.
+3. **If deterministic:** removing the `:1258` halt is both a root-cause fix and the deletion of code
+   that guards nothing. Cheap and low-risk.
+4. **Narrow alternative if the root cause is not chased:** gate the drive-power detector until the
+   axes have been enabled once. Keeps the detector live for real faults, kills the power-up false
+   positive.
+
+**Rejected: deleting `16#000D` from the error list.** It is the only detector for a genuine
+drive-power loss, and the masking is caused by the *latch*, not by the text being visible.
+Suppressing the message without clearing `DB_Error.Active` would leave the display blinded *and*
+uninformed — strictly worse than today.
+
+**Still unknown:** the S7-1200 meaning of `16#8007`. Every source reached so far has been the S7-1500
+manual, which is the wrong CPU family and reads it as a parameter error ("both JogForward and
+JogBackward TRUE"). On the S7-1200, `16#8000`–`16#8013` are TO/axis errors. The correct wording would
+likely settle this outright.
 
 ---
 
@@ -31,7 +186,7 @@ its TO code. Needs a WinCC text-list row for `0x000E` (`tools/hmi_texts.csv`).
 | `Recipe_LoadedProgram = 0`, `PreScan_Complete = FALSE`, `Axis_X/Z_Homed = FALSE` | No recipe ever loaded, never homed → **not at program end.** Fired at power-up |
 | `Process_State = 0` + `DB_Error.Active = TRUE` | Never reached ERROR, and nothing was acked (Ack clears `Active`) → it fired in STOPPED, before any Start. **This is Test A, and it came back positive** |
 | `fbPowerTool`: `Status TRUE`, `Error FALSE`, `ErrorID 16#0000` | Self-cleared with no `MC_Reset` |
-| No `16#0021`/`0022`/`0023` ever logged | The TO poller never fired → **the TOs were never in error state.** The error existed only on the `MC_Power` instruction |
+| No `16#0021`/`0022`/`0023` ever logged | ~~The TO poller never fired → the TOs were never in error state.~~ **WRONG — corrected 2026-08-24.** The poller at `06_MainProcess.scl:1439` is gated `AND NOT #fbPowerX.Error`, so it is *suppressed* exactly while `MC_Power` reports a fault. Its silence proves nothing either way |
 
 **Leading candidate now:** `MC_Power` called with `Enable = TRUE` (`bDrivesEnable` is TRUE from
 scan 1) while the technology objects are still starting up. Fits all three axes at once, the same
@@ -422,6 +577,12 @@ What the change buys either way:
   startup failure now announces itself as `16#000C` **"Tool drive not ready"** at a known moment,
   instead of as an intermittent `16#000D` at program end. That alone narrows the search.
 
-**Commissioning is not done.** Nothing is compiled or downloaded, and the wire is not landed. See
-`Human_TODO.md` for the order — the code goes in and gets verified on a watch table *before* the
-drive's local enable is removed.
+**Commissioning is not done.** Nothing is compiled or downloaded. **The hardware side IS done** as of
+2026-08-16 — tag created, wire landed on `%Q8.1`, the drive's local enable link removed, HMI button
+added (an earlier revision of this paragraph said the wire was not landed; that was stale). What
+remains is compile/download and re-running Test A. See `Human_TODO.md` §3b.
+
+> **2026-08-24 — read the top section before acting on any of the above.** This fault was never a
+> regression and the tool axis was never singled out; `%Q8.1` will not fix it. The wiring is still
+> correct on its own merits — a servo should not come up enabled before its drive power — so do not
+> undo it. Just stop crediting it with closing this error.
