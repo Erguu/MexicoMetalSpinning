@@ -1196,6 +1196,13 @@ VERSION : 4.0
         bSpindleDecelWait    : Bool;  // TRUE while waiting for decel to complete
         bSpindlePendingStart : Bool;  // Deferred start captured during decel wait
         pendingSpindleSpeed  : Real;  // Speed to apply when timer expires
+        // End-of-program sanding dwell (2026-08-29). Armed at the RUNNING -> COMPLETE
+        // transition, run inside STATE_COMPLETE(100). See DB_MachineConfig.SandTime_s.
+        bSandActive          : Bool;  // TRUE while the sanding dwell is running
+        tonSandDwell         : TON;   // Dwell timer (PT = #sandTimePT)
+        sandSpeedClamped     : Real;  // SandSpeed clamped to DB_Spindle.MinSpeed/MaxSpeed
+        sandTimeSec          : Int;   // SandTime_s clamped to 0..SAND_TIME_MAX_S
+        sandTimePT           : Time;  // #sandTimeSec converted to a Time for tonSandDwell
         elapsedAccum : Time;         // Accumulated elapsed time
         timerRunning : Bool;         // Timer active flag
         elapsedSeconds : DInt;       // Seconds counter
@@ -1243,6 +1250,12 @@ VERSION : 4.0
         STATE_LOCK_EXTEND_WAIT : Int := 17;   // ToolHeadLock engaging before RUNNING
         STATE_LOCK_RETRACT_WAIT : Int := 29;  // ToolHeadLock releasing before tool change or homing
         STATE_ERROR : Int := 999;
+        // End-of-program sanding dwell (2026-08-29): upper bound on the operator-typed
+        // DB_MachineConfig.SandTime_s. 600 s = 10 minutes, far beyond any real sanding
+        // job, and it stops a slipped decimal or a stray keypress from leaving the
+        // spindle turning unattended for hours. The clamp is the reason the config value
+        // can safely be a plain Int the operator types into.
+        SAND_TIME_MAX_S : Int := 600;
     END_CONST
 BEGIN
     // Update HMI displays
@@ -1913,6 +1926,9 @@ BEGIN
             "DB_Cylinder_BackSupport".Cmd_Retract := FALSE;
         END_IF;
         #bWaitingSpindleStop         := FALSE;  // Cancel any pending spindle-stop wait
+        #bSandActive                 := FALSE;  // Cancel the end-of-program sanding dwell.
+                                                // tonSandDwell needs no explicit reset: its IN
+                                                // is this latch, so clearing it resets the timer.
         #capturedSpindleRPM          := 0.0;
         #spindleStopPT               := T#0MS;
         #prevMDIExec                 := FALSE;  // Clear stale MDI edge (button may be held at reset)
@@ -1946,6 +1962,39 @@ BEGIN
     #parkTargetZ := MIN(IN1 := MAX(IN1 := "DB_MachineConfig".SheetLoadPos_Z,
                                    IN2 := "DB_MachineConfig".SoftLimit_MinZ),
                         IN2 := "DB_MachineConfig".SoftLimit_MaxZ);
+
+    // =========================================================================
+    // SANDING DWELL TIME + SPEED -- soft-clamped, single source of truth (2026-08-29)
+    // =========================================================================
+    // DB_MachineConfig.SandTime_s is WHOLE SECONDS as a plain Int, not the Time type the
+    // other timers in that DB use. An S7 Time is milliseconds underneath, and this is the
+    // one timer an operator retypes at the machine -- "10" has to mean ten seconds in a
+    // plain number field, not ten milliseconds. The conversion lives here.
+    //
+    // Clamped to 0..SAND_TIME_MAX_S (600 s) BEFORE the multiply, which is also what keeps
+    // the arithmetic safe: Int tops out at 32767, so an unclamped SandTime_s * 1000 would
+    // overflow. Widen to DInt first anyway -- INT_TO_DINT then multiply, never the reverse.
+    #sandTimeSec := MIN(IN1 := MAX(IN1 := "DB_MachineConfig".SandTime_s, IN2 := 0),
+                        IN2 := SAND_TIME_MAX_S);
+    #sandTimePT  := DINT_TO_TIME(INT_TO_DINT(#sandTimeSec) * 1000);
+
+    // DB_MachineConfig.SandSpeed is typed on the HMI, so clamp it to the machine's real
+    // spindle limits before it can reach DB_Spindle.Cmd_SetSpeed -- a mistyped value must
+    // not be able to command an out-of-range RPM. Same rule as parkTargetX/Z above.
+    //
+    // Computed HERE, before the state machine, for the same reason the park targets are:
+    // STATE_COMPLETE(100) reads this in the same scan it raises #bSpindleStart, and
+    // FB_SpindleControl latches the speed on that start edge. Computed after the CASE it
+    // would hold the PREVIOUS scan's value -- 0.0 on the first scan after download, which
+    // FB_SpindleControl would clamp up to MinSpeed and then hold for the whole dwell.
+    // The restart is currently delayed by SpindleDecelTime, which would mask that; do not
+    // rely on it and do not move this below the CASE.
+    //
+    // A SandSpeed of 0 does NOT arrive here as 0 -- MinSpeed wins the MAX. That is why the
+    // arming test in STATE_RUNNING checks SandSpeed > 0.0 rather than checking this value.
+    #sandSpeedClamped := MIN(IN1 := MAX(IN1 := "DB_MachineConfig".SandSpeed,
+                                        IN2 := "DB_Spindle".MinSpeed),
+                             IN2 := "DB_Spindle".MaxSpeed);
 
     // =========================================================================
     // MAIN STATE MACHINE
@@ -1985,6 +2034,11 @@ BEGIN
             #bSpindlePendingStart := FALSE;
             #bResumeSpeedup      := FALSE;  // Cancel any pending pause spin-up wait
             #bResumeLockChk      := FALSE;  // Cancel any pending pause lock verification
+            #bSandActive         := FALSE;  // Cancel the end-of-program sanding dwell. This is
+                                            // the Stop-button path: STATE_COMPLETE is excluded
+                                            // from the STOPPING branch (see Cmd_Stop handler),
+                                            // so Stop during the dwell lands here directly and
+                                            // #bSpindleStart above kills the spindle.
             // MandrelLock: clear Cmd_Extend (spring retracts on EStop/power-loss).
             // Cmd_Retract is pulsed by bMandrelRetractPulse (set in STATE_STOPPING only — safe path) to
             // force FB out of State 3 — Mode=0 does not auto-retract on Cmd_Extend=FALSE alone.
@@ -2790,13 +2844,26 @@ BEGIN
             END_IF;
 
             // Complete
-            IF #fbRecipeHandler.Done THEN 
+            IF #fbRecipeHandler.Done THEN
                 #State := 100;  // Go to COMPLETE state, not IDLE
                 "DB_HMI".ProgressPercent := 100.0;
                 #bSpindleStart := FALSE;  // Drop RunCmd level on completion
                 #timerRunning := FALSE; // Stop cycle timer
                 #savedLineIndex := -1;  // Clear saved position
                 #savedProgram := -1;
+                // Arm the end-of-program sanding dwell (2026-08-29). This is the ONLY place
+                // it is armed, and State := 100 is assigned nowhere else, so the dwell runs
+                // exactly once per completed program -- it cannot re-trigger while the
+                // machine sits in COMPLETE. Both config values must be > 0: SandTime_s is
+                // the operator's on/off switch, and a SandSpeed of 0 would otherwise be
+                // clamped up to MinSpeed and start the spindle at a speed nobody asked for.
+                //
+                // Tested against the CLAMPED seconds, not the raw config value: a negative
+                // SandTime_s typed by mistake must read as "off", and #sandTimeSec has
+                // already floored it at 0. Testing the raw value would arm the dwell on a
+                // negative number and then run it with PT = T#0S.
+                #bSandActive := (#sandTimeSec > 0)
+                                AND ("DB_MachineConfig".SandSpeed > 0.0);
             END_IF;
             
             // Error
@@ -3233,6 +3300,14 @@ BEGIN
             // drop straight into phase 2 on a leftover spindleStopPT. Level-cleared here every
             // scan while faulted, so no acknowledge path can miss it.
             #bWaitingSpindleStop := FALSE;
+            // Cancel the end-of-program sanding dwell (2026-08-29) and drop the spindle
+            // command it raised. A safety fault (E-Stop, air) during the dwell forces
+            // STATE_ERROR from COMPLETE via the safety block above, and bDrivesEnable
+            // already stops the spindle -- but STATE_COMPLETE is the only block that
+            // clears #bSpindleStart on this path, and it no longer runs once State is 999.
+            // Level-cleared every scan while faulted, so no acknowledge path can miss it.
+            #bSandActive   := FALSE;
+            #bSpindleStart := FALSE;
             // Clear the BackSupport atmosphere valve — de-energises on error.
             // Cmd_Retract is deliberately NOT touched here: the end-of-recipe retract
             // block (bottom of this FB) owns it and needs it held for the retract window.
@@ -3332,10 +3407,37 @@ BEGIN
         // from the last CMD_SPINDLE_ON would keep Start=TRUE through PRE_SCAN and STARTING.
         // prevStart is reset inside FB_SpindleControl on halt Done, so the next CMD_SPINDLE_ON
         // in the new recipe generates a clean startEdge.
-        // bSpindleStop is intentionally NOT cleared here: line 1567 sets it TRUE on Done to
-        // stop the spindle, and clearing it in the same scan (IF State=100 runs same scan as
-        // the Done handler in CASE 20) would cancel the stop command before it is consumed.
-        #bSpindleStart := FALSE;
+        // bSpindleStop is intentionally NOT cleared here. (The old comment claimed the Done
+        // handler in CASE 20 sets it, and that clearing it in the same scan would cancel the
+        // stop. That was already wrong before this change and is corrected 2026-08-29:
+        // #bSpindleStop is set in exactly ONE place, STATE_STOPPING phase 1 -- the completion
+        // path never raises it. It is cleared in STATE_STOPPED. Nothing to do here either way.)
+        //
+        // SANDING DWELL (2026-08-29): the one exception to "bSpindleStart is FALSE in
+        // COMPLETE". While #bSandActive the spindle is deliberately re-started at
+        // DB_MachineConfig.SandSpeed so the operator can sand the part before taking it off.
+        // Armed once at the RUNNING -> COMPLETE transition; see the note there.
+        //
+        // The restart is real, not a hold-over: the recipe's final CMD=21 has already run
+        // FB_RecipeHandler STATE_SPINDLE_STOP_WAIT(58) to completion, which blocks until
+        // DB_Spindle.IsRunning = FALSE. So FB_SpindleControl is idle and prevStart is
+        // clear -- raising bSpindleStart here produces a genuine start edge.
+        //
+        // #bSpindleDecelWait gates the restart: the last CMD=21 set it, and tonSpindleDecel
+        // (SpindleDecelTime, T#2S) clears it. Commanding RunCmd TRUE again inside that
+        // window is exactly what SpindleDecelTime exists to prevent. Costs ~2 s once.
+        IF #bSandActive THEN
+            IF #tonSandDwell.Q THEN
+                // Dwell finished -- stop the spindle and fall back to normal COMPLETE.
+                #bSandActive   := FALSE;
+                #bSpindleStart := FALSE;
+            ELSIF NOT #bSpindleDecelWait THEN
+                "DB_Spindle".Cmd_SetSpeed := #sandSpeedClamped;
+                #bSpindleStart            := TRUE;
+            END_IF;
+        ELSE
+            #bSpindleStart := FALSE;
+        END_IF;
         IF NOT "DB_MachineConfig".Bypass_MandrelLock THEN
             "DB_Cylinder_MandrelLock".Cmd_Extend := FALSE;
             #bMandrelRetractPending := TRUE;    // ITEM-32: deferred — spindle still decelerating at program end; wait SpindleStopSafeTime
@@ -3343,7 +3445,17 @@ BEGIN
         // De-energise the atmosphere valve. Cmd_Retract is left alone -- the
         // end-of-recipe retract block at the bottom of this FB owns it.
         "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
-        "DB_HMI".StatusMsg    := 'Program Complete';
+        // Status text. The sanding variant is deliberately explicit that the spindle is
+        // TURNING -- 'Program Complete' on a screen above a spinning part is how somebody
+        // reaches in. English only (ITEM-55); the Spanish comes from a WinCC text list, and
+        // its key for this one is DB_HMI.SandActive, NOT MachineState -- MachineState is 100
+        // for both halves of COMPLETE and cannot tell them apart. Keep the wording in step
+        // with the two 'sanding' rows in tools/hmi_texts.csv.
+        IF #bSandActive THEN
+            "DB_HMI".StatusMsg := 'Sanding - SPINDLE TURNING';
+        ELSE
+            "DB_HMI".StatusMsg := 'Program Complete';
+        END_IF;
         // Single-writer: ErrorText is owned by FB_AlarmManager. Completion is a status,
         // not an error -- StatusMsg above already announces it ('Done!' write removed).
         // DB_HMI.CycleCount and its #bCycleCountDone one-shot were DELETED 2026-08-15.
@@ -3363,6 +3475,23 @@ BEGIN
         // that no other meaning is wanted. Start / Restart below are the live re-run path.
         IF #fbInputs.Cmd_Start OR #restartEdge THEN
             #bResetRecipe := TRUE;      // Reset FB_RecipeHandler (state 99→0) before re-run
+            // Start cancels the sanding dwell (2026-08-29). The first two lines are required:
+            // nothing between here and STATE_RUNNING clears bSpindleStart, so leaving it
+            // TRUE would carry the sanding speed into RECIPE_LOAD / PRE_SCAN / STARTING and
+            // spin the mandrel while the operator loads the next sheet in SHEET_WAIT.
+            //
+            // bSpindleDecelWait is armed only if the dwell was actually turning the spindle.
+            // Dropping RunCmd and then letting the new recipe's first CMD=20 raise it again is
+            // precisely the case SpindleDecelTime guards, and this is the one path that can
+            // reach a CMD=20 quickly after a stop the recipe handler did not issue. In practice
+            // SHEET_WAIT's two-button confirm makes it much longer than T#2S, so this is cheap
+            // insurance rather than an observed fault -- the flag self-clears via tonSpindleDecel
+            // and, with bSpindlePendingStart FALSE, expiry does nothing else.
+            IF #bSandActive THEN
+                #bSpindleDecelWait := TRUE;
+            END_IF;
+            #bSandActive   := FALSE;
+            #bSpindleStart := FALSE;
             #State := STATE_RECIPE_LOAD; // Restart/Start = immediate re-run, keeps drives on
         END_IF;
     END_IF;
@@ -3543,6 +3672,19 @@ BEGIN
     // Pause resume spin-up wait: counts while bResumeSpeedup (Continue pressed in PAUSED).
     // IN drops to FALSE on reset/stop/error via bResumeSpeedup clears → ET resets, no stale fire.
     #tonResumeSpeedup(IN := #bResumeSpeedup, PT := "DB_MachineConfig".SpindleResumeSpeedupTime);
+    // End-of-program sanding dwell (2026-08-29). IN is gated on #bSpindleStart, not on
+    // #bSandActive alone, so the clock only runs while the spindle is actually commanded --
+    // the operator gets the full SandTime_s of turning part, not SandTime_s minus the
+    // SpindleDecelTime window that STATE_COMPLETE waits out before restarting.
+    // Also gated on E-Stop, same as tonSheetHolderHold: an E-Stop mid-dwell pauses the
+    // timer rather than burning it with the drive dead. (The safety block normally forces
+    // STATE_ERROR first, which clears #bSandActive outright; this is the belt-and-braces
+    // case where the E-Stop is bypassed but the drive is down for another reason.)
+    // PT comes from #sandTimePT (clamped seconds -> Time, computed before the CASE), never
+    // straight from the config -- SandTime_s is an Int of seconds, not a Time.
+    #tonSandDwell(IN := #bSandActive AND #bSpindleStart
+                        AND (#EStop_OK OR "DB_HMI".Bypass_EStop),
+                  PT := #sandTimePT);
     IF #tonSpindleDecel.Q THEN
         #bSpindleDecelWait := FALSE;
         IF #bSpindlePendingStart THEN
@@ -4156,6 +4298,10 @@ BEGIN
     // Pair it with DB_Diagnostic.Recipe_LoadedProgram on the HMI: slot number + name +
     // loaded-slot is enough for an operator to catch a wrong selection before pressing Start.
     "DB_HMI".LoadedProgramName           := "DB_SelectedRecipe".Header.sName;
+    // Sanding dwell in progress (2026-08-29). Continuous mirror of the FB_Process latch,
+    // so it appears in no reset path by design -- it follows #bSandActive to FALSE on
+    // every exit (dwell expiry, Start, Stop, hard reset, error).
+    "DB_HMI".SandActive                  := #bSandActive;
 
     // Checksum pair, for the HMI (2026-08-14). Same continuous-mirror discipline as
     // the name above: written every scan, in no reset path, always reporting what is

@@ -27,6 +27,8 @@ Open the DB in the TIA project tree, find the tag, tick the **Retain** column.
 | `DB_MachineConfig` | `SheetLoadPos_X` | Operator-typed sheet-load park position. `FC_LoadConfig` deliberately does **not** write it, so a non-retentive DB loses it on every restart (ITEM-50) | `200.0` |
 | `DB_MachineConfig` | `SheetLoadPos_Z` | Same | `170.0` |
 | `DB_MachineConfig` | `SheetLoadTol` | ± window counted as "at the park position" | `2.0` |
+| `DB_MachineConfig` | `SandTime_s` | End-of-program sanding dwell (2026-08-29), whole seconds. Operator-typed; `FC_LoadConfig` deliberately does **not** write it. Without the tick the feature silently switches **itself off** at every power cycle — `0` is the off value — and the operator finds the spindle no longer runs at the end of a part | `0` |
+| `DB_MachineConfig` | `SandSpeed` | Same. Reverting to `0.0` also disables the dwell (the arming test requires `> 0`), so the failure mode is "feature quietly gone", not "spindle at the wrong speed" | `0.0` |
 | `DB_Production` | `TotalStarted` | Production counting is worthless if it zeroes overnight | `0` |
 | `DB_Production` | `TotalOK` | Same | `0` |
 | `DB_Production` | `TotalNOK` | Same | `0` |
@@ -83,6 +85,9 @@ compare against. Verify by observation instead:
 2. Read `DB_MachineConfig.SheetLoadPos_X` / `_Z`. If they read `200.0` / `170.0`, the ticks did not
    survive — re-tick and re-enter.
 3. Read `DB_Production.TotalOK`. If it is `0` after a shift that made parts, same conclusion.
+4. Read `DB_MachineConfig.SandTime_s`. If it is `0` after the operator set a sanding time, same
+   conclusion. This one has no other symptom — the machine simply stops sanding, and an operator is
+   more likely to report "the spindle doesn't run at the end any more" than to suspect retentivity.
 
 Step 2 is worth doing any time you are connected to the machine anyway.
 

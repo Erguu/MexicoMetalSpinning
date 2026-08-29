@@ -511,6 +511,31 @@ CAM post-processors can drop the trailing `G0 X0 Z0`; the PLC parks the axes its
 | **Sheet Load Z** | `DB_MachineConfig.SheetLoadPos_Z` | Real | 170.0 | Park Z target for sheet loading (mm) |
 | **Sheet Load Tol** | `DB_MachineConfig.SheetLoadTol` | Real | 2.0 | ± window counted as "already parked" (mm). Outside it, the PLC issues a park move — it never silently skips |
 | **Fast Cycle Mode** | `DB_MachineConfig.AlwaysHomeOnAutoStart` | Bool | FALSE | **Inverted meaning:** TRUE = home every cycle (legacy). FALSE = skip homing when safe. Show as a "Home every cycle" checkbox, or invert it in the HMI |
+| **Sanding Time** | `DB_MachineConfig.SandTime_s` | **Int, SECONDS** | **0** | **New 2026-08-29.** How long the spindle keeps turning after a program finishes, so the operator can sand the part before removing it. **`0` = feature off.** Whole seconds — type `10` for ten seconds. Clamped by the PLC to 0..600 s |
+| **Sanding Speed** | `DB_MachineConfig.SandSpeed` | Real | **0.0** | RPM during the sanding dwell. `0.0` also disables it. Clamped by the PLC to `DB_Spindle.MinSpeed` (120) / `MaxSpeed` (3000) — a mistyped value cannot command an out-of-range RPM |
+| **Sanding active** | `DB_HMI.SandActive` | Bool | — | **read-only.** TRUE while the dwell is running. See the safety note below |
+
+> **Units.** `SandTime_s` is a plain `Int` of **whole seconds**, deliberately not the `Time` type
+> the other machine timers use. An S7 `Time` is milliseconds underneath, so an operator typing `10`
+> into a numeric field would get 10 ms and conclude the feature was broken. Bind this to an ordinary
+> integer I/O field labelled "seconds" — no Time formatting needed. The PLC clamps it to 0..600 s
+> and does the conversion (`06_MainProcess.scl`, `sandTimePT`, computed before the state machine).
+>
+> **Sanding dwell (2026-08-29).** Both values must be > 0 for the dwell to run. The spindle is
+> **re-started**, not held over — the recipe's own `CMD=21` has already stopped it and the PLC waits
+> out `SpindleDecelTime` (~2 s) before spinning back up, so expect a short pause before the part
+> turns again. That is inherent, not a fault.
+>
+> **Display `DB_HMI.SandActive` prominently.** `MachineState` is 100 ("Program Complete") for the
+> whole dwell, so without that lamp the screen reads *finished* while the spindle is turning —
+> which is exactly the moment an operator reaches in. `StatusMsg` says
+> `'Sanding - SPINDLE TURNING'`; the Spanish text list for it is keyed on `SandActive`, **not** on
+> `MachineState` (see the `sanding` rows in `tools/hmi_texts.csv`).
+>
+> **SAFETY.** The door interlock does **not** stop this — `Bypass_Door` is forced TRUE on every
+> power-up on this machine. Only **E-Stop** and the **Stop button** drop the spindle during the
+> dwell (Stop goes straight to STOPPED from COMPLETE). Commission `SandSpeed` low: it is a
+> hand-sanding speed, not a cutting speed.
 
 > **Precedence:** `AlwaysHomeOnAutoStart` can only ever cause *more* homing. It can never suppress
 > a required re-home — an E-Stop, a fault, a hard reset or a power-up always forces one.
@@ -521,7 +546,7 @@ CAM post-processors can drop the trailing `G0 X0 Z0`; the PLC parks the axes its
 > HMI-editable field in it reverted to its start value on a power cycle — the sheet-load park
 > position typed by the operator was silently lost and the machine came back parking at 200.0 /
 > 170.0. The keyword is now removed, **but the DB is not automatically retentive**: tick **Retain**
-> on `SheetLoadPos_X`, `SheetLoadPos_Z` and `SheetLoadTol` in the TIA DB editor. An SCL source
+> on `SheetLoadPos_X`, `SheetLoadPos_Z`, `SheetLoadTol`, `SandTime_s` and `SandSpeed` in the TIA DB editor. An SCL source
 > import cannot set per-tag retentivity, so **re-check those boxes after every import of
 > `02_DataBlocks.scl`**. Changing retentivity re-initialises the DB on the next download — re-enter
 > the park position on the HMI once afterwards.

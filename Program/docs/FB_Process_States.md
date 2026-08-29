@@ -1,7 +1,9 @@
 # FB_Process State Machine Reference
 
 **Source file:** `Program/06_MainProcess.scl`
-**Last updated:** 2026-08-25 — **PAUSED(25): resume now confirms the ToolHeadLock before spinning the spindle back up.** `Btn_Continue` no longer goes straight to the spin-up wait; it runs a phase-1 check (`bResumeLockChk`) using the same three-way test and the same `16#0012` code as STATE_LOCK_EXTEND_WAIT(17), and faults to ERROR if the lock never confirms. Nothing re-checked the lock on resume before this, and the manual cylinder buttons are live while paused. Not compiled. See STATE 25 below.
+**Last updated:** 2026-08-29 — **COMPLETE(100): end-of-program sanding dwell.** The spindle is deliberately **re-started** at `DB_MachineConfig.SandSpeed` and held for `SandTime_s` **whole seconds** so the operator can sand the part before removing it. It has to be a restart: the CAM's final `CMD=21` plus `FB_RecipeHandler` state 58 (which blocks on `IsRunning = FALSE`) guarantee the spindle is already stopped on entry to COMPLETE. `SandTime_s := 0` is the off switch and is the download default, so nothing changes until an operator types a time. The time is an `Int` of seconds, **not** a `Time` — an S7 `Time` is milliseconds underneath and this is the one timer an operator retypes at the machine. Both values are HMI-typed and need a **Retain** tick. **Compiles; end-to-end behaviour verified in PLCSIM 2026-08-30. Not yet run on the machine.** See STATE 100 below.
+
+**Prior update:** 2026-08-25 — **PAUSED(25): resume now confirms the ToolHeadLock before spinning the spindle back up.** `Btn_Continue` no longer goes straight to the spin-up wait; it runs a phase-1 check (`bResumeLockChk`) using the same three-way test and the same `16#0012` code as STATE_LOCK_EXTEND_WAIT(17), and faults to ERROR if the lock never confirms. Nothing re-checked the lock on resume before this, and the manual cylinder buttons are live while paused. Not compiled. See STATE 25 below.
 
 **Prior update:** 2026-08-17 — **MANUAL(5): the ToolHeadLock interlock now also covers the turret-step buttons.** `Btn_ToolStepCW`/`Btn_ToolStepCCW` were passed to `FB_ManualMode` ungated and their state-0 branches never test `SelectedAxis`, so the one hole left in the 2026-08-14 interlock was the most direct way to rotate the turret. Gated on `#bToolLockEngaged` alone, like `HomeAll`. Not compiled. See STATE 5 below.
 
@@ -168,7 +170,7 @@ added so neither failure can ever be silent again: the loader **poisons** `DB_Se
 | 29  | LOCK_RETRACT_WAIT  | "Lock releasing..."                  | STOPPING, RUNNING (tool change)         | 0 (STOPPED) or 30 (TOOL_CHANGE)                            |
 | 30  | TOOL_CHANGE        | "Tool Change"                        | LOCK_RETRACT_WAIT (bLockAfterHoming=F)  | 35 (TOOL_WAIT)                                             |
 | 35  | TOOL_WAIT          | "Tool Change Wait"                   | TOOL_CHANGE                             | 17 (LOCK_EXTEND_WAIT), 999 (ERROR)                         |
-| 100 | COMPLETE           | "Program Complete"                   | RUNNING                                 | 12 (PRE_SCAN)                                              |
+| 100 | COMPLETE           | "Program Complete" / "Sanding - SPINDLE TURNING" | RUNNING                     | 12 (PRE_SCAN)                                              |
 | 999 | ERROR              | "ERROR"                              | Any state on fault                      | 0 (STOPPED)                                                |
 
 ---
@@ -326,6 +328,8 @@ Cmd_Stop vetoes RunCmd directly — spindle decelerates immediately when Stop is
 | `tonSheetHolderRetract` | `DB_MachineConfig.CylSheetHolder_RetractTime` | T#1S | STATE_SHEET_WAIT phase 3: open-loop wait before advancing to LOCK_EXTEND_WAIT |
 | `tonSheetHolderHold` | `DB_MachineConfig.CylSheetHolder_RetractTime` (same value) | T#1S | **Any state.** How long `Sol_B` (`%Q12.3`) is energised for a SheetHolder retract before the latch drops and both coils go off. Gated on E-Stop OK. Must be ≥ the real retract stroke time (ITEM-46). Raised from T#0.5S on 2026-08-15 — the 0.5 s was a leftover from the 5/2 spring era, where the spring did the work and the coil time did not matter |
 | `tonBSEndRetract` | `DB_MachineConfig.CylBackSupport_EndRetractTime` | T#2S | Terminal states (STOPPED / ERROR / COMPLETE): how long BackSupport `Sol_B` is held on the end-of-recipe retract before all coils drop. Gated on E-Stop OK |
+| `tonSandDwell` | `DB_MachineConfig.SandTime_s` (Int, **seconds**, clamped 0..600 and converted to `#sandTimePT`) | **0 = off** | STATE_COMPLETE: how long the spindle is re-started at `SandSpeed` so the operator can sand the part. `IN` is gated on `bSpindleStart` (not on the latch alone) so the clock only runs while the part is actually turning, and on E-Stop OK. HMI-editable, **Retain** — not written by `FC_LoadConfig` |
+| `SandSpeed` | `DB_MachineConfig` | **0.0 = off** | STATE_COMPLETE: RPM during the dwell, clamped to `DB_Spindle.MinSpeed/MaxSpeed` before the CASE. Commission it **low** — the door interlock is bypassed on this machine, so nothing but E-Stop and Stop protects a hand on the part. HMI-editable, **Retain** |
 | `tonDriveReady` | Hardcoded in FB_Process | T#3S | STATE_STARTING: timeout if drives do not report ready |
 | `tonHomingTimeout` | Hardcoded in FB_Process | T#120S | STATE_HOMING, STATE_STOP_GOHOME: combined timeout for all three axes |
 | `AlwaysHomeOnAutoStart` | `DB_MachineConfig` | **FALSE** | STATE_STARTING: TRUE = home on every auto start (legacy). FALSE = fast cycle mode. HMI-editable. **Never overrides `bRequireHoming`.** |
@@ -1259,23 +1263,61 @@ the detection zone and vibration flickers the sensor FALSE:
 > Handled as `IF #State = 100 THEN` block **outside** the main CASE statement.
 
 **Runs every scan while in this state:**
-- `bSpindleStart = FALSE` (drops RunCmd — spindle decelerates)
+- `bSpindleStart = FALSE` (drops RunCmd — spindle decelerates) — **unless the sanding dwell is running, see below**
 - `MandrelLock.Cmd_Extend = FALSE`
 - `bMandrelRetractPulse = TRUE` (one-shot: releases MandrelLock, allows sheet removal)
 - `BackSupport.SolB_Cmd41 = FALSE`, `SolAtmo_Cmd = FALSE` (clears CMD=41 overrides)
-- HMI StatusMsg: "Program Complete" (the old ErrorText "Done!" write was removed 2026-07-02 — ErrorText is owned by FB_AlarmManager)
+- HMI StatusMsg: "Program Complete", or "Sanding - SPINDLE TURNING" during the dwell (the old ErrorText "Done!" write was removed 2026-07-02 — ErrorText is owned by FB_AlarmManager)
 - Production counter logged (TotalOK++, history ring buffer updated) on state entry edge
 
 **Transitions:**
 
 | Condition | Next State |
 |-----------|-----------|
-| `Cmd_Start` OR `restartEdge` | `bResetRecipe = TRUE` → **11** RECIPE_LOAD |
+| `Cmd_Start` OR `restartEdge` | `bResetRecipe = TRUE`, `bSandActive = FALSE`, `bSpindleStart = FALSE` → **11** RECIPE_LOAD |
 | `Cmd_Reset` | Same as above — but unreachable in practice: `Cmd_Reset` raises `bDoHardReset`, which sets `State := STOPPED` before this CASE runs, so `IF #State = 100` is already false |
+
+### End-of-program sanding dwell (2026-08-29; PLCSIM-verified 2026-08-30, not yet on hardware)
+
+So the operator can sand the part before removing it, COMPLETE **restarts the spindle** at
+`DB_MachineConfig.SandSpeed` and holds it for `DB_MachineConfig.SandTime_s` seconds. Both values are
+HMI-typed and **Retain**; `SandTime_s := 0` (the download default) is the off switch and
+leaves this state behaving exactly as it did before.
+
+**It is a restart, not a hold-over, and it cannot be anything else.** The CAM emits `CMD=21`
+(Spindle OFF) as the second-to-last recipe line, and `FB_RecipeHandler` STATE_SPINDLE_STOP_WAIT(58)
+**blocks** on `DB_Spindle.IsRunning = FALSE` before it will advance to the `CMD=99` END marker.
+The spindle is therefore already stopped on entry to COMPLETE, and the dwell costs one VFD
+ramp-down + ramp-up (~2 s) before the part turns again. The rejected alternative was suppressing
+the final `CMD=21` — a recipe has **several** of them (program 1 has four: lines 51, 60, 69, 70),
+so picking the right one needs a pre-scan pass whose failure mode is a spindle left running.
+
+| Element | Where | Note |
+|---------|-------|------|
+| `bSandActive` | armed at the `fbRecipeHandler.Done` transition in RUNNING(20) | The **only** arming site, and `State := 100` is assigned nowhere else — so the dwell runs exactly once per completed program and cannot re-trigger while the machine sits in COMPLETE |
+| arming test | `#sandTimeSec > 0 AND SandSpeed > 0.0` | Both required. `SandSpeed = 0` would otherwise be clamped **up** to `DB_Spindle.MinSpeed` and start the spindle at a speed nobody asked for. Tested against the **clamped** seconds, not the raw config — a negative `SandTime_s` must read as off, not arm the dwell with `PT = T#0S` |
+| `sandTimeSec` / `sandTimePT` | computed **before** the CASE, next to `sandSpeedClamped` | `SandTime_s` is an `Int` of **whole seconds**, deliberately not the `Time` type the other config timers use: an S7 `Time` is milliseconds underneath, and an operator typing `10` into a plain numeric field would get 10 ms and conclude the feature was broken. Clamped to `0..SAND_TIME_MAX_S` (600 s, a CONST) **before** the `× 1000`, which is also what keeps the arithmetic safe — `Int` tops out at 32767. Widen with `INT_TO_DINT` first, never multiply in `Int`. Do not "tidy" this back to a `Time` |
+| `sandSpeedClamped` | computed **before** the CASE, next to `parkTargetX/Z` | Must stay there. COMPLETE reads it in the same scan it raises `bSpindleStart`, and FB_SpindleControl latches speed on that edge; computed after the CASE it would hand over the previous scan's value |
+| restart gate | `NOT bSpindleDecelWait` | The final `CMD=21` set it; `tonSpindleDecel` (`SpindleDecelTime`, T#2S) clears it. Restarting inside that window is exactly what `SpindleDecelTime` exists to prevent |
+| `tonSandDwell` | `IN := bSandActive AND bSpindleStart AND EStop_OK` | Gated on `bSpindleStart`, not on `bSandActive` alone, so the operator gets the full `SandTime_s` of *turning part* rather than `SandTime_s` minus the decel window |
+| `DB_HMI.SandActive` | continuous mirror at the bottom of FB_Process | In no reset path by design. It is the WinCC text-list key for the sanding banner — `MachineState` is 100 for **both** halves of COMPLETE and cannot tell them apart |
+
+**Reset paths (all four checkpoints):** `bDoHardReset` clears `bSandActive`; STATE_STOPPED clears it
+(this is the **Stop-button** path — COMPLETE is excluded from the STOPPING branch in the `Cmd_Stop`
+handler, so Stop during the dwell lands in STOPPED directly and its `bSpindleStart := FALSE` kills
+the spindle); STATE_ERROR clears both `bSandActive` and `bSpindleStart`; and the Start/Restart branch
+clears both before handing off to RECIPE_LOAD. `tonSandDwell` needs no explicit reset — its `IN` is
+the latch.
+
+> **SAFETY — read before commissioning `SandSpeed`.** This is the one feature that invites a hand
+> near a turning part. The **door interlock does not protect it**: `FC_LoadConfig` forces
+> `Bypass_Door := TRUE` on every power-up on this machine. What does stop it is E-Stop (drops
+> `bDrivesEnable`, which is FB_SpindleControl's `Enable`) and the Stop button. Commission
+> `SandSpeed` **low** — it is a hand-sanding speed, not a cutting speed.
 
 > `DB_HMI.CycleCount` used to be incremented here. It was **deleted 2026-08-15** — a duplicate of `DB_Production.TotalOK`, and broken (its one-shot cleared only on a hard reset, so it counted once per Reset press rather than once per part). `TotalOK` is incremented by the COMPLETE edge in the PRODUCTION LOGGING block instead.
 
-> `bSpindleStop` is intentionally NOT cleared in COMPLETE so the stop command propagates to FB_SpindleControl before the next run's SpindleOn.
+> `bSpindleStop` is intentionally NOT cleared in COMPLETE. **Corrected 2026-08-29:** the old note here said the Done handler in CASE 20 sets it and that clearing it would cancel the stop. That was wrong — `bSpindleStop` is set in exactly one place, STATE_STOPPING phase 1, and the completion path never raises it. It is cleared in STATE_STOPPED. Nothing to do here either way.
 
 ---
 

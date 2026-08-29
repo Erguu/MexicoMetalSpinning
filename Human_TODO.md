@@ -226,8 +226,8 @@ exist.
 
 - [ ] **Tick the Retain boxes.** Full list and reasons: **`Program/docs/RETAINED_TAGS.md`**.
       Source import clears them every single time. There is no way to set them from code.
-      Short version — tick these 8:
-      `DB_MachineConfig`: `SheetLoadPos_X`, `SheetLoadPos_Z`, `SheetLoadTol`
+      Short version — tick these 10:
+      `DB_MachineConfig`: `SheetLoadPos_X`, `SheetLoadPos_Z`, `SheetLoadTol`, `SandTime_s`, `SandSpeed`
       `DB_Production`: `TotalStarted`, `TotalOK`, `TotalNOK`, `TotalStopped`, `TotalAborted`
       Do **not** tick `CurrentActive` / `CurrentProgram` / `CurrentStartTime`.
 
@@ -235,6 +235,28 @@ exist.
 
 - [ ] **Set up the WinCC text lists** for Spanish (`tools/textlists/*.tsv`).
       Until then Spanish messages are simply blank. English still works.
+
+---
+
+### 🔧 Sanding dwell — new 2026-08-29
+
+The spindle now runs on for a set time after a program finishes, so the operator can sand
+the part. **It ships OFF.** Nothing changes until you type both values.
+
+- [ ] **Type `SandTime_s` (SECONDS) and `SandSpeed` (RPM) on the HMI.** Both must be above zero
+      or nothing happens. `SandTime_s` is a plain whole number of seconds: type `10` for ten
+      seconds. Anything over 600 is capped at 600.
+      Start `SandSpeed` LOW. This is a hand-sanding speed, not a cutting speed.
+
+- [ ] **Expect a ~2 second pause** between the program ending and the spindle spinning back up.
+      That is the VFD ramp. It is not a fault. The spindle has to stop first — the recipe's own
+      last line turns it off and the PLC waits for zero before it can do anything else.
+
+- [ ] **Add the "SANDING — SPINDLE TURNING" lamp to the HMI** (`DB_HMI.SandActive`, read-only).
+      Without it the screen says "Program Complete" while the part is still turning.
+
+> ⚠️ The door does **not** stop the spindle during the dwell. `Bypass_Door` is forced TRUE
+> every power-up on this machine. Only **E-Stop** and the **Stop button** stop it.
 
 ---
 ---

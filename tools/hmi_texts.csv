@@ -81,6 +81,8 @@ status,30,30,Tool Change,Cambio de Herramienta
 status,35,35,Tool Change Wait,Esperando cambio...
 status,100,100,Program Complete,Programa Completado
 status,999,999,ERROR,ERROR
+sanding,0,0,Program Complete,Programa Completado
+sanding,1,1,Sanding - SPINDLE TURNING,Lijando - HUSILLO GIRANDO
 mdi,1,1,Executed,Ejecutado
 mdi,2,2,Unknown/blocked CMD,CMD desconocido/no permitido
 mdi,3,3,CMD40: use Param 0 or 1,CMD40: use Param 0 o 1

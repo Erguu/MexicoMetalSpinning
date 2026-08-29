@@ -165,6 +165,21 @@ NON_RETAIN
         WarningText : String[70];   // Warning message text -- English (E-Stop bypass or operator prompts only)
         ResumeLine : Int := -1;     // Saved recipe line for warm restart (-1 = none). Set in STATE_ERROR, cleared on Btn_Restart.
 
+        // End-of-program sanding dwell in progress (2026-08-29). PLC-written, read-only
+        // for the HMI. TRUE = the program has finished AND the spindle has been deliberately
+        // restarted at DB_MachineConfig.SandSpeed so the operator can sand the part.
+        //
+        // Display this prominently. MachineState is 100 ('Program Complete') throughout the
+        // dwell, so without this flag the screen says the machine is finished while the
+        // spindle is turning -- which is exactly the moment an operator reaches in.
+        // It is the key for the sanding banner in the WinCC text lists; MachineState cannot
+        // serve, because it does not change when the dwell starts or ends.
+        //
+        // No reset-path entry needed: it is a continuous mirror of the FB_Process latch,
+        // written every scan next to the DB_Diagnostic mirrors at the bottom of FB_Process,
+        // so it follows the latch to FALSE on every exit path.
+        SandActive : Bool;
+
         // ===========================================================
         // SPANISH TEXT MIRRORS -- REMOVED 2026-08-10 (ITEM-55, stage 1).
         // StatusMsg_ES / ErrorText_ES / ErrorDetail_ES / WarningText_ES are gone,
@@ -264,7 +279,7 @@ END_DATA_BLOCK
 //
 // MANUAL STEP REQUIRED IN TIA PORTAL AFTER IMPORTING THIS SOURCE:
 //   Open DB_MachineConfig and tick "Retain" on -- at minimum --
-//       SheetLoadPos_X, SheetLoadPos_Z, SheetLoadTol
+//       SheetLoadPos_X, SheetLoadPos_Z, SheetLoadTol, SandTime_s, SandSpeed
 //   The other operator-owned values have the same problem and are worth ticking too:
 //       SoftLimit_MinX/MaxX/MinZ/MaxZ, SafePos_X/Z, PauseRetract_X/Z/Vel,
 //       HomeOffset_X/Z
@@ -410,6 +425,44 @@ VERSION : 0.3
         // DB_Spindle.MaxSpeed"; that was misleading and is why this note exists. 2026-08-16.)
         SpindleMaxRPM       : Real := 2400.0;  // RPM -- denominator for the proportional wait only
         SpindleStopSafeTime : Time := T#20S;   // Full-speed decel safety margin (tune on-site)
+
+        // ─── HMI-EDITABLE: End-of-program sanding dwell (2026-08-29)
+        // After a program finishes, STATE_COMPLETE(100) restarts the spindle at SandSpeed
+        // and holds it for SandTime_s seconds so the operator can sand the part before removing it.
+        //
+        // WHY IT IS A RESTART AND NOT A "KEEP RUNNING": by the time the machine reaches
+        // STATE_COMPLETE the spindle is already fully stopped, and it cannot be otherwise.
+        // The CAM emits CMD=21 (Spindle OFF) as the second-to-last recipe line, and
+        // FB_RecipeHandler STATE_SPINDLE_STOP_WAIT(58) BLOCKS on DB_Spindle.IsRunning=FALSE
+        // before it will advance to the CMD=99 END marker. So the dwell necessarily begins
+        // after a stop, and costs the VFD's ramp-down + ramp-up (~2 s) before the part turns
+        // again. Do not "optimise" that away by suppressing the final CMD=21 -- a recipe has
+        // several CMD=21 lines (program 1 has four: 51, 60, 69, 70) and picking the right one
+        // needs a pre-scan pass whose failure mode is a spindle left running.
+        //
+        // BOTH must be > 0 for the dwell to arm. SandTime_s := 0 (the download default)
+        // is the OFF switch and leaves end-of-program behaviour exactly as it was.
+        //
+        // UNITS: SandTime_s is WHOLE SECONDS as a plain Int -- deliberately NOT the Time
+        // type every other timer in this DB uses. An S7 Time is milliseconds underneath,
+        // so an operator typing "10" into a numeric field would get 10 ms and conclude the
+        // feature is broken. The other timers are commissioning values a technician sets
+        // once from the TIA editor; this one is retyped at the machine per job, so the
+        // units have to survive a plain number field. FB_Process clamps it to
+        // 0..SAND_TIME_MAX_S (600 s) and converts to a Time PT.
+        //
+        // SAFETY: this is the one feature that invites a hand near a turning part. The door
+        // interlock does NOT protect it -- FC_LoadConfig forces Bypass_Door := TRUE on every
+        // power-up on this machine. What does stop it: E-Stop (drops bDrivesEnable, which is
+        // FB_SpindleControl's Enable) and the Stop button (STATE_COMPLETE is excluded from
+        // the STOPPING path, so Stop goes straight to STOPPED and STOPPED clears the spindle).
+        // Commission SandSpeed LOW -- it is a hand-sanding speed, not a cutting speed.
+        //
+        // Deliberately NOT written by FC_LoadConfig, so OB100 does not fight the HMI.
+        // MUST be marked Retain in the TIA DB editor -- see the block header. Without the
+        // Retain tick these two revert to the start values below on every power cycle.
+        SandTime_s : Int  := 0;        // SECONDS. 0 = feature off. Spindle run time at end of program. Clamped 0..600.
+        SandSpeed  : Real := 0.0;      // RPM during the dwell. Clamped to DB_Spindle.MinSpeed/MaxSpeed.
 
         // ─── Cylinder stroke wait times (open-loop: tuned to physical stroke duration)
         // These are deliberate waits with no sensor feedback. Set slightly above measured stroke time.

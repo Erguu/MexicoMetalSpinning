@@ -145,6 +145,49 @@ New FB_Process VARs `bResumeSpeedup : Bool` and `tonResumeSpeedup : TON` added f
 
 **Result: PASS** (no gaps; new flag/timer covered on all four reset checkpoints)
 
+**Findings — 2026-08-29 (end-of-program sanding dwell, STATE_COMPLETE):**
+
+New FB_Process VARs `bSandActive : Bool`, `tonSandDwell : TON`, `sandSpeedClamped : Real` for the
+COMPLETE(100) sanding dwell (`DB_MachineConfig.SandTime_s` / `SandSpeed`, both default off).
+This is the first thing that **commands a physical output from STATE_COMPLETE** rather than
+clearing one, so all four checkpoints matter more than usual here.
+
+- [x] **Checkpoint 1 — `bDoHardReset` block:** `#bSandActive := FALSE` added next to
+      `#bWaitingSpindleStop`. `bSpindleStart` needs no entry here: the block sets
+      `State := STATE_STOPPED`, and STOPPED clears it every scan.
+- [x] **Checkpoint 2 — recipe reset (`05_RecipeHandler.scl`):** not applicable. `bSandActive` is
+      FB_Process-only and no CMD handler writes it.
+- [x] **Checkpoint 3 — `STATE_STOPPED (0)`:** `#bSandActive := FALSE` added alongside the spindle
+      flags. **This is the Stop-button path**, not a fallback: the `Cmd_Stop` handler excludes
+      `#State = 100` from the STOPPING branch, so Stop pressed during the dwell goes *straight* to
+      STOPPED, and the existing `#bSpindleStart := FALSE` two lines up kills the spindle in the
+      same scan. Verified against `06_MainProcess.scl` `Cmd_Stop` handler.
+- [x] **Checkpoint 4 — `STATE_ERROR (999)`:** `#bSandActive := FALSE` **and**
+      `#bSpindleStart := FALSE` added. The second one is the non-obvious half and is the reason
+      this entry exists: STATE_COMPLETE is the only block that drives `bSpindleStart` on this path,
+      and it stops running the moment `State` becomes 999 — so without an explicit clear the flag
+      would stay latched TRUE from the dwell until the operator's Ack reached STOPPED. The spindle
+      is physically dead throughout (`Enable := bDrivesEnable` drops on error), so this is a latched
+      *command*, not a latched output, but the rule is "no actuator override may stay latched in
+      ERROR" and it now does not. Level-cleared every scan, so no acknowledge path can miss it.
+- [x] **Start / Restart from COMPLETE:** clears both `bSandActive` and `bSpindleStart` before
+      `State := STATE_RECIPE_LOAD`. Required — nothing between RECIPE_LOAD and RUNNING clears
+      `bSpindleStart`, so a leftover TRUE would carry the sanding speed through PRE_SCAN and
+      STARTING and spin the mandrel while the operator loads the next sheet in SHEET_WAIT.
+- [x] **`tonSandDwell`:** `IN := #bSandActive AND #bSpindleStart AND (EStop_OK OR Bypass_EStop)`.
+      Every clear above drives `IN` FALSE → `ET` resets, no stale fire. Called unconditionally
+      every scan. The E-Stop term matches `tonSheetHolderHold`: an E-Stop mid-dwell pauses the
+      clock rather than burning it with the drive dead.
+- [x] **`sandSpeedClamped`:** computed unconditionally before the CASE, every scan. No reset path
+      needed — it is a pure function of config, never a latch.
+- [x] **`DB_HMI.SandActive`:** continuous mirror of `bSandActive` written every scan next to
+      `LoadedProgramName`. In no reset path by design; it follows the latch on every exit.
+- [x] **Re-arm safety:** `bSandActive` is set in exactly one place — the `fbRecipeHandler.Done`
+      transition in STATE_RUNNING — and `State := 100` is assigned nowhere else in the FB. So the
+      dwell cannot re-trigger while the machine sits in COMPLETE after the timer expires.
+
+**Result: PASS** (no gaps; one non-obvious `bSpindleStart` clear in ERROR added by this audit)
+
 ---
 
 ### `05_RecipeHandler.scl` — FB_RecipeHandler

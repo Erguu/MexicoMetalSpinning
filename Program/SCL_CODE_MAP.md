@@ -338,7 +338,7 @@ STATE 25   PAUSED               → Paused (feed hold): axes retract clear of to
 STATE 29   LOCK_RETRACT_WAIT    → ToolHeadLock releasing (T#3S spring-return wait); exits to STOPPED (normal stop) or TOOL_CHANGE
 STATE 30   TOOL_CHANGE          → FB_ToolChanger running
 STATE 35   TOOL_WAIT            → Waiting for FB_ToolChanger
-STATE 100  COMPLETE             → Program completed; triggers MandrelLock retract + clears CMD=41 flags
+STATE 100  COMPLETE             → Program completed; triggers MandrelLock retract + clears CMD=41 flags. SANDING DWELL (2026-08-29): if DB_MachineConfig.SandTime_s (whole SECONDS, Int, clamped 0..600) AND SandSpeed are both > 0, the spindle is RE-STARTED at SandSpeed (clamped to DB_Spindle.Min/MaxSpeed) and held for SandTime_s seconds so the operator can sand the part. It must be a restart, not a hold-over: the CAM's final CMD=21 plus FB_RecipeHandler state 58 (blocks on IsRunning=FALSE) guarantee the spindle is already stopped on entry here. Armed once at the RUNNING Done transition; gated on NOT bSpindleDecelWait; cancelled by Start/Stop/Reset/error. SandTime_s := 0 is the off switch and the download default. It is an Int of seconds, NOT a Time, because an S7 Time is milliseconds underneath and an operator typing 10 into a numeric field would get 10 ms; FB_Process clamps to SAND_TIME_MAX_S and converts to #sandTimePT before the CASE
 STATE 999  ERROR                → Error, wait for AckError or Reset; clears CMD=41 flags
 ```
 
