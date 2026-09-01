@@ -61,6 +61,9 @@ no buffer error
 
 Things only you can do. Branch `feat/recipe-slots-and-batching`.
 
+⚠️ One exception: **§3 "Faster line-to-line motion"** is on `feat/pause-to-manual`. It is the
+only item here that is not on the branch above.
+
 **Merge policy:** the whole branch goes to master in one go, once the 999-line recipe test passes on
 the real CPU. Until then master stays behind.
 
@@ -257,6 +260,39 @@ the part. **It ships OFF.** Nothing changes until you type both values.
 
 > ⚠️ The door does **not** stop the spindle during the dwell. `Bypass_Door` is forced TRUE
 > every power-up on this machine. Only **E-Stop** and the **Stop button** stop it.
+
+---
+
+### 🔧 Faster line-to-line motion — new 2026-09-02
+
+> ⚠️ **Different branch.** This one is on `feat/pause-to-manual`, not the branch named at the
+> top of this file. Make sure you imported the right `05_RecipeHandler.scl`.
+
+The PLC used to waste 4 scans between finishing one move and starting the next one. Now 2.
+On a program made of many short moves that is a small speed-up. Nothing else changes.
+
+**There is no switch. It is always on.**
+
+- [ ] **Record OB1 max cycle time.** Do it *before* you download if you still can — the PLC
+      running right now is the "before" picture. If you already downloaded, record it now
+      anyway. You lose the comparison, nothing else.
+
+- [ ] **Run a program and watch the axes actually move.**
+      ⛔ **If the line number climbs while the axes stand still, press Stop.** That is this
+      change, not a recipe problem. Tell me and the two commits get reverted.
+      It looks almost exactly like the old recipe-load fault — do **not** go hunting in the
+      loader or re-import the recipe DBs.
+
+- [ ] **Pause mid-cut, then Continue.** The machine must return to the interruption point and
+      finish the *rest of that line*. If it jumps to the next line instead, stop and tell me.
+
+- [ ] **Check one part against a known-good one.** The axes now restart about 20 ms sooner at
+      every corner. There is no reason for that to mark the part. Look once anyway.
+
+Do not expect a big difference. The real limit is the TO smoothing time, still at 0.3 s, worth
+roughly 20× this. See `Program/docs/MotionSmoothing.md`.
+
+Why it stops at 2 scans and not 0: `Program/docs/RecipeHandler_ScanLatency.md`.
 
 ---
 ---
