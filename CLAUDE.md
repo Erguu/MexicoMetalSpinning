@@ -9,7 +9,7 @@
 | 3 | `PLC_Recipe_Format_Spec.md` | RecipeLine struct, CMD table, SCL output format |
 | 4 | `HMI_Tag_Guide.md` | Full HMI ↔ DB tag mapping |
 | 5 | `Program/docs/RETAINED_TAGS.md` | Which tags need a manual TIA **Retain** tick after every download/re-import, which must NOT be ticked, and which DBs still carry `NON_RETAIN`. Source import cannot express retentivity — this file is the only record |
-| 6 | `.claude/memory/improvements.md` | Completed and pending improvements |
+| 6 | `improvements.md` — in the **Claude Code memory directory, outside the repo**, not at `.claude/memory/` (the repo's `.claude/` holds only `settings.local.json`). Indexed from `MEMORY.md` in that same directory, which loads automatically at session start | Completed improvements, plus durable lessons carried forward from them |
 | 7 (new builds only) | `Program/docs/NEXT_MACHINE.md` | Fixes the user wants on **future** machines but deliberately **not** on this production one. Read at the start of a new machine build; ignore during maintenance of this one. Each entry records why it is safe to skip here — usually a guard that lives in the HMI rather than the PLC, which a new build will not inherit |
 
 Do not read the `backup/` directory — it holds ~290 stale copies of these same docs.
