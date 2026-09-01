@@ -1460,6 +1460,25 @@ BEGIN
                     END_IF;
                     #state := STATE_ERROR;
                 END_IF;
+
+                // --- STATE_NEXT folded into this scan (2026-09-02) --------------
+                // Saves one PLC scan per recipe line: the line advance no longer
+                // costs its own scan. Body is identical to state 60, which STAYS in
+                // place -- ten other states still transition to it.
+                //
+                // MUST stay below the Error / tonMoveTimeout block above, and MUST
+                // keep the #state = STATE_NEXT guard: those branches write
+                // STATE_ERROR, and the guard is what lets them win. Removing either
+                // makes a faulted axis advance the line instead of stopping.
+                // See docs/RecipeHandler_ScanLatency.md.
+                IF #state = STATE_NEXT THEN
+                    #lineIndex := #lineIndex + 1;
+                    IF "DB_HMI".SingleStepMode THEN
+                        #state := STATE_STEP_WAIT;
+                    ELSE
+                        #state := STATE_READ;
+                    END_IF;
+                END_IF;
             END_IF;
             
         // -----------------------------------------------------------------
