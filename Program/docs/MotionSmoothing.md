@@ -1,7 +1,8 @@
 # Motion Smoothing
 
-**Status:** Analysis only — no program files changed.
-**Updated:** 2026-08-01
+**Status:** Analysis. Items #1–#3 not done. **Item #4 implemented 2026-09-02** (see
+`RecipeHandler_ScanLatency.md`).
+**Updated:** 2026-09-02
 
 The machine stops at every recipe point instead of cutting continuously. This document says
 why, and what to change.
@@ -60,10 +61,23 @@ commanded feedrate.
 
 ### Two smaller contributors
 
-**Scan dead time (~40 ms/segment).** After a move finishes, the handler takes 3 extra scans
-to start the next one: `STATE_WAIT(30)` → `STATE_NEXT(60)` → `STATE_READ(10)` →
-`STATE_EXEC(20)`, where `bTrigMove` finally goes TRUE (`05_RecipeHandler.scl:613`, FB called
-at :1084). Assumes a 10 ms OB1 cycle — **not yet measured.**
+**Scan dead time — was 4 scans, now 2 (fixed 2026-09-02).** After a move finished, the handler
+took **four** scans to start the next one: the `STATE_WAIT(30)` scan that *detects* `Done`,
+then `STATE_NEXT(60)`, `STATE_READ(10)` and `STATE_EXEC(20)`.
+
+⚠️ **This paragraph previously said 3.** That counted the three transitions and missed that the
+detect scan is itself dead — the motion FBs are called *after* the `CASE`, so a `Done` produced
+at the end of one scan is not visible to the state machine until the next.
+
+`STATE_NEXT` is now folded into `STATE_WAIT`, and `STATE_EXEC` is hoisted out of the `CASE` so a
+motion line selected by `STATE_READ` also launches in the same scan. That leaves **2**, which is
+the floor: one scan of sampling latency, which is also the single `Execute`-low scan that
+`MC_MoveAbsolute` requires for its rising edge. Going to 1 scan is **not** possible without
+redesigning `FB_Axis_AbsPos` — the naive version loses that edge and races through the program
+with the axes stationary.
+
+Full analysis, correctness argument and test plan: **`RecipeHandler_ScanLatency.md`**.
+Still assumes a 10 ms OB1 cycle — **not yet measured.**
 
 **The S7-1200 cannot blend.** `MC_MoveAbsolute` on a PTO axis has no look-ahead or command
 buffer, so every line ends at v = 0. This is a firmware limit, not a code defect.
@@ -77,7 +91,7 @@ buffer, so every line ends at v = 0. This is a firmware limit, not a code defect
 | 1 | **Smoothing time 0.3 → 0.03 s** | TIA TO config | No | 28 % → 49 % |
 | 2 | Chords → 3 mm | CAM post | Data only, not format | 49 % → 85 % |
 | 3 | Drive position command filter, 10–20 ms | Drive keypad | No | Smoothness only |
-| 4 | Motion→motion fall-through | `05_RecipeHandler.scl` | No | 85 % → 89 % |
+| 4 | ~~Motion→motion fall-through~~ — **DONE 2026-09-02** | `05_RecipeHandler.scl` | No | 85 % → 89 % |
 
 ### Recommended TO settings
 
@@ -103,12 +117,23 @@ Servos in pulse-following mode usually have a position command smoothing filter 
 P1-08, Yaskawa Pn216, Panasonic Pr2.22). It rounds the stop-start discontinuity without
 lengthening the ramp. Costs nothing to try.
 
-### Item #4 — risks
+### Item #4 — done 2026-09-02
 
-Only worth ~4 points, gives **no smoothness improvement**, and is the only item touching code.
-Scope it to the motion→motion path only; keep every non-motion CMD on its own scan, because
-`STATE_READ` writes cylinder solenoid flags directly for `CMD_ATMO` (:529–541) and two lines
-in one scan would collide. Also watch the Pause check at :625 and the timeout timer at :435.
+Implemented as two commits on `feat/pause-to-manual`; **not compiled, not commissioned.** The
+scoping advice below turned out to be correct and was followed: only `CMD_RAPID` / `CMD_LINEAR`
+share a scan, so every non-motion CMD still gets its own — required, because `STATE_READ` writes
+the BackSupport solenoid flags directly for `CMD_ATMO` and two lines in one scan would collide.
+
+Two things the original sketch here did **not** anticipate, both in `RecipeHandler_ScanLatency.md`:
+
+- The floor is 2 scans, not 1. `MC_MoveAbsolute` needs a rising edge on `Execute`, so one
+  `Execute`-low scan must separate consecutive moves. That constraint was undocumented and is
+  the reason the 4-scan structure was safe by accident.
+- `STATE_EXEC` has a second entry point (`#state := #pauseReturnState` from state 803), which
+  the hoist makes sensitive to a resume landing on state 20.
+
+Still worth only ~4 points and gives **no smoothness improvement** — items #1–#3 remain where
+the real gain is.
 
 ---
 
@@ -125,7 +150,7 @@ in one scan would collide. Also watch the Pause check at :625 and the timeout ti
 | 6 | Repost one program at 3 mm chords | ~85 %, geometry unchanged | Back off to 2 mm |
 | 7 | Inspect part vs. baseline | No measurable difference | Reduce chord until it matches |
 | 8 | Enable drive filter, 10–20 ms | Chugging reduced | Increase, or back off if lag appears |
-| 9 | Decide on item #4 | — | Only if 1–8 fell short |
+| 9 | ~~Decide on item #4~~ — already implemented; run its own test plan (`RecipeHandler_ScanLatency.md` §6) | — | Revert the two commits |
 
 **Step 2 is the highest value per effort:** one parameter, two axes, ~30 seconds, roughly
 doubles effective feedrate. Going via 0.06 before 0.03 is a deliberate hedge — see §5.
@@ -200,5 +225,5 @@ External pulse-output controllers for *this* machine (Syntec 6TB vs DDCS) are co
 | Measurement | Sizes |
 |---|---|
 | Timed pass vs. programmed feed | Confirms/kills the whole model |
-| OB1 max cycle time | Item #4 (the ~40 ms dead time assumes 10 ms) |
+| OB1 max cycle time | Sizes the item #4 saving now that it is implemented (2 scans/line; the ~20 ms figure still assumes 10 ms). Record it **before and after** the item #4 download — the fused READ+EXEC scan does slightly more work in one scan |
 | Drive filter parameter | Item #3 |

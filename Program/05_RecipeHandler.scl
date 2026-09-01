@@ -1015,12 +1015,23 @@ VERSION : 0.1
         bMoveX : Bool;              // X axis needs to move
         bMoveZ : Bool;              // Z axis needs to move
         bHaltTrig : Bool;           // Trigger halt (Stop)
-        // BUG FIX: resume target after PAUSED. Pause from STATE_WAIT resumes via
-        // STATE_EXEC (recalculate move from actual position). Pause from the
-        // non-motion states (SPINDLE_WAIT/DWELL/SPINDLE_STOP_WAIT) must return to
-        // that same state -- resuming via STATE_EXEC executed a move to the
-        // non-motion line's X/Z placeholders (0,0) and drove both axes to home.
-        pauseReturnState : Int := 20;  // 20 = STATE_EXEC (safe default)
+        // Resume target after PAUSED -- STATE_PAUSE_RETURN (803) jumps here.
+        // Every pause site sets it explicitly: a motion pause resumes via
+        // STATE_READ (re-read the line endpoint, then EXEC recomputes the
+        // remaining move), and the non-motion states (SPINDLE_WAIT / DWELL /
+        // SPINDLE_STOP_WAIT / CYL_GOTO_WAIT) return to themselves -- resuming
+        // those via STATE_EXEC executed a move to the non-motion line's X/Z
+        // placeholders (0,0) and drove both axes to home.
+        //
+        // The default below is unreachable today: 803 is only entered through a
+        // pause site and all five write this variable. It is STATE_READ and NOT
+        // STATE_EXEC (2026-09-02) because STATE_EXEC is now hoisted out of the
+        // CASE -- a resume landing on 20 would run EXEC in the same scan that
+        // 803 clears bTrigMove, destroying the MC_MoveAbsolute Execute edge and
+        // leaving the axis dead after Continue with no error raised. If a sixth
+        // pause site is ever added and forgets to set this, STATE_READ fails
+        // safe. Written as a literal because the CONST block is declared below.
+        pauseReturnState : Int := 10;  // 10 = STATE_READ (safe default)
         // Pause-retract: interruption point captured on pause, returned to on resume.
         resumeX : Real;             // Interruption-point X (return target after retract)
         resumeZ : Real;             // Interruption-point Z
@@ -1132,7 +1143,10 @@ BEGIN
         #bMoveX := FALSE;
         #bMoveZ := FALSE;
         #bHaltTrig := FALSE;
-        #pauseReturnState := STATE_EXEC;  // Clear stale resume target from a previous pause
+        // Clear stale resume target from a previous pause. STATE_READ, not
+        // STATE_EXEC -- see the declaration comment for why 20 is unsafe now
+        // that STATE_EXEC is hoisted out of the CASE.
+        #pauseReturnState := STATE_READ;
         #SpindleReqStart := FALSE;
         #SpindleReqStop := FALSE;
         // Reset timers -- no stale ET remains on next run
@@ -1306,71 +1320,6 @@ BEGIN
                         // Unknown command - skip
                         #state := STATE_NEXT;
                 END_CASE;
-            END_IF;
-            
-        // -----------------------------------------------------------------
-        // === STATE_EXEC (20) ===
-        // -----------------------------------------------------------------
-        20: // EXEC -- Calculate motion parameters and start move
-            // Linear interpolation: both axes start and finish simultaneously.
-            // velX/velZ split proportionally over total distance.
-            // This ensures X and Z reach target in the same time (true linear path).
-            #deltaX := ABS(#targX - #currX);
-            #deltaZ := ABS(#targZ - #currZ);
-            #totalDist := SQRT(#deltaX * #deltaX + #deltaZ * #deltaZ);
-            
-            // Determine which axes need to move
-            #bMoveX := #deltaX > 0.01;  // 0.01mm threshold
-            #bMoveZ := #deltaZ > 0.01;
-            
-            // Calculate velocity
-            IF #Lines[#lineIndex].CMD = CMD_RAPID OR #Lines[#lineIndex].F = 0 THEN
-                // Rapid move - use max velocity with RapidOverride
-                #feedrate := "DB_MachineConfig".RapidVelocity;
-                #overridePercent := "DB_HMI".RapidOverride;
-            ELSE
-                // Linear move - convert mm/min to mm/s with FeedrateOverride
-                #feedrate := INT_TO_REAL(#Lines[#lineIndex].F) / "DB_MachineConfig".FeedrateConvFactor;
-                #overridePercent := "DB_HMI".FeedrateOverride;
-            END_IF;
-            
-            // Apply override (clamp to 50-200%)
-            IF #overridePercent < 50.0 THEN #overridePercent := 50.0; END_IF;
-            IF #overridePercent > 200.0 THEN #overridePercent := 200.0; END_IF;
-            #feedrate := #feedrate * (#overridePercent / 100.0);
-            
-            // Clamp velocity to limits
-            IF #feedrate > "DB_MachineConfig".MaxVelocity THEN
-                #feedrate := "DB_MachineConfig".MaxVelocity;
-            ELSIF #feedrate < "DB_MachineConfig".MinVelocity THEN
-                #feedrate := "DB_MachineConfig".MinVelocity;
-            END_IF;
-            
-            // Calculate axis velocities for linear interpolation
-            IF #totalDist > 0.01 THEN
-                #velX := #feedrate * #deltaX / #totalDist;
-                #velZ := #feedrate * #deltaZ / #totalDist;
-            ELSE
-                #velX := #feedrate;
-                #velZ := #feedrate;
-            END_IF;
-            
-            // Ensure minimum velocity
-            IF #bMoveX AND #velX < "DB_MachineConfig".MinVelocity THEN 
-                #velX := "DB_MachineConfig".MinVelocity; 
-            END_IF;
-            IF #bMoveZ AND #velZ < "DB_MachineConfig".MinVelocity THEN 
-                #velZ := "DB_MachineConfig".MinVelocity; 
-            END_IF;
-            
-            // Skip if no movement needed
-            IF NOT #bMoveX AND NOT #bMoveZ THEN
-                #state := STATE_NEXT;
-            ELSE
-                // Trigger movement
-                #bTrigMove := TRUE;
-                #tonMoveTimeout(IN := FALSE, PT := "DB_MachineConfig".Timeout_Motion);
-                #state := STATE_WAIT;
             END_IF;
             
         // -----------------------------------------------------------------
@@ -1841,6 +1790,94 @@ BEGIN
             "DB_Diagnostic".Error_Code := #ErrorID;
             "DB_Diagnostic".Error_Line := #lineIndex;
     END_CASE;
+
+    // -------------------------------------------------------------------------
+    // === STATE_EXEC (20) -- deliberately OUTSIDE the CASE above ===
+    // -------------------------------------------------------------------------
+    // Hoisted 2026-09-02 so a motion line selected by STATE_READ in this scan is
+    // also LAUNCHED in this scan, saving one PLC scan per recipe line.
+    //
+    // MUST stay AFTER the CASE and BEFORE the fbMove calls below. Above the CASE
+    // it would run a scan early; below the fbMove calls the Execute edge it sets
+    // would not reach MC_MoveAbsolute until the next scan -- both give the scan
+    // back, and the second does it silently.
+    //
+    // Only the CMD_RAPID / CMD_LINEAR branch of STATE_READ sets state 20, so every
+    // non-motion CMD still gets its own scan. That is required, not incidental:
+    // STATE_READ writes the BackSupport solenoid flags directly for CMD_ATMO, and
+    // two recipe lines sharing a scan would collide.
+    //
+    // The other way in is #state := #pauseReturnState (STATE_PAUSE_RETURN, 803).
+    // All five pause sites set that variable explicitly and none sets STATE_EXEC;
+    // if one ever did, this block would run in the same scan 803 clears bTrigMove,
+    // destroying the Execute edge and leaving the axis dead after Continue. The
+    // declaration default and the Reset clear were repointed at STATE_READ in this
+    // commit for exactly that reason.
+    //
+    // Full argument: docs/RecipeHandler_ScanLatency.md
+    // -------------------------------------------------------------------------
+    IF #state = STATE_EXEC THEN
+        // Linear interpolation: both axes start and finish simultaneously.
+        // velX/velZ split proportionally over total distance.
+        // This ensures X and Z reach target in the same time (true linear path).
+        #deltaX := ABS(#targX - #currX);
+        #deltaZ := ABS(#targZ - #currZ);
+        #totalDist := SQRT(#deltaX * #deltaX + #deltaZ * #deltaZ);
+        
+        // Determine which axes need to move
+        #bMoveX := #deltaX > 0.01;  // 0.01mm threshold
+        #bMoveZ := #deltaZ > 0.01;
+        
+        // Calculate velocity
+        IF #Lines[#lineIndex].CMD = CMD_RAPID OR #Lines[#lineIndex].F = 0 THEN
+            // Rapid move - use max velocity with RapidOverride
+            #feedrate := "DB_MachineConfig".RapidVelocity;
+            #overridePercent := "DB_HMI".RapidOverride;
+        ELSE
+            // Linear move - convert mm/min to mm/s with FeedrateOverride
+            #feedrate := INT_TO_REAL(#Lines[#lineIndex].F) / "DB_MachineConfig".FeedrateConvFactor;
+            #overridePercent := "DB_HMI".FeedrateOverride;
+        END_IF;
+        
+        // Apply override (clamp to 50-200%)
+        IF #overridePercent < 50.0 THEN #overridePercent := 50.0; END_IF;
+        IF #overridePercent > 200.0 THEN #overridePercent := 200.0; END_IF;
+        #feedrate := #feedrate * (#overridePercent / 100.0);
+        
+        // Clamp velocity to limits
+        IF #feedrate > "DB_MachineConfig".MaxVelocity THEN
+            #feedrate := "DB_MachineConfig".MaxVelocity;
+        ELSIF #feedrate < "DB_MachineConfig".MinVelocity THEN
+            #feedrate := "DB_MachineConfig".MinVelocity;
+        END_IF;
+        
+        // Calculate axis velocities for linear interpolation
+        IF #totalDist > 0.01 THEN
+            #velX := #feedrate * #deltaX / #totalDist;
+            #velZ := #feedrate * #deltaZ / #totalDist;
+        ELSE
+            #velX := #feedrate;
+            #velZ := #feedrate;
+        END_IF;
+        
+        // Ensure minimum velocity
+        IF #bMoveX AND #velX < "DB_MachineConfig".MinVelocity THEN 
+            #velX := "DB_MachineConfig".MinVelocity; 
+        END_IF;
+        IF #bMoveZ AND #velZ < "DB_MachineConfig".MinVelocity THEN 
+            #velZ := "DB_MachineConfig".MinVelocity; 
+        END_IF;
+        
+        // Skip if no movement needed
+        IF NOT #bMoveX AND NOT #bMoveZ THEN
+            #state := STATE_NEXT;
+        ELSE
+            // Trigger movement
+            #bTrigMove := TRUE;
+            #tonMoveTimeout(IN := FALSE, PT := "DB_MachineConfig".Timeout_Motion);
+            #state := STATE_WAIT;
+        END_IF;
+    END_IF;
     
     // -------------------------------------------------------------------------
     // Motion FB calls -- run at end of every scan (after state machine)
