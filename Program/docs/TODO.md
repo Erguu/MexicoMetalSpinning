@@ -1226,8 +1226,9 @@ case — *"If relative motion is needed (no homing)"*.
 2. Swap state 13's two moves from `FB_Axis_AbsPos` to `FB_Axis_RelPos` with `+PostHome_Clearance`
 
 Cost: two new FB instances (watch the S7-1214C work-memory budget — see
-`.claude/memory/project_plc_memory_budget.md`). State 16 is unaffected; it keeps
-`FB_Axis_AbsPos` and its `RapidVelocity` park move.
+`project_plc_memory_budget.md` in the Claude Code memory directory, outside the repo; it is
+indexed from `MEMORY.md` there). State 16 is unaffected; it keeps `FB_Axis_AbsPos` and its
+`RapidVelocity` park move.
 
 ### Related
 
