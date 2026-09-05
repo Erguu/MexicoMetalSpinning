@@ -229,7 +229,28 @@ NON_RETAIN
         // trap: an HMI switch bound to this one would appear to bypass the cylinder and do
         // absolutely nothing. The live flag is DB_MachineConfig.Bypass_MandrelLock -- use that.
         Bypass_ToolHeadLock : Bool := FALSE;  // TRUE = skip ToolHeadLock sensor wait in STATE_LOCK_EXTEND_WAIT (no cylinder/sensor); cylinder still commanded if present
-        
+        // PLCSIM ONLY (2026-09-06). TRUE = the FB_Process homing sequence uses MC_Home
+        // Mode 0 ("set the current position, do not move") instead of Mode 3 (seek the
+        // reference switch). PLCSIM never asserts a reference switch input, so without
+        // this a simulated machine can never leave STATE_HOMING and no recipe can be
+        // tested at all.
+        //
+        // NOT A BYPASS -- and the difference is the whole point. STATE_HOMING still runs
+        // end to end: bRequireHoming clears, CurrentTool goes to 1, the park move follows,
+        // and StatusBits.HomingDone goes TRUE. That last one is what keeps FB_LimitMonitor
+        // armed (soft limits are checked only on a homed axis), so the simulation still
+        // refuses an out-of-range recipe. A flag that SKIPPED homing would leave
+        // HomingDone FALSE and silently disable every soft limit -- a recipe that would
+        // crash the real machine would then run clean in the sim, which is worse than
+        // not testing.
+        //
+        // ⚠️ The reference itself is FAKE: the axis is declared homed wherever it happens
+        // to stand. Fine for watching sequence and logic; never trust it to judge whether
+        // a program's coordinates are physically safe.
+        // Forced FALSE by FC_LoadConfig on every power-up, so it cannot survive a restart
+        // or reach the machine by accident. Raises WarningID 5 continuously while set.
+        Sim_HomeInPlace     : Bool := FALSE;
+
         // ===========================================================
         // BOUNDING BOX (Output - from pre-scan)
         // ===========================================================

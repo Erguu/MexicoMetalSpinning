@@ -416,6 +416,12 @@ BEGIN
     "DB_HMI".Bypass_Spindle      := FALSE;
     "DB_HMI".Bypass_ToolChanger  := FALSE;
     "DB_HMI".Bypass_ToolHeadLock := FALSE;  // TRUE = skip ToolHeadLock sensor wait (state 17); no 16#0012 timeout
+    // PLCSIM only: home with MC_Home Mode 0 (set position in place) instead of Mode 3
+    // (seek the reference switch), because PLCSIM never asserts a reference switch input.
+    // Homing still RUNS -- it is not skipped -- so HomingDone goes TRUE and the soft
+    // limits stay armed. Forced FALSE here so it can never survive a restart or a
+    // download; set it from a watch table for the duration of a sim session only.
+    "DB_HMI".Sim_HomeInPlace     := FALSE;
     "DB_MachineConfig".Bypass_ToolAxis    := FALSE;  // Set TRUE if tool axis is not connected
     // TRUE on THIS machine (user, 2026-08-16): there is no MandrelLock cylinder -- the sheet is
     // clamped manually by the operator, and has been for a long time. It was FALSE until now

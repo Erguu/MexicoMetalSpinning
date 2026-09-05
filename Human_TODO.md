@@ -336,6 +336,26 @@ touch your program 1 or 2 files.
 Watch `DB_HMI.CurrentOp` / `TotalOps` / `CurrentPass` / `TotalPasses`.
 Expect `Op 1 of 5`, and the pass counting `1 → 10` through Op1. Then Op2..Op5, one pass each.
 
+**Two switches to set in PLCSIM first.** Both are FALSE again after any restart.
+
+| Set in a watch table | Why |
+|---|---|
+| `DB_HMI.Sim_HomeInPlace` | PLCSIM has no reference switch, so homing can never finish and the machine never leaves STATE_HOMING |
+| `DB_HMI.Bypass_ToolHeadLock` | PLCSIM has no lock sensor, so state 17 would time out with `16#0012` |
+
+`Sim_HomeInPlace` does **not** skip homing. It homes the axes *where they stand*. Homing
+still runs properly, so the soft limits stay switched on and a bad recipe is still caught.
+The screen shows a permanent warning while it is set. That is intended — leave it visible.
+
+⚠️ **The positions are not real in that mode.** Use it to watch the sequence and the pass
+counter. Do **not** use it to decide whether a program's coordinates are safe.
+
+Expect `CylDiag[3].ErrorID = 16#0501` about 6 seconds in. That is the lock cylinder
+complaining it never saw its sensor. In PLCSIM it is harmless and the program keeps running.
+
+⛔ **Neither switch goes on the real machine.** `Bypass_ToolHeadLock` on a real cut lets the
+tool head unlock about 6 seconds in, with no alarm — see ITEM-60.
+
 **It is optional in the CAM, on purpose.** SpinningCam gets a checkbox. On a long program the
 pass numbers eat lines that would otherwise be toolpath, so you can turn them off and get the
 resolution back. Use them when proving out a new part.

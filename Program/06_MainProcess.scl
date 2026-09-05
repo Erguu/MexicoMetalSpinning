@@ -1094,6 +1094,10 @@ VERSION : 4.0
                                         // cleared ONLY where a homing sequence completes.
                                         // Start value TRUE so a fresh download/power-up homes.
         bRefTrusted    : Bool;  // Recomputed in STATE_STARTING: all axes homed AND NOT bRequireHoming
+        homeModeSeq    : Int;   // MC_Home Mode for the FB_Process homing sequence: 3 normally,
+                                // 0 (set position in place) when DB_HMI.Sim_HomeInPlace is set.
+                                // Recomputed every scan next to the fbHome* calls -- no reset
+                                // path needed, it is derived, never latched.
         clrTargetX     : Real;  // Target for fbMoveX_HomeClr -- PNP escape (state 13) or SheetLoadPos (state 16)
         clrTargetZ     : Real;  // Target for fbMoveZ_HomeClr -- PNP escape (state 13) or SheetLoadPos (state 16)
         clrVelocity    : Real;  // Velocity for the above. HomeVelocity for the slow PNP escape (13),
@@ -1721,11 +1725,21 @@ BEGIN
     // it is the only sign that the machine will run unguarded, so it outranks a
     // transient interlock message. A blocked tool jog therefore shows no banner while
     // the bypass is on; the jog is still refused, which is the part that matters.
-    "DB_HMI".HasWarning := "DB_HMI".Bypass_EStop OR #bToolAxisBlocked
+    "DB_HMI".HasWarning := "DB_HMI".Bypass_EStop OR "DB_HMI".Sim_HomeInPlace
+                           OR #bToolAxisBlocked
                            OR #bToolStepBlocked OR #bBlindMoveBlocked;
     IF "DB_HMI".Bypass_EStop THEN
         "DB_HMI".WarningText    := 'DANGER: E-Stop bypassed - machine runs unguarded';
         "DB_HMI".WarningID      := 1;
+    ELSIF "DB_HMI".Sim_HomeInPlace THEN
+        // Second only to the E-Stop bypass, and for the same reason: the machine is
+        // reporting something that is not true. Every axis will claim to be homed
+        // wherever it happens to stand, so the soft limits are armed around a
+        // reference that means nothing. Continuous while the flag is set -- the flag
+        // is FALSE at every power-up, so this banner can only ever be someone's
+        // deliberate, current choice.
+        "DB_HMI".WarningText    := 'SIMULATION: axes homed in place - position reference is NOT real';
+        "DB_HMI".WarningID      := 5;
     ELSIF #bToolAxisBlocked OR #bToolStepBlocked THEN
         // Shown as soon as the tool axis is selected with the lock engaged, not only
         // after a button press: the operator learns why before pushing, and the
@@ -3960,22 +3974,48 @@ BEGIN
 
     // Homing -- sequential pattern: STATE_HOMING (startup) and STATE_STOP_GOHOME (post-stop)
     // both use homeSeqState + bHomeXExec/bHomeZExec.
-    // Mode SEL: mode 3 (active+zero) is forced in STATE_HOMING; other states use DB_Manual.HomingMode.
+    //
+    // MODE. Always 3 (active + zero: seek the reference switch, then set the position),
+    // except in simulation. DB_Manual.HomingMode is deliberately NOT read here -- it
+    // belongs to FB_ManualMode's own MC_Home instances (see the FB_ManualMode call), and
+    // letting a manual-screen setting change the AUTOMATIC homing mode is not something
+    // anyone would intend.
+    //
+    // This replaces three SEL() calls whose polarity was INVERTED against the comment
+    // that described them (fixed 2026-09-06). SEL returns IN0 when G is FALSE, so
+    //     SEL(G := (State = STATE_HOMING AND ...), IN0 := 3, IN1 := DB_Manual.HomingMode)
+    // used DB_Manual.HomingMode *inside* STATE_HOMING and 3 everywhere else -- the exact
+    // opposite of "mode 3 is forced in STATE_HOMING". It was invisible because
+    // FC_LoadConfig sets DB_Manual.HomingMode := 3, so both branches evaluated to 3; it
+    // would have surfaced the first time anyone changed the manual homing mode.
+    //
+    // Sim_HomeInPlace selects Mode 0 -- "set the current position, do not move" -- the
+    // only way a homing cycle can complete in PLCSIM, which never asserts a reference
+    // switch input. Homing is not skipped: the state runs to the end, so bRequireHoming
+    // clears and HomingDone goes TRUE, which is what keeps the soft limits armed.
+    // Written as IF/ELSE on purpose, not as another SEL(): the bug above was a SEL
+    // whose G/IN0/IN1 polarity read backwards to everyone who checked it, including
+    // the comment that documented it. Two lines of IF cannot be misread.
+    IF "DB_HMI".Sim_HomeInPlace THEN
+        #homeModeSeq := 0;      // set current position, no motion, no switch (PLCSIM)
+    ELSE
+        #homeModeSeq := 3;      // active + zero: seek reference switch, then set position
+    END_IF;
     #fbHomeX(
         Execute := #bHomeXExec,
-        Mode := SEL(G := (#State = STATE_HOMING AND #bHomeXExec), IN0 := 3, IN1 := "DB_Manual".HomingMode),
+        Mode := #homeModeSeq,
         Position := "DB_MachineConfig".HomeOffset_X,
         Axis := #Axis_X
     );
     #fbHomeZ(
         Execute := #bHomeZExec,
-        Mode := SEL(G := (#State = STATE_HOMING AND #bHomeZExec), IN0 := 3, IN1 := "DB_Manual".HomingMode),
+        Mode := #homeModeSeq,
         Position := "DB_MachineConfig".HomeOffset_Z,
         Axis := #Axis_Z
     );
     #fbHomeTool(
         Execute  := #bHomeToolExec,
-        Mode     := SEL(G := (#State = STATE_HOMING AND #bHomeToolExec), IN0 := 3, IN1 := "DB_Manual".HomingMode),
+        Mode     := #homeModeSeq,
         Position := 0.0,
         Axis     := #Axis_Tool
     );

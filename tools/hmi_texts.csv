@@ -93,3 +93,4 @@ warning,1,1,DANGER: E-Stop bypassed - machine runs unguarded,PELIGRO: paro de em
 warning,2,2,"Insert sheet, then press both start buttons",Inserte la lamina y presione ambos botones de inicio
 warning,3,3,Tool axis locked - ToolHeadLock is engaged,Eje de herramienta bloqueado - el seguro del portaherramientas esta aplicado
 warning,4,4,Blocked in proximity zone - use jog or Home to escape,Bloqueado en zona de proximidad - use el jog o Home para salir
+warning,5,5,SIMULATION: axes homed in place - position reference is NOT real,SIMULACION: ejes referenciados en el sitio - la posicion NO es real
