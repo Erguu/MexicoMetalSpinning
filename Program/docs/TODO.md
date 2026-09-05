@@ -2551,7 +2551,20 @@ return from manual to a paused recipe verifiable. ITEM-57 and ITEM-58 are both p
 `feat/pass-number-display`). Not a regression — this is how the bypass has always behaved.
 Dormant in production: `FC_LoadConfig` forces the flag FALSE on every power-up.
 
-### What happens
+### First, what is NOT wrong
+
+**With the bypass OFF — normal operation — the machine is correct and safe.** The cylinder
+extends, the sensor does not confirm, `FB_CylinderControl` faults, and state 17 *reads* that
+fault and goes to STATE_ERROR with `16#0012` **before machining starts**. That is the design
+working. Do not read this item as "the ToolHeadLock is unreliable".
+
+The problem is narrower: **setting the bypass is what removes the check that catches it.**
+State 17 is the only place that reads the cylinder's error, and the bypass skips state 17.
+
+User confirmed 2026-09-06 they have never used this bypass, or not in a long time — so nothing
+has ever been at risk. The exposure is entirely future.
+
+### What happens (bypass ON only)
 
 `DB_HMI.Bypass_ToolHeadLock` reads as "skip the sensor wait", and in FB_Process that is exactly
 what it does — two sites, `06_MainProcess.scl:2884` (state 17) and `:3242` (the PAUSED resume
