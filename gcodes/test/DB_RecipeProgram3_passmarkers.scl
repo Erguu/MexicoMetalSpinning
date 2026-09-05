@@ -1,0 +1,169 @@
+// ============================================
+// DB_RecipeProgram3 - PASS MARKER TEST RECIPE
+// Lines: 99  (80 from program 1 + 19 pass markers)
+// CHUNKS: 10 x 100
+//
+// NOT A CAM EXPORT. Generated from gcodes/DB_RecipeProgram1.scl by
+// inserting the CMD=50 / CMD=51 pass markers at the boundaries its own
+// [OpN PM] comments already mark. Geometry, feeds, speeds and the tool
+// table are byte-for-byte program 1's -- only marker lines were added.
+//
+// PURPOSE: prove the PLC side of the pass display in PLCSIM before
+// SpinningCam ships the emit side. See
+// Program/docs/letter_spinningcam_pass_markers.md
+//
+// Expect on the HMI: Op 1..5, and Op1 counting Pass 1..10.
+// ============================================
+
+DATA_BLOCK "DB_RecipeProgram3"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.2
+UNLINKED
+NON_RETAIN
+    VAR 
+        Header : "RecipeHeader";
+        Lines1  : Array[0..99] of "RecipeLine";  // global lines 0..99
+        Lines2  : Array[0..99] of "RecipeLine";  // global lines 100..199
+        Lines3  : Array[0..99] of "RecipeLine";  // global lines 200..299
+        Lines4  : Array[0..99] of "RecipeLine";  // global lines 300..399
+        Lines5  : Array[0..99] of "RecipeLine";  // global lines 400..499
+        Lines6  : Array[0..99] of "RecipeLine";  // global lines 500..599
+        Lines7  : Array[0..99] of "RecipeLine";  // global lines 600..699
+        Lines8  : Array[0..99] of "RecipeLine";  // global lines 700..799
+        Lines9  : Array[0..99] of "RecipeLine";  // global lines 800..899
+        Lines10 : Array[0..99] of "RecipeLine";  // global lines 900..999
+    END_VAR
+BEGIN
+    // Header
+    Header.sName := 'Pass Marker Test';
+    Header.LineCount := 99;
+    Header.Valid := TRUE;
+    Header.PreScanned := FALSE;
+    Header.MinX := 0.000;
+    Header.MaxX := 259.812;
+    Header.MinZ := 0.000;
+    Header.MaxZ := 450.663;
+
+    // --- Tool table (copied verbatim from program 1) ---
+    Header.ProvidesToolConfig := TRUE;
+    Header.ToolCount := 4;
+    Header.AutoCalcAngles := FALSE;
+    Header.ToolCode_List[1] := 4;
+    Header.ToolCode_List[2] := 5;
+    Header.ToolCode_List[3] := 6;
+    Header.ToolCode_List[4] := 7;
+    Header.ToolAngle_List[1] := 0.0;
+    Header.ToolAngle_List[2] := 120.0;
+    Header.ToolAngle_List[3] := 240.0;
+    Header.ToolAngle_List[4] := 180.0;
+
+    // --- Integrity ---
+    // Recomputed over the lines below INCLUDING the markers, using the
+    // same recipe_checksum() the loader and split_recipe_db.py share.
+    Header.ProvidesChecksum := TRUE;
+    Header.Checksum := UDINT#532711;
+
+    // Recipe Lines (99 total)
+
+    // --- Lines1 (global lines 0..98) ---
+    Lines1[0].X := 0.000; Lines1[0].Z := 0.000; Lines1[0].F := 0; Lines1[0].CMD := 40; Lines1[0].Param := 1; // Cylinder GOTO P1
+    Lines1[1].X := 0.000; Lines1[1].Z := 0.000; Lines1[1].F := 0; Lines1[1].CMD := 10; Lines1[1].Param := 4; // Tool Change T4
+    Lines1[2].X := 0.000; Lines1[2].Z := 0.000; Lines1[2].F := 0; Lines1[2].CMD := 20; Lines1[2].Param := 60; // Spindle ON 600 RPM
+    Lines1[3].X := 0.000; Lines1[3].Z := 0.000; Lines1[3].F := 5; Lines1[3].CMD := 50; Lines1[3].Param := 1; // OPERATION 1 of 5
+    Lines1[4].X := 0.000; Lines1[4].Z := 0.000; Lines1[4].F := 10; Lines1[4].CMD := 51; Lines1[4].Param := 1; // PASS 1 of 10
+    Lines1[5].X := 0.000; Lines1[5].Z := 0.000; Lines1[5].F := 0; Lines1[5].CMD := 41; Lines1[5].Param := 1; // M41 (Back Support Cylinder: P1 for relaxing, P2 for retracting) P1 [Op1 P1]
+    Lines1[6].X := 259.812; Lines1[6].Z := 204.000; Lines1[6].F := 0; Lines1[6].CMD := 0; Lines1[6].Param := 0; // G0 Rapid [Op1 P1]
+    Lines1[7].X := 259.794; Lines1[7].Z := 209.000; Lines1[7].F := 300; Lines1[7].CMD := 1; Lines1[7].Param := 0; // G1 Linear [Op1 P1]
+    Lines1[8].X := 166.248; Lines1[8].Z := 210.663; Lines1[8].F := 300; Lines1[8].CMD := 1; Lines1[8].Param := 0; // G1 Linear [Op1 P1]
+    Lines1[9].X := 166.248; Lines1[9].Z := 210.663; Lines1[9].F := 0; Lines1[9].CMD := 0; Lines1[9].Param := 0; // G0 Rapid [Op1 P1]
+    Lines1[10].X := 0.000; Lines1[10].Z := 0.000; Lines1[10].F := 10; Lines1[10].CMD := 51; Lines1[10].Param := 2; // PASS 2 of 10
+    Lines1[11].X := 166.248; Lines1[11].Z := 210.663; Lines1[11].F := 0; Lines1[11].CMD := 41; Lines1[11].Param := 2; // M41 (Back Support Cylinder: P1 for relaxing, P2 for retracting) P2 [Op1 P2]
+    Lines1[12].X := 259.796; Lines1[12].Z := 208.444; Lines1[12].F := 0; Lines1[12].CMD := 0; Lines1[12].Param := 0; // G0 Rapid [Op1 P2]
+    Lines1[13].X := 259.778; Lines1[13].Z := 213.444; Lines1[13].F := 300; Lines1[13].CMD := 1; Lines1[13].Param := 0; // G1 Linear [Op1 P2]
+    Lines1[14].X := 167.864; Lines1[14].Z := 231.077; Lines1[14].F := 300; Lines1[14].CMD := 1; Lines1[14].Param := 0; // G1 Linear [Op1 P2]
+    Lines1[15].X := 167.864; Lines1[15].Z := 231.077; Lines1[15].F := 0; Lines1[15].CMD := 0; Lines1[15].Param := 0; // G0 Rapid [Op1 P2]
+    Lines1[16].X := 0.000; Lines1[16].Z := 0.000; Lines1[16].F := 10; Lines1[16].CMD := 51; Lines1[16].Param := 3; // PASS 3 of 10
+    Lines1[17].X := 259.780; Lines1[17].Z := 212.889; Lines1[17].F := 0; Lines1[17].CMD := 0; Lines1[17].Param := 0; // G0 Rapid [Op1 P3]
+    Lines1[18].X := 259.761; Lines1[18].Z := 217.889; Lines1[18].F := 300; Lines1[18].CMD := 1; Lines1[18].Param := 0; // G1 Linear [Op1 P3]
+    Lines1[19].X := 172.137; Lines1[19].Z := 250.990; Lines1[19].F := 300; Lines1[19].CMD := 1; Lines1[19].Param := 0; // G1 Linear [Op1 P3]
+    Lines1[20].X := 172.137; Lines1[20].Z := 250.990; Lines1[20].F := 0; Lines1[20].CMD := 0; Lines1[20].Param := 0; // G0 Rapid [Op1 P3]
+    Lines1[21].X := 0.000; Lines1[21].Z := 0.000; Lines1[21].F := 10; Lines1[21].CMD := 51; Lines1[21].Param := 4; // PASS 4 of 10
+    Lines1[22].X := 259.755; Lines1[22].Z := 217.333; Lines1[22].F := 0; Lines1[22].CMD := 0; Lines1[22].Param := 0; // G0 Rapid [Op1 P4]
+    Lines1[23].X := 259.752; Lines1[23].Z := 222.333; Lines1[23].F := 300; Lines1[23].CMD := 1; Lines1[23].Param := 0; // G1 Linear [Op1 P4]
+    Lines1[24].X := 178.954; Lines1[24].Z := 269.963; Lines1[24].F := 300; Lines1[24].CMD := 1; Lines1[24].Param := 0; // G1 Linear [Op1 P4]
+    Lines1[25].X := 178.954; Lines1[25].Z := 269.963; Lines1[25].F := 0; Lines1[25].CMD := 0; Lines1[25].Param := 0; // G0 Rapid [Op1 P4]
+    Lines1[26].X := 0.000; Lines1[26].Z := 0.000; Lines1[26].F := 10; Lines1[26].CMD := 51; Lines1[26].Param := 5; // PASS 5 of 10
+    Lines1[27].X := 259.754; Lines1[27].Z := 221.778; Lines1[27].F := 0; Lines1[27].CMD := 0; Lines1[27].Param := 0; // G0 Rapid [Op1 P5]
+    Lines1[28].X := 259.738; Lines1[28].Z := 226.778; Lines1[28].F := 300; Lines1[28].CMD := 1; Lines1[28].Param := 0; // G1 Linear [Op1 P5]
+    Lines1[29].X := 188.109; Lines1[29].Z := 287.584; Lines1[29].F := 300; Lines1[29].CMD := 1; Lines1[29].Param := 0; // G1 Linear [Op1 P5]
+    Lines1[30].X := 188.109; Lines1[30].Z := 287.584; Lines1[30].F := 0; Lines1[30].CMD := 0; Lines1[30].Param := 0; // G0 Rapid [Op1 P5]
+    Lines1[31].X := 0.000; Lines1[31].Z := 0.000; Lines1[31].F := 10; Lines1[31].CMD := 51; Lines1[31].Param := 6; // PASS 6 of 10
+    Lines1[32].X := 259.739; Lines1[32].Z := 226.222; Lines1[32].F := 0; Lines1[32].CMD := 0; Lines1[32].Param := 0; // G0 Rapid [Op1 P6]
+    Lines1[33].X := 259.723; Lines1[33].Z := 231.222; Lines1[33].F := 300; Lines1[33].CMD := 1; Lines1[33].Param := 0; // G1 Linear [Op1 P6]
+    Lines1[34].X := 199.346; Lines1[34].Z := 303.478; Lines1[34].F := 300; Lines1[34].CMD := 1; Lines1[34].Param := 0; // G1 Linear [Op1 P6]
+    Lines1[35].X := 199.346; Lines1[35].Z := 303.478; Lines1[35].F := 0; Lines1[35].CMD := 0; Lines1[35].Param := 0; // G0 Rapid [Op1 P6]
+    Lines1[36].X := 0.000; Lines1[36].Z := 0.000; Lines1[36].F := 10; Lines1[36].CMD := 51; Lines1[36].Param := 7; // PASS 7 of 10
+    Lines1[37].X := 259.725; Lines1[37].Z := 230.667; Lines1[37].F := 0; Lines1[37].CMD := 0; Lines1[37].Param := 0; // G0 Rapid [Op1 P7]
+    Lines1[38].X := 259.708; Lines1[38].Z := 235.667; Lines1[38].F := 300; Lines1[38].CMD := 1; Lines1[38].Param := 0; // G1 Linear [Op1 P7]
+    Lines1[39].X := 212.346; Lines1[39].Z := 317.320; Lines1[39].F := 300; Lines1[39].CMD := 1; Lines1[39].Param := 0; // G1 Linear [Op1 P7]
+    Lines1[40].X := 212.346; Lines1[40].Z := 317.320; Lines1[40].F := 0; Lines1[40].CMD := 0; Lines1[40].Param := 0; // G0 Rapid [Op1 P7]
+    Lines1[41].X := 0.000; Lines1[41].Z := 0.000; Lines1[41].F := 10; Lines1[41].CMD := 51; Lines1[41].Param := 8; // PASS 8 of 10
+    Lines1[42].X := 259.710; Lines1[42].Z := 235.111; Lines1[42].F := 0; Lines1[42].CMD := 0; Lines1[42].Param := 0; // G0 Rapid [Op1 P8]
+    Lines1[43].X := 259.693; Lines1[43].Z := 240.111; Lines1[43].F := 300; Lines1[43].CMD := 1; Lines1[43].Param := 0; // G1 Linear [Op1 P8]
+    Lines1[44].X := 226.738; Lines1[44].Z := 328.844; Lines1[44].F := 300; Lines1[44].CMD := 1; Lines1[44].Param := 0; // G1 Linear [Op1 P8]
+    Lines1[45].X := 226.738; Lines1[45].Z := 328.844; Lines1[45].F := 0; Lines1[45].CMD := 0; Lines1[45].Param := 0; // G0 Rapid [Op1 P8]
+    Lines1[46].X := 0.000; Lines1[46].Z := 0.000; Lines1[46].F := 10; Lines1[46].CMD := 51; Lines1[46].Param := 9; // PASS 9 of 10
+    Lines1[47].X := 259.695; Lines1[47].Z := 239.556; Lines1[47].F := 0; Lines1[47].CMD := 0; Lines1[47].Param := 0; // G0 Rapid [Op1 P9]
+    Lines1[48].X := 259.678; Lines1[48].Z := 244.556; Lines1[48].F := 300; Lines1[48].CMD := 1; Lines1[48].Param := 0; // G1 Linear [Op1 P9]
+    Lines1[49].X := 242.115; Lines1[49].Z := 337.848; Lines1[49].F := 300; Lines1[49].CMD := 1; Lines1[49].Param := 0; // G1 Linear [Op1 P9]
+    Lines1[50].X := 242.115; Lines1[50].Z := 337.848; Lines1[50].F := 0; Lines1[50].CMD := 0; Lines1[50].Param := 0; // G0 Rapid [Op1 P9]
+    Lines1[51].X := 0.000; Lines1[51].Z := 0.000; Lines1[51].F := 10; Lines1[51].CMD := 51; Lines1[51].Param := 10; // PASS 10 of 10
+    Lines1[52].X := 259.680; Lines1[52].Z := 244.000; Lines1[52].F := 0; Lines1[52].CMD := 0; Lines1[52].Param := 0; // G0 Rapid [Op1 P10]
+    Lines1[53].X := 259.664; Lines1[53].Z := 249.000; Lines1[53].F := 300; Lines1[53].CMD := 1; Lines1[53].Param := 0; // G1 Linear [Op1 P10]
+    Lines1[54].X := 258.039; Lines1[54].Z := 344.202; Lines1[54].F := 300; Lines1[54].CMD := 1; Lines1[54].Param := 0; // G1 Linear [Op1 P10]
+    Lines1[55].X := 258.039; Lines1[55].Z := 344.202; Lines1[55].F := 0; Lines1[55].CMD := 0; Lines1[55].Param := 0; // G0 Rapid [Op1 P10]
+    Lines1[56].X := 258.039; Lines1[56].Z := 314.202; Lines1[56].F := 0; Lines1[56].CMD := 0; Lines1[56].Param := 0; // G0 Rapid [Op1 P10]
+    Lines1[57].X := 228.039; Lines1[57].Z := 314.202; Lines1[57].F := 0; Lines1[57].CMD := 0; Lines1[57].Param := 0; // G0 Rapid [Op1 P10]
+    Lines1[58].X := 228.039; Lines1[58].Z := 314.202; Lines1[58].F := 0; Lines1[58].CMD := 20; Lines1[58].Param := 30; // Spindle ON 300 RPM [Op1 P10]
+    Lines1[59].X := 228.039; Lines1[59].Z := 314.202; Lines1[59].F := 0; Lines1[59].CMD := 10; Lines1[59].Param := 6; // Tool Change T6 [Op1 P10]
+    Lines1[60].X := 0.000; Lines1[60].Z := 0.000; Lines1[60].F := 5; Lines1[60].CMD := 50; Lines1[60].Param := 2; // OPERATION 2 of 5
+    Lines1[61].X := 0.000; Lines1[61].Z := 0.000; Lines1[61].F := 1; Lines1[61].CMD := 51; Lines1[61].Param := 1; // PASS 1 of 1
+    Lines1[62].X := 142.106; Lines1[62].Z := 187.000; Lines1[62].F := 0; Lines1[62].CMD := 0; Lines1[62].Param := 0; // G0 Rapid [Op2 P1]
+    Lines1[63].X := 182.106; Lines1[63].Z := 187.000; Lines1[63].F := 50; Lines1[63].CMD := 1; Lines1[63].Param := 0; // G1 Linear [Op2 P1]
+    Lines1[64].X := 182.106; Lines1[64].Z := 187.000; Lines1[64].F := 0; Lines1[64].CMD := 0; Lines1[64].Param := 0; // G0 Rapid [Op2 P1]
+    Lines1[65].X := 182.106; Lines1[65].Z := 0.000; Lines1[65].F := 0; Lines1[65].CMD := 0; Lines1[65].Param := 0; // G0 Rapid [Op2 P1]
+    Lines1[66].X := 0.000; Lines1[66].Z := 0.000; Lines1[66].F := 0; Lines1[66].CMD := 0; Lines1[66].Param := 0; // G0 Rapid [Op2 P1]
+    Lines1[67].X := 0.000; Lines1[67].Z := 0.000; Lines1[67].F := 0; Lines1[67].CMD := 20; Lines1[67].Param := 60; // Spindle ON 600 RPM [Op2 P1]
+    Lines1[68].X := 0.000; Lines1[68].Z := 0.000; Lines1[68].F := 0; Lines1[68].CMD := 10; Lines1[68].Param := 4; // Tool Change T4 [Op2 P1]
+    Lines1[69].X := 0.000; Lines1[69].Z := 0.000; Lines1[69].F := 5; Lines1[69].CMD := 50; Lines1[69].Param := 3; // OPERATION 3 of 5
+    Lines1[70].X := 0.000; Lines1[70].Z := 0.000; Lines1[70].F := 1; Lines1[70].CMD := 51; Lines1[70].Param := 1; // PASS 1 of 1
+    Lines1[71].X := 165.385; Lines1[71].Z := 400.663; Lines1[71].F := 0; Lines1[71].CMD := 0; Lines1[71].Param := 0; // G0 Rapid [Op3 P1]
+    Lines1[72].X := 258.931; Lines1[72].Z := 399.000; Lines1[72].F := 300; Lines1[72].CMD := 1; Lines1[72].Param := 0; // G1 Linear [Op3 P1]
+    Lines1[73].X := 258.973; Lines1[73].Z := 394.000; Lines1[73].F := 300; Lines1[73].CMD := 1; Lines1[73].Param := 0; // G1 Linear [Op3 P1]
+    Lines1[74].X := 258.973; Lines1[74].Z := 394.000; Lines1[74].F := 0; Lines1[74].CMD := 0; Lines1[74].Param := 0; // G0 Rapid [Op3 P1]
+    Lines1[75].X := 258.973; Lines1[75].Z := 364.000; Lines1[75].F := 0; Lines1[75].CMD := 0; Lines1[75].Param := 0; // G0 Rapid [Op3 P1]
+    Lines1[76].X := 228.973; Lines1[76].Z := 364.000; Lines1[76].F := 0; Lines1[76].CMD := 0; Lines1[76].Param := 0; // G0 Rapid [Op3 P1]
+    Lines1[77].X := 228.973; Lines1[77].Z := 364.000; Lines1[77].F := 0; Lines1[77].CMD := 20; Lines1[77].Param := 30; // Spindle ON 300 RPM [Op3 P1]
+    Lines1[78].X := 228.973; Lines1[78].Z := 364.000; Lines1[78].F := 0; Lines1[78].CMD := 10; Lines1[78].Param := 7; // Tool Change T7 [Op3 P1]
+    Lines1[79].X := 0.000; Lines1[79].Z := 0.000; Lines1[79].F := 5; Lines1[79].CMD := 50; Lines1[79].Param := 4; // OPERATION 4 of 5
+    Lines1[80].X := 0.000; Lines1[80].Z := 0.000; Lines1[80].F := 1; Lines1[80].CMD := 51; Lines1[80].Param := 1; // PASS 1 of 1
+    Lines1[81].X := 142.106; Lines1[81].Z := 187.000; Lines1[81].F := 0; Lines1[81].CMD := 0; Lines1[81].Param := 0; // G0 Rapid [Op4 P1]
+    Lines1[82].X := 182.106; Lines1[82].Z := 187.000; Lines1[82].F := 50; Lines1[82].CMD := 1; Lines1[82].Param := 0; // G1 Linear [Op4 P1]
+    Lines1[83].X := 182.106; Lines1[83].Z := 187.000; Lines1[83].F := 0; Lines1[83].CMD := 0; Lines1[83].Param := 0; // G0 Rapid [Op4 P1]
+    Lines1[84].X := 182.106; Lines1[84].Z := 0.000; Lines1[84].F := 0; Lines1[84].CMD := 0; Lines1[84].Param := 0; // G0 Rapid [Op4 P1]
+    Lines1[85].X := 0.000; Lines1[85].Z := 0.000; Lines1[85].F := 0; Lines1[85].CMD := 0; Lines1[85].Param := 0; // G0 Rapid [Op4 P1]
+    Lines1[86].X := 0.000; Lines1[86].Z := 0.000; Lines1[86].F := 0; Lines1[86].CMD := 20; Lines1[86].Param := 60; // Spindle ON 600 RPM [Op4 P1]
+    Lines1[87].X := 0.000; Lines1[87].Z := 0.000; Lines1[87].F := 0; Lines1[87].CMD := 10; Lines1[87].Param := 4; // Tool Change T4 [Op4 P1]
+    Lines1[88].X := 0.000; Lines1[88].Z := 0.000; Lines1[88].F := 5; Lines1[88].CMD := 50; Lines1[88].Param := 5; // OPERATION 5 of 5
+    Lines1[89].X := 0.000; Lines1[89].Z := 0.000; Lines1[89].F := 1; Lines1[89].CMD := 51; Lines1[89].Param := 1; // PASS 1 of 1
+    Lines1[90].X := 164.966; Lines1[90].Z := 450.663; Lines1[90].F := 0; Lines1[90].CMD := 0; Lines1[90].Param := 0; // G0 Rapid [Op5 P1]
+    Lines1[91].X := 258.512; Lines1[91].Z := 449.000; Lines1[91].F := 300; Lines1[91].CMD := 1; Lines1[91].Param := 0; // G1 Linear [Op5 P1]
+    Lines1[92].X := 258.554; Lines1[92].Z := 444.000; Lines1[92].F := 300; Lines1[92].CMD := 1; Lines1[92].Param := 0; // G1 Linear [Op5 P1]
+    Lines1[93].X := 258.554; Lines1[93].Z := 444.000; Lines1[93].F := 0; Lines1[93].CMD := 0; Lines1[93].Param := 0; // G0 Rapid [Op5 P1]
+    Lines1[94].X := 258.554; Lines1[94].Z := 97.000; Lines1[94].F := 0; Lines1[94].CMD := 0; Lines1[94].Param := 0; // G0 Rapid [Op5 P1]
+    Lines1[95].X := 162.106; Lines1[95].Z := 97.000; Lines1[95].F := 0; Lines1[95].CMD := 0; Lines1[95].Param := 0; // G0 Rapid [Op5 P1]
+    Lines1[96].X := 162.106; Lines1[96].Z := 97.000; Lines1[96].F := 0; Lines1[96].CMD := 21; Lines1[96].Param := 0; // Spindle OFF [Op5 P1]
+    Lines1[97].X := 162.106; Lines1[97].Z := 97.000; Lines1[97].F := 0; Lines1[97].CMD := 21; Lines1[97].Param := 0; // Spindle OFF
+    Lines1[98].X := 0.000; Lines1[98].Z := 0.000; Lines1[98].F := 0; Lines1[98].CMD := 99; Lines1[98].Param := 0; // Program END
+
+END_DATA_BLOCK

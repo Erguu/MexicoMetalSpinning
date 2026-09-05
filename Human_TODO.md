@@ -328,6 +328,14 @@ Until then the machine runs exactly as before. Nothing breaks. Nothing is missin
       This is the test that matters. If a recipe that used to run now refuses to start,
       stop and tell me.
 
+**To test it in PLCSIM before any of that**, a ready recipe is waiting:
+`gcodes/test/DB_RecipeProgram3_passmarkers.scl`. It is program 1 with the pass markers
+added — same geometry, same tools, same feeds. Import it into **slot 3**. It does not
+touch your program 1 or 2 files.
+
+Watch `DB_HMI.CurrentOp` / `TotalOps` / `CurrentPass` / `TotalPasses`.
+Expect `Op 1 of 5`, and the pass counting `1 → 10` through Op1. Then Op2..Op5, one pass each.
+
 **It is optional in the CAM, on purpose.** SpinningCam gets a checkbox. On a long program the
 pass numbers eat lines that would otherwise be toolpath, so you can turn them off and get the
 resolution back. Use them when proving out a new part.
