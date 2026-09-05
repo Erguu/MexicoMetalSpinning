@@ -2542,3 +2542,61 @@ question is free and it decides between a ~20-line gate and a new state with a f
 
 `cb3aa0e` (state 25 phase-1 lock check) is the foundation this builds on — it is what makes any
 return from manual to a paused recipe verifiable. ITEM-57 and ITEM-58 are both prerequisites.
+
+---
+
+## ITEM-60 — SAFETY: `Bypass_ToolHeadLock` silently unlocks the tool head ~6 s into the cut
+
+**Found 2026-09-06** while working out how to run recipes in PLCSIM (branch
+`feat/pass-number-display`). Not a regression — this is how the bypass has always behaved.
+Dormant in production: `FC_LoadConfig` forces the flag FALSE on every power-up.
+
+### What happens
+
+`DB_HMI.Bypass_ToolHeadLock` reads as "skip the sensor wait", and in FB_Process that is exactly
+what it does — two sites, `06_MainProcess.scl:2884` (state 17) and `:3242` (the PAUSED resume
+check), both advancing without `AtSetpoint`.
+
+But `FB_CylinderControl` is a **separate state machine and knows nothing about the flag.**
+`DB_Cylinder_ToolHeadLock` is `PositioningMode := 1` (magnetic sensor) with
+`Timeout_Extend := T#6S`, and FB_Process holds `Cmd_Extend` TRUE throughout RUNNING. So with the
+bypass set and the sensor not confirming — a failed sensor, a broken wire, low air, or PLCSIM —
+the sequence is:
+
+1. State 17 advances immediately. Machining starts.
+2. ~6 s later `#tExtend.Q` fires: `State := 10; Error := TRUE; ErrorID := 16#0501`
+   (`09_Sensors_Actuators.scl:613`).
+3. State 10 hits the `ELSE` of the solenoid `CASE` (`09:891-894`) — **both coils off**.
+4. `ValveType = 1`, 5/2 spring return, so the spring **retracts the lock while the tool is cutting**.
+5. **No alarm.** Nothing outside `06:2884` / `:3242` reads `DB_Cylinder_ToolHeadLock.Error`; it
+   reaches only `DB_Diagnostic.CylDiag[3]` and `DB_Manual.SelCyl_*`, both display-only.
+
+The bypass is therefore a **dry-run-only** switch, and its name does not say so. An operator who
+sets it to get past a failing sensor gets a machine that runs unlocked with a clean status line.
+
+### Why it has not bitten
+
+The flag is FALSE in production and forced FALSE at every power-up. It is a commissioning tool.
+The exposure is a service session where someone sets it to work around a sensor fault and then
+runs a real part.
+
+### Options
+
+1. **Rename and warn.** `DB_HMI.HasWarning` + a `WarningID` while it is set, same treatment as
+   `Bypass_EStop` (which does exactly this today). Cheapest, and it makes the state visible.
+   Does not stop the coil dropping.
+2. **Suppress the cylinder timeout under the bypass.** Pass the flag into the cylinder call and
+   hold `Timeout_Extend` off, so the FB stays in State 1 with `Sol_A` energised instead of
+   faulting to State 10. Keeps the lock *engaged* during a bypassed run, which is what someone
+   setting the flag almost certainly expects.
+3. **Both.** Recommended: 2 makes the behaviour match the name, 1 makes it visible.
+
+Not urgent — nothing is broken in production today. But **decide it before anyone is told to set
+this flag on the machine**, which is exactly what a PLCSIM instruction can turn into by habit.
+
+### Related
+
+Same family as ITEM-41 and ITEM-58: an actuator whose command path and whose error path disagree
+about who is in charge. Worth checking whether `Bypass_Drives` and `Bypass_ToolChanger` have the
+same shape — this was found by asking "what does the FB do while the process ignores it", and that
+question has not been asked of the other bypasses.
