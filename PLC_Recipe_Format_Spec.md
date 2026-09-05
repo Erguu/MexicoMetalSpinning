@@ -52,7 +52,25 @@ rewrites `02b_RecipePrograms.scl`, the `FB_RecipeLoader` `CASE`, `PROGRAM_COUNT`
 | 30  | DWELL          | No        | No      | Time in 100ms (0-25.5s)  | G4 P              |
 | 40  | CYLINDER_GOTO  | No        | No      | Ignored (see note)       | —                 |
 | 41  | ATMO           | No        | No      | 1 / 2 / 3 (see below)    | —                 |
+| 50  | OP_MARK        | No        | Yes (total ops) | Operation number (1-based) | —         |
+| 51  | PASS_MARK      | No        | Yes (passes in op) | Pass number in op (1-based) | —      |
 | 99  | PROGRAM_END    | No        | No      | Ignored                  | M30               |
+
+> **CMD=50 / CMD=51 — display only, and optional.** Zero-motion marker lines that carry the
+> operation and pass number to `DB_HMI.CurrentOp / TotalOps / CurrentPass / TotalPasses`, so the
+> operator sees "Op 1, pass 3 of 10" instead of only "line 47". They command nothing: no actuator,
+> no wait, no axis move — each costs about two scans, like any other non-motion line.
+>
+> SpinningCam emits them only when its PLC-mode **"Emit pass markers"** option is on. **Off is a
+> permanent, supported state, not a legacy case:** markers are ordinary lines and consume slots in
+> the fixed `Array[0..999]`, so on a program near the 1000-line ceiling the exporter would have to
+> spend geometry resolution on them. Whoever exports the program chooses. With markers absent all
+> four HMI tags stay 0, which means "no pass information" — the HMI blanks the group rather than
+> showing "Pass 0 / 0".
+>
+> `TotalOps` counts the operations that **actually emit lines**, not the entries in the CAM's
+> operation list — the two differ today (`DB_RecipeProgram1` lists seven, emits five). Spec and open
+> questions: `Program/docs/letter_spinningcam_pass_markers.md`.
 
 > **CMD=20 note — do not emit `Param=0` for a dry run.** `Param=0` is a *valid* command meaning
 > "spindle on at 0 RPM", and pre-scan only checks the upper bound against `DB_Spindle.MaxSpeed`, so

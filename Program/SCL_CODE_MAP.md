@@ -267,8 +267,24 @@ STATE_ERROR(999)       → Error, wait for reset
                      Param=3: SolB_Cmd41=FALSE + SolAtmo_Cmd=FALSE (release both overrides)
                      Both flags also cleared on STOPPED / COMPLETE / ERROR
                      NOTE: Param=2 does NOT release Sol_B -- only Param=3 (or a program end) does.
+50 = OpMark        → DISPLAY ONLY. Param = operation number, F = total operations.
+                     Fire-and-go (no actuator, no wait, ~2 scans). Also zeroes CurrentPass/
+                     TotalPasses so a new op cannot inherit the previous op's pass count.
+51 = PassMark      → DISPLAY ONLY. Param = pass number in op, F = passes in this op.
+                     50/51 are OPTIONAL: SpinningCam emits them only when its PLC-mode
+                     "Emit pass markers" option is on, because they consume slots in the
+                     fixed Array[0..999] and a near-full program would have to trade
+                     geometry resolution for them. Absent = all four outputs stay 0 =
+                     "no pass information" and the HMI blanks the display. Never an error:
+                     an un-updated PLC hits the ELSE "unknown command - skip" branch, and
+                     pre-scan only bounds-checks CMD <= 1.
 99 = End           → Program finished
 ```
+
+**Outputs for the pass display:** `CurrentOp`, `TotalOps`, `CurrentPass`, `TotalPasses` (all `Int`,
+0 = unknown). Cleared in the `IF #Reset THEN` block; mirrored to `DB_HMI` every scan by FB_Process
+next to `LoadedProgramName`, deliberately in no reset path. See
+`Program/docs/letter_spinningcam_pass_markers.md`.
 
 **Dependencies:** `FB_Axis_AbsPos` (fbMoveX, fbMoveZ), `FB_Axis_Halt` (fbHaltX, fbHaltZ),
 `DB_MachineConfig`, `DB_HMI` (override, SingleStepMode), `DB_ToolConfig`, `DB_Diagnostic`

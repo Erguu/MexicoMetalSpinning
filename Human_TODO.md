@@ -295,6 +295,51 @@ roughly 20× this. See `Program/docs/MotionSmoothing.md`.
 Why it stops at 2 scans and not 0: `Program/docs/RecipeHandler_ScanLatency.md`.
 
 ---
+
+### 🔧 Pass number on the screen — new 2026-09-06
+
+> ⚠️ **Different branch.** `feat/pass-number-display`. It sits on top of `feat/pause-to-manual`.
+
+The screen shows only the line number today. This adds the operation and pass number:
+
+```
+Line:  47 / 99
+Op 1 (of 5)
+Pass:   3 / 10
+```
+
+**Nothing will appear on screen yet.** Two things have to happen first, and neither is yours
+to do today.
+
+1. SpinningCam has to start writing the pass number into the recipe. The letter is written:
+   `Program/docs/letter_spinningcam_pass_markers.md`. Send it.
+2. You add the four fields to the WinCC screen.
+
+Until then the machine runs exactly as before. Nothing breaks. Nothing is missing.
+
+- [ ] **Add four tags to the run screen** — `DB_HMI.CurrentOp`, `TotalOps`, `CurrentPass`,
+      `TotalPasses`. All Int.
+
+- [ ] **Hide the whole group when the value is 0.** `0` means "this recipe has no pass
+      information". Do **not** let the screen show `Pass 0 / 0` — it looks like a fault.
+      Old recipes will always read 0. That is correct, not a problem.
+
+- [ ] **Run one old recipe after downloading.** It must behave exactly as it does today.
+      This is the test that matters. If a recipe that used to run now refuses to start,
+      stop and tell me.
+
+**It is optional in the CAM, on purpose.** SpinningCam gets a checkbox. On a long program the
+pass numbers eat lines that would otherwise be toolpath, so you can turn them off and get the
+resolution back. Use them when proving out a new part.
+
+⛔ **Two questions went to SpinningCam with the letter. Both matter more than this feature.**
+Chase the answers.
+
+- Program 1's header lists **7 operations** but only **5** ever run. Op6 and Op7 vanish.
+- Programs 3, 4 and 5 are three different parts and all three stop at exactly **999 lines**.
+  If the CAM is cutting programs short, we need to know.
+
+---
 ---
 
 # 4 · TOOL SERVO ENABLE `%Q8.1`

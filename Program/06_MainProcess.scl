@@ -4319,6 +4319,25 @@ BEGIN
     "DB_HMI".Checksum_Calculated         := #fbRecipeLoader.ChecksumCalc;
     "DB_HMI".Checksum_Verified           := #fbRecipeLoader.ChecksumOK;
 
+    // Pass display (2026-09-06). "Line 47 of 99" tells an operator nothing -- the job is
+    // described in passes, and the recipe header already reads "Op1: ROUGHING, 10 paso".
+    // Fed by the CMD=50/51 marker lines SpinningCam emits when its PLC-mode option is on.
+    //
+    // Same continuous-mirror discipline as the name and checksum above, and for the same
+    // reason: it is written every scan, appears in NO reset path, and always reports what
+    // FB_RecipeHandler actually holds. The handler's own Reset block zeroes all four, so a
+    // stop or a hard reset blanks the HMI without four more clears to keep in sync here.
+    //
+    // 0 means NO PASS INFORMATION -- and it means that in every case: the recipe carries no
+    // markers (the CAM option was off), or execution has not reached the first marker yet.
+    // Because there is only one meaning, the HMI needs only one rule: blank the group on 0.
+    // Do NOT mirror these inside STATE_RUNNING next to DB_HMI.CurrentLine -- that would
+    // freeze the last pass on screen after the program ends instead of clearing it.
+    "DB_HMI".CurrentOp                   := #fbRecipeHandler.CurrentOp;
+    "DB_HMI".TotalOps                    := #fbRecipeHandler.TotalOps;
+    "DB_HMI".CurrentPass                 := #fbRecipeHandler.CurrentPass;
+    "DB_HMI".TotalPasses                 := #fbRecipeHandler.TotalPasses;
+
     // =========================================================================
     // CONTACTOR CONTROL -- called as the last step of FB_Process.
     // FC_ContactorControl reads DB_HMI.Btn_Contactor_* and Bypass_EStop/HasError.

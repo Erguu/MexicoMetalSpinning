@@ -57,6 +57,25 @@
 | **Status Message** | `DB_HMI.StatusMsg` | String[50] | Text message (English) |
 | **Current Line** | `DB_HMI.CurrentLine` | Int | Which step/line |
 | **Total Lines** | `DB_HMI.TotalLines` | Int | Total program lines |
+| **Current Op** | `DB_HMI.CurrentOp` | Int | Operation the current line belongs to (**0 = unknown**) |
+| **Total Ops** | `DB_HMI.TotalOps` | Int | Operations in the program (**0 = unknown**) |
+| **Current Pass** | `DB_HMI.CurrentPass` | Int | Pass within the current operation (**0 = unknown**) |
+| **Total Passes** | `DB_HMI.TotalPasses` | Int | Passes in the current operation (**0 = unknown**) |
+
+> **Pass display — blank the group when the value is 0.** These four are fed by the optional
+> `CMD=50`/`CMD=51` marker lines SpinningCam emits when its PLC-mode "Emit pass markers" option is
+> on. `0` means *no pass information*: either the loaded recipe carries no markers (the option was
+> off — a normal, supported production setting) or execution has not reached the first marker yet.
+> There is only that one meaning, so one rule covers it: show nothing rather than `Op 0`/`Pass 0 / 0`.
+>
+> Suggested layout, matching how an operator describes the job:
+> ```
+> Line:  47 / 99
+> Op 1 (of 5)
+> Pass:   3 / 10
+> ```
+> Written by FB_Process as a continuous mirror every scan, so they follow the recipe handler back to
+> 0 on stop or reset with no separate clear. Format spec: `PLC_Recipe_Format_Spec.md` CMD 50/51.
 | **Progress** | `DB_HMI.ProgressPercent` | Real | Progress 0-100% |
 | **Current Tool** | `DB_HMI.CurrentTool` | Int | Tool 1-4 |
 | **Active Feedrate** | `DB_HMI.FeedrateActive` | Real | Current speed (mm/min) |

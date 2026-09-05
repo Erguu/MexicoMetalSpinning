@@ -973,6 +973,13 @@ VERSION : 0.1
         Error : Bool;               // Error occurred
         ErrorID : Word;             // Error code (DB_ErrorCodes)
         CurrentLine : Int;          // Current line index being executed
+        // Pass display (CMD_OP_MARK / CMD_PASS_MARK). 0 = no pass information:
+        // either the recipe carries no markers, or execution has not reached the
+        // first one yet. The HMI must blank the group on 0, not show "0 / 0".
+        CurrentOp : Int;            // Operation number the current line belongs to
+        TotalOps : Int;             // Operations in the program
+        CurrentPass : Int;          // Pass number within the current operation
+        TotalPasses : Int;          // Passes in the current operation
         ToolChangeReq : Bool;       // Tool change requested by recipe
         ToolReqNumber : Int;        // Requested tool number (from recipe Param)
         SpindleReqStart : Bool;     // Spindle start request flag
@@ -1094,6 +1101,14 @@ VERSION : 0.1
                                             // Param=3 → release retract, all coils off.
                                             // (The old "Sol_B+SolAtmo ON" at P1 was the SolB_Cmd41
                                             //  override, deleted 2026-08-07 -- see ITEM-41.)
+        // Pass markers -- display only, no machine action. Emitted by SpinningCam
+        // when its PLC-mode "pass markers" option is on; absent otherwise, and a
+        // recipe without them runs exactly as before with the HMI fields blank.
+        // The pass number is data SpinningCam already computes and used to throw
+        // away in a source comment ("[Op1 P2]"), which the compiler discards.
+        // See Program/docs/letter_spinningcam_pass_markers.md.
+        CMD_OP_MARK   : Byte := 50;     // Param = operation number, F = total operations
+        CMD_PASS_MARK : Byte := 51;     // Param = pass number in op, F = total passes in op
         CMD_END : Byte := 99;
 
         // Recipe format: RecipeLine.Param encodes spindle speed as RPM ÷ 10.
@@ -1137,6 +1152,13 @@ BEGIN
         #Done := FALSE;
         #Paused := FALSE;
         #ToolChangeReq := FALSE;
+        // Pass display back to "unknown". This is the only clear path they need:
+        // FB_Process mirrors these to DB_HMI every scan, so zeroing here blanks
+        // the HMI too -- see the mirror comment in 06_MainProcess.scl.
+        #CurrentOp := 0;
+        #TotalOps := 0;
+        #CurrentPass := 0;
+        #TotalPasses := 0;
         // BUG FIX: Clear internal flags so rising-edge detection works on next Start
         #prevStart := FALSE;
         #bTrigMove := FALSE;
@@ -1313,9 +1335,26 @@ BEGIN
                         END_IF;
                         #state := STATE_NEXT;
 
+                    CMD_OP_MARK:
+                        // Display only -- no actuator, no wait. Fire-and-go like CMD_ATMO.
+                        #CurrentOp := BYTE_TO_INT(#Lines[#lineIndex].Param);
+                        #TotalOps  := #Lines[#lineIndex].F;
+                        // A new operation invalidates the previous operation's pass
+                        // count. Without this, an op whose first pass marker is missing
+                        // would keep showing the old op's "pass 10 of 10".
+                        #CurrentPass := 0;
+                        #TotalPasses := 0;
+                        #state := STATE_NEXT;
+
+                    CMD_PASS_MARK:
+                        // Display only -- no actuator, no wait.
+                        #CurrentPass := BYTE_TO_INT(#Lines[#lineIndex].Param);
+                        #TotalPasses := #Lines[#lineIndex].F;
+                        #state := STATE_NEXT;
+
                     CMD_RAPID, CMD_LINEAR:
                         #state := STATE_EXEC;
-                        
+
                     ELSE
                         // Unknown command - skip
                         #state := STATE_NEXT;

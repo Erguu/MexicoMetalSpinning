@@ -114,6 +114,19 @@ NON_RETAIN
         MachineState : Int;         // State machine state
         CurrentLine : Int;          // Current line being executed
         TotalLines : Int;           // Total lines in program
+        // -----------------------------------------------------------
+        // Pass display -- mirrored from FB_RecipeHandler every scan.
+        // Fed by the CMD=50 / CMD=51 marker lines SpinningCam emits when its
+        // PLC-mode "pass markers" option is on. 0 = NO PASS INFORMATION (recipe
+        // has no markers, or the first one has not been reached yet), so the HMI
+        // must blank the whole group on 0 rather than display "Pass 0 / 0".
+        // "Line 47 of 99" means nothing to an operator; "Op 1, pass 3 of 10" is
+        // how the job is actually described. See letter_spinningcam_pass_markers.md.
+        // -----------------------------------------------------------
+        CurrentOp : Int;            // Operation number of the current line (0 = unknown)
+        TotalOps : Int;             // Operations in the loaded program (0 = unknown)
+        CurrentPass : Int;          // Pass number within the current operation (0 = unknown)
+        TotalPasses : Int;          // Passes in the current operation (0 = unknown)
         ProgressPercent : Real;     // Progress 0-100%
         CurrentTool : Int;          // Active tool (1-4)
         FeedrateActive : Real;      // Actual feedrate (mm/min)
