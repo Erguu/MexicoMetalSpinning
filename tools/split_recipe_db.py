@@ -94,13 +94,21 @@ FIELD_RE = re.compile(
     r"\bLines(\d*)\[(\d+)\]\.(CMD|Param|F)[ \t]*:=[ \t]*(-?\d+)[ \t]*;")
 PROVIDES_RE = re.compile(
     r"^([ \t]*)Header\.ProvidesChecksum[ \t]*:=[ \t]*(\w+)[ \t]*;.*$", re.M)
-# UDINT# prefix optional on read, always written: an untyped literal above 32767
-# is ambiguous to TIA's implicit-conversion rules, and the DB would not compile.
+# UDINT# prefix optional on read, and optional on write too -- measured on the real
+# project 2026-08-14 (Program/docs/udint_literal_test/): TIA types a bare literal from
+# the assignment target across the whole UDInt range, so 4294967295 imports and stores
+# exactly. We write the prefix only because it is free. Do not restore the old note
+# here claiming a bare literal above 32767 will not compile; it was theory, and wrong.
 CHECKSUM_RE = re.compile(
     r"^([ \t]*)Header\.Checksum[ \t]*:=[ \t]*(?:UDINT#)?(\d+)[ \t]*;.*$", re.M)
 LINECOUNT_LINE_RE = re.compile(r"^([ \t]*)Header\.LineCount[ \t]*:=[ \t]*\d+[ \t]*;.*$", re.M)
 
 MASK32 = 0xFFFFFFFF
+
+# Display-only marker lines (2026-09-06). They command nothing; the checksum folds
+# them like any other line. See Program/docs/letter_spinningcam_pass_markers.md.
+CMD_OP_MARK = 50      # Param = operation number, F = total operations
+CMD_PASS_MARK = 51    # Param = pass number in op, F = total passes in that op
 
 FLAT, CHUNKED, BROKEN = "flat", "chunked", "broken"
 
@@ -248,6 +256,49 @@ def check_flat(text: str) -> int:
     return line_count
 
 
+def pass_report(text: str, line_count: int) -> list[str]:
+    """Replay FB_RecipeHandler's CMD=50/51 branches and describe what the HMI shows.
+
+    Reports rather than raises: markers are optional by design (the CAM checkbox),
+    and a program without them is a supported production setting, not a defect.
+    The one thing worth flagging is an operation whose passes leave the display
+    blank, because blank is our "no pass information" state and should only ever
+    mean the option is off.
+    """
+    lines = parse_lines(text)
+    ops: dict[int, int] = {}          # op number -> passes seen
+    totals: set[int] = set()          # every TotalOps value claimed
+    order: list[tuple[int, int]] = []  # (op, pass) in execution order
+    op = 0
+    for g in range(line_count):
+        cmd, param, f = lines.get(g, [0, 0, 0])
+        if cmd == CMD_OP_MARK:
+            op = param
+            totals.add(f)
+            ops.setdefault(op, 0)
+            order.append((op, 0))
+        elif cmd == CMD_PASS_MARK:
+            ops[op] = ops.get(op, 0) + 1
+            order.append((op, param))
+
+    if not order:
+        return ["no pass markers -- HMI pass group stays blank (option off)"]
+
+    out = [f"{len(order)} pass markers: "
+           + ", ".join(f"Op{o} x{n}" for o, n in sorted(ops.items()))]
+    if len(totals) != 1:
+        out.append(f"  WARNING: TotalOps disagrees between markers: {sorted(totals)}")
+    elif (claimed := totals.pop()) != len(ops):
+        out.append(f"  WARNING: markers claim {claimed} operations but only"
+                   f" {len(ops)} emit lines -- the display would park at"
+                   f" 'Op {max(ops)} of {claimed}' and read as a hang")
+    for o, n in sorted(ops.items()):
+        if n == 0:
+            out.append(f"  NOTE: Op{o} has no CMD=51 -- the pass field blanks while it"
+                       " runs. Ask the CAM to emit 'pass 1 of 1' for single-pass ops")
+    return out
+
+
 def check_marker(text: str) -> str:
     """Validate the // CHUNKS: n x m header when the exporter wrote one.
 
@@ -355,7 +406,8 @@ def convert(text: str) -> tuple[str, int]:
     return "\n".join(out), moved
 
 
-def process(path: pathlib.Path, check_only: bool, stamp: bool = False) -> int:
+def process(path: pathlib.Path, check_only: bool, stamp: bool = False,
+            passes: bool = False) -> int:
     """Returns 1 if the file still needs work, 0 if it is ready, 2 if it is broken."""
     kind, line_count, msg = inspect(path)
 
@@ -363,8 +415,16 @@ def process(path: pathlib.Path, check_only: bool, stamp: bool = False) -> int:
         print(f"  REFUSED       {path.name}: {msg}")
         return 2
 
+    def show_passes() -> None:
+        if not passes:
+            return
+        raw = io.open(path, encoding="utf-8", newline="").read().replace("\r\n", "\n")
+        for row in pass_report(raw, line_count):
+            print(f"                {row}")
+
     if kind == CHUNKED and not stamp:
         print(f"  ready         {path.name}  ({line_count} lines, {msg})")
+        show_passes()
         return 0
     if check_only:
         verb = "WOULD STAMP" if kind == CHUNKED else "WOULD CONVERT"
@@ -386,6 +446,7 @@ def process(path: pathlib.Path, check_only: bool, stamp: bool = False) -> int:
               f" -> Lines1..Lines{CHUNK_COUNT}{note})")
     else:
         print(f"  stamped       {path.name}  ({line_count} lines{note})")
+    show_passes()
     return 0
 
 
@@ -514,6 +575,9 @@ def main() -> int:
                     help="also write Header.ProvidesChecksum/Checksum, computed from the"
                          " file's own lines. Proves the load path end to end; does NOT"
                          " audit the CAM (only SpinningCam's own number does that)")
+    ap.add_argument("--passes", action="store_true",
+                    help="also report the CMD=50/51 pass markers and what the HMI"
+                         " would show. Reports only -- markers are optional by design")
     args = ap.parse_args()
 
     paths = list(args.files)
@@ -532,7 +596,7 @@ def main() -> int:
             print(f"  MISSING       {path}")
             failed += 1
             continue
-        rc = process(path, args.check, stamp=args.stamp)
+        rc = process(path, args.check, stamp=args.stamp, passes=args.passes)
         pending += 1 if rc == 1 else 0
         failed += 1 if rc == 2 else 0
 

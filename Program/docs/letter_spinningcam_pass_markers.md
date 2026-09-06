@@ -198,9 +198,57 @@ Already implemented and waiting:
    more gets **truncated**, we need to know now — a silently shortened program is a far worse
    problem than a missing pass counter. If it is a soft cap, 1000 is what our array holds.
 4. Confirmation that operation and pass numbers stay within 255.
-5. One test export of `DB_RecipeProgram1` with the option on, so we can verify against our
-   implementation before you regenerate anything else.
+5. ~~One test export of `DB_RecipeProgram1` with the option on, so we can verify against our
+   implementation before you regenerate anything else.~~ **Received 2026-09-06 — see the
+   verification section at the end. Both exports pass.**
 
 Still open from the previous letters, in case it is easy to fold in: a **distinct** `Header.sName`
 per program. Every export still says `'SpinningCam Program'`, so the operator's program-name display
 cannot distinguish them.
+
+---
+
+## Verification of your test exports — 2026-09-06
+
+You sent the same part twice, option off (`DB_RecipeProgram1`, 984 lines) and option on
+(`DB_RecipeProgram2`, 989 lines). Both were checked offline against the PLC's own rules — the
+loader's checksum fold, the pre-scan, and a replay of the command dispatcher. **Both pass. Nothing
+needs changing to make this work.** Details, so you know exactly what was and was not covered:
+
+| Check | Result |
+|---|---|
+| Chunk layout, `LineCount`, `CMD=99` END marker | correct in both |
+| `S7_Optimized_Access := 'FALSE'`, `UNLINKED` before `NON_RETAIN` | correct in both |
+| `Header.Checksum` vs our fold, markers included | matches — `140848185` / `138567047` |
+| Marker counts | 3 × `CMD=50`, 25 × `CMD=51` |
+| `TotalOps` on every `CMD=50` | `3`, and 3 operations do emit lines |
+| Marker `Param`/`F` within a byte | yes |
+| Pass numbering | 1..13 in Op1, 1..12 in Op3, no gaps, no restarts |
+
+Three things worth telling you, none of them a defect:
+
+**1. The point thinning is correct, and we measured it.** Turning the option on cost 23 geometry
+lines. Every operation and every pass survives, every pass keeps its exact start and end point, and
+the largest deviation of the thinned path from the full one is **0.0057 mm**. That is the behaviour
+we asked for — resolution traded, geometry never truncated. Please keep it that way.
+
+**2. A single-pass operation gets no `CMD=51`.** Op2 (`POINT`, 1 pass) emits `CMD=50 Param=2` and
+then no pass marker, so the operator sees `Op 2 of 3` with the pass field blank. It is only three
+lines long, so on this part it flashes past — but **please emit `CMD=51 Param=1 F=1` for
+single-pass operations too**, so the field never blanks mid-program. Blank is our "no pass
+information" state and it should mean the option is off, not that the current operation happens to
+have one pass.
+
+**3. Your comment tags lag by a line or two at operation boundaries.** In `DB_RecipeProgram2` the
+spindle and rapid lines belonging to Op2 and Op3 still carry `// ... [Op1 P13]`. This is harmless —
+SCL comments are discarded at compile and the PLC never sees them — and the `CMD=50` lines
+themselves are in the right place. Mentioning it only because those comments are how a human reads
+the export.
+
+Two earlier questions are now answered by these files and need no reply: `Header.sName` is distinct
+(`'Program 1'` / `'Program 2'`), and the line ceiling is being respected by thinning rather than
+truncating. **The Op6/Op7 question above still stands** — these exports have three operations and
+all three emit lines, so it did not recur here, but we never learned why it happened.
+
+What remains untested is only what needs a machine: the counters advancing on screen. Our
+simulator cannot run S7-1200 motion, so the recipe is verified as far as the first move.

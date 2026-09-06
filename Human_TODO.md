@@ -266,11 +266,19 @@ So everything below can be tested at your desk:
       tool numbers, and the tool table being applied.
 - [ ] **Alarms and HMI text behave** for all of the above.
 
-For the pass markers specifically, import
-`gcodes/test/DB_RecipeProgram3_passmarkers.scl` into **slot 3** (it does not touch your
-program 1 or 2 files), select program 3 and press Start. **Getting as far as `16#000C`
-is a PASS** — it means the marker lines loaded, the checksum matched, and pre-scan
-accepted the two new commands. That is the part of the change that could break something.
+For the pass markers, use the two real SpinningCam exports — same part, option off and on:
+
+1. `gcodes/DB_RecipeProgram1.scl` into slot 1 — **no markers.** This is the regression test
+   and the more important of the two: markers off is a normal production setting, not a
+   legacy case. It must behave exactly as before.
+2. `gcodes/DB_RecipeProgram2.scl` into slot 2 — **28 markers.**
+
+Select each and press Start. **Getting as far as `16#000C` is a PASS** — it means the lines
+loaded, the checksum matched, and pre-scan accepted the two new commands. That is the part
+of the change that could break something.
+
+(`gcodes/test/DB_RecipeProgram3_passmarkers.scl` is the hand-built version from before the
+CAM shipped. The real exports supersede it; keep it only as a short 99-line case.)
 
 The pass counter itself cannot be seen in PLCSIM. It only runs once the machine is
 cutting, which needs real axes.
@@ -376,14 +384,22 @@ Op 1 (of 5)
 Pass:   3 / 10
 ```
 
-**Nothing will appear on screen yet.** Two things have to happen first, and neither is yours
-to do today.
+**✅ SpinningCam has already built its half.** Two exports of the same part arrived 2026-09-06:
 
-1. SpinningCam has to start writing the pass number into the recipe. The letter is written:
-   `Program/docs/letter_spinningcam_pass_markers.md`. Send it.
-2. You add the four fields to the WinCC screen.
+| File | Option | Lines | Checked |
+|---|---|---|---|
+| `gcodes/DB_RecipeProgram1.scl` | **off** | 984 | passes, no markers |
+| `gcodes/DB_RecipeProgram2.scl` | **on** | 989 | passes, 28 markers |
 
-Until then the machine runs exactly as before. Nothing breaks. Nothing is missing.
+Both were verified at the desk — chunking, `LineCount`, END marker, checksum, pre-scan rules,
+and a replay of what the screen would show. **Both are good. Import them.**
+
+The option cost 23 toolpath points. No operation and no pass was lost, every pass keeps its
+exact start and end point, and the path moved by at most **0.0057 mm**. That is the trade
+working as intended.
+
+**One thing is still missing before anything appears on screen:** you add the four fields to
+the WinCC run screen. Until then the machine runs exactly as before. Nothing breaks.
 
 - [ ] **Add four tags to the run screen** — `DB_HMI.CurrentOp`, `TotalOps`, `CurrentPass`,
       `TotalPasses`. All Int.
@@ -396,21 +412,32 @@ Until then the machine runs exactly as before. Nothing breaks. Nothing is missin
       This is the test that matters. If a recipe that used to run now refuses to start,
       stop and tell me.
 
-**To check it at your desk first**, see **§2 → "PLCSIM — what it can and cannot test"**.
-A ready test recipe is waiting there. PLCSIM cannot show you the counter, but it does
-prove the part that could break: that the marker lines load, the checksum still matches,
+**To re-check any future export at your desk**, one command:
+
+```
+python tools/split_recipe_db.py --check --passes gcodes/DB_RecipeProgram2.scl
+```
+
+It prints the marker structure and warns if the operation count is wrong. Then see
+**§2 → "PLCSIM — what it can and cannot test"**. PLCSIM cannot show you the counter, but it
+does prove the part that could break: that the marker lines load, the checksum still matches,
 and pre-scan accepts them.
 
 **It is optional in the CAM, on purpose.** SpinningCam gets a checkbox. On a long program the
 pass numbers eat lines that would otherwise be toolpath, so you can turn them off and get the
 resolution back. Use them when proving out a new part.
 
-⛔ **Two questions went to SpinningCam with the letter. Both matter more than this feature.**
-Chase the answers.
+⛔ **Still to chase with SpinningCam.** In order of how much they matter.
 
-- Program 1's header lists **7 operations** but only **5** ever run. Op6 and Op7 vanish.
-- Programs 3, 4 and 5 are three different parts and all three stop at exactly **999 lines**.
-  If the CAM is cutting programs short, we need to know.
+- **The 999-line cap** — programs 3, 4 and 5 are three different parts and all three stop at
+  exactly 999 lines. The new exports show the CAM now thins points to fit rather than cutting
+  a program short, which is the right behaviour — but we never learned what happened to those
+  three. **Ask before running them.**
+- **Program 1's old header listed 7 operations but only 5 ever ran.** It did not recur in the
+  new exports (3 listed, 3 emitted), so it may already be fixed. Confirm it was.
+- **Single-pass operations get no pass marker.** Op2 in the new export is one pass and emits
+  no `CMD=51`, so the pass field goes blank for the three lines it runs. Harmless. Asked them
+  to emit "pass 1 of 1" so blank only ever means "the option is off".
 
 ---
 ---
