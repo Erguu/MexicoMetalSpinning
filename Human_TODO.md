@@ -219,6 +219,74 @@ exist.
       Without it the operator sees a blank warning in PNP_HALT.
 
 ---
+
+### 🖥️ PLCSIM — what it can and cannot test
+
+**Read this before trying to test anything in PLCSIM. It will save you a day.**
+
+**The machine will never move in PLCSIM. Not homing, not an axis, not a recipe.**
+
+This is a Siemens limitation, not a fault in our program and not something to fix.
+S7-PLCSIM does not simulate S7-1200 motion control. The axes appear in the project and
+download without complaint, but their logic never runs and the pulse outputs they use are
+not simulated at all.
+
+**What you will see if you try:** press Start, and the machine sits in STARTING and then
+fails with **`16#000C` "X drive not ready"**.
+
+⛔ **Do not go looking for a wiring, contactor or drive fault. There isn't one.**
+It says X only because X is checked first — Z and Tool are equally not-ready.
+These were all checked and none of them was the cause:
+
+- the E-Stop input (bypassing it changes nothing)
+- a drive-ready input (this machine has none configured)
+- a cleared bypass flag
+
+The giveaway is that `Power_X_ErrorID`, `Power_Z_ErrorID` and `Power_Tool_ErrorID` are
+**all `16#0000`**, and the axis diagnostics page in TIA is **greyed out**. Nothing errored,
+because nothing is running.
+
+**PLCSIM Advanced does not help.** It does not support the S7-1200 at all.
+
+---
+
+#### What PLCSIM IS good for
+
+Quite a lot, as it happens. Pressing Start runs the recipe work **before** it touches an axis:
+
+```
+Start -> RECIPE_LOAD (11) -> PRE_SCAN (12) -> STARTING (10) <- fails here in PLCSIM
+```
+
+So everything below can be tested at your desk:
+
+- [ ] **The recipe actually loads.** Chunked transfer, the retry logic, `16#0314`.
+- [ ] **The checksum verifies.** `16#0316` if it does not.
+- [ ] **Pre-scan passes.** Line count, END marker, travel limits, feeds, spindle speed,
+      tool numbers, and the tool table being applied.
+- [ ] **Alarms and HMI text behave** for all of the above.
+
+For the pass markers specifically, import
+`gcodes/test/DB_RecipeProgram3_passmarkers.scl` into **slot 3** (it does not touch your
+program 1 or 2 files), select program 3 and press Start. **Getting as far as `16#000C`
+is a PASS** — it means the marker lines loaded, the checksum matched, and pre-scan
+accepted the two new commands. That is the part of the change that could break something.
+
+The pass counter itself cannot be seen in PLCSIM. It only runs once the machine is
+cutting, which needs real axes.
+
+---
+
+#### If you need to watch the counter without cutting metal
+
+Real CPU, **drive power physically isolated** — the breaker or the motor plugs, not the
+contactor, because the program closes that itself. The axes are open-loop, so the PLC
+believes the moves happened and the whole program runs with nothing turning.
+
+Homing will not complete that way, so this is only worth doing if you first ask me to add
+a homing option back. **Do not improvise one.**
+
+---
 ---
 
 # 3 · AFTER YOU DOWNLOAD
@@ -328,73 +396,10 @@ Until then the machine runs exactly as before. Nothing breaks. Nothing is missin
       This is the test that matters. If a recipe that used to run now refuses to start,
       stop and tell me.
 
----
-
-### 🖥️ PLCSIM — what it can and cannot test
-
-**Read this before trying to test anything in PLCSIM. It will save you a day.**
-
-**The machine will never move in PLCSIM. Not homing, not an axis, not a recipe.**
-
-This is a Siemens limitation, not a fault in our program and not something to fix.
-S7-PLCSIM does not simulate S7-1200 motion control. The axes appear in the project and
-download without complaint, but their logic never runs and the pulse outputs they use are
-not simulated at all.
-
-**What you will see if you try:** press Start, and the machine sits in STARTING and then
-fails with **`16#000C` "X drive not ready"**.
-
-⛔ **Do not go looking for a wiring, contactor or drive fault. There isn't one.**
-It says X only because X is checked first — Z and Tool are equally not-ready.
-These were all checked and none of them was the cause:
-
-- the E-Stop input (bypassing it changes nothing)
-- a drive-ready input (this machine has none configured)
-- a cleared bypass flag
-
-The giveaway is that `Power_X_ErrorID`, `Power_Z_ErrorID` and `Power_Tool_ErrorID` are
-**all `16#0000`**, and the axis diagnostics page in TIA is **greyed out**. Nothing errored,
-because nothing is running.
-
-**PLCSIM Advanced does not help.** It does not support the S7-1200 at all.
-
----
-
-#### What PLCSIM IS good for
-
-Quite a lot, as it happens. Pressing Start runs the recipe work **before** it touches an axis:
-
-```
-Start -> RECIPE_LOAD (11) -> PRE_SCAN (12) -> STARTING (10) <- fails here in PLCSIM
-```
-
-So everything below can be tested at your desk:
-
-- [ ] **The recipe actually loads.** Chunked transfer, the retry logic, `16#0314`.
-- [ ] **The checksum verifies.** `16#0316` if it does not.
-- [ ] **Pre-scan passes.** Line count, END marker, travel limits, feeds, spindle speed,
-      tool numbers, and the tool table being applied.
-- [ ] **Alarms and HMI text behave** for all of the above.
-
-For the pass markers specifically, import
-`gcodes/test/DB_RecipeProgram3_passmarkers.scl` into **slot 3** (it does not touch your
-program 1 or 2 files), select program 3 and press Start. **Getting as far as `16#000C`
-is a PASS** — it means the marker lines loaded, the checksum matched, and pre-scan
-accepted the two new commands. That is the part of the change that could break something.
-
-The pass counter itself cannot be seen in PLCSIM. It only runs once the machine is
-cutting, which needs real axes.
-
----
-
-#### If you need to watch the counter without cutting metal
-
-Real CPU, **drive power physically isolated** — the breaker or the motor plugs, not the
-contactor, because the program closes that itself. The axes are open-loop, so the PLC
-believes the moves happened and the whole program runs with nothing turning.
-
-Homing will not complete that way, so this is only worth doing if you first ask me to add
-a homing option back. **Do not improvise one.**
+**To check it at your desk first**, see **§2 → "PLCSIM — what it can and cannot test"**.
+A ready test recipe is waiting there. PLCSIM cannot show you the counter, but it does
+prove the part that could break: that the marker lines load, the checksum still matches,
+and pre-scan accepts them.
 
 **It is optional in the CAM, on purpose.** SpinningCam gets a checkbox. On a long program the
 pass numbers eat lines that would otherwise be toolpath, so you can turn them off and get the
