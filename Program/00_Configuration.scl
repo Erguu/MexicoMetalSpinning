@@ -218,6 +218,15 @@ BEGIN
     "DB_MachineConfig".FeedrateConvFactor := 60.0;    // divisor: recipe F (mm/min) / this = axis velocity (mm/s)
                                                       // Standard mm/min→mm/s = divide by 60; adjust if TO uses different units
 
+    // EXPERIMENTAL (exp/velocity-path-350): velocity-mode continuous path.
+    // Enable is forced FALSE on every restart -- same philosophy as Bypass_EStop: an
+    // experimental motion mode must never be inherited across a power cycle.
+    // See docs/MotionSmoothing.md section 9 before switching it on.
+    "DB_MachineConfig".VelPath_Enable       := FALSE;
+    "DB_MachineConfig".VelPath_LeadTime     := 0.15;   // s  -- takeover lead (feed x time = distance). ~1.5 x OB1 cycle;
+                                                       //       sized for the ~100 ms cycle reported 2026-09-14 (unmeasured)
+    "DB_MachineConfig".VelPath_MaxDeviation := 1.0;    // mm -- off-path fault threshold (16#000F)
+
     // =========================================================================
     // SECTION 2 -- HOMING (REFERENCE SEEK)
     // ─────────────────────────────────────────────────────────────────────────

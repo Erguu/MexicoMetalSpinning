@@ -234,6 +234,8 @@ STATE_IDLE(0)          → Wait for start
 STATE_READ(10)         → Read line, determine command type
 STATE_EXEC(20)         → Calculate motion parameters, start
 STATE_WAIT(30)         → Wait for motion completion (30s timeout)
+STATE_VEL_WAIT(32)     → EXPERIMENTAL (exp/velocity-path-350, DB_MachineConfig.VelPath_Enable, forced FALSE at power-up):
+                         run of G1 lines under MC_MoveVelocity, no stop per line; faults 16#000F. See docs/MotionSmoothing.md §9
 STATE_TOOL_REQ(40)     → Generate tool change request
 STATE_TOOL_WAIT(50)    → Wait for tool change confirmation from FB_Process
 STATE_SPINDLE(55)      → Forward spindle command via flag to FB_Process
@@ -781,6 +783,7 @@ text; the queue path (`FC_ReportError`) shows its `Details` string as the EN tex
 | 0x000A | FB_Process | Z drive power failed — sole-axis rule as 0x0009 |
 | 0x000D | FB_Process | Tool drive power failed — sole-axis rule as 0x0009 |
 | 0x000E | FB_Process | **Drive power failed on 2+ axes in the same scan.** `ErrorDetail` / `DB_Diagnostic.Error_Text` name every faulted axis and its TO code (`DrivePower: X=… Z=… Tool=…`). Points at the shared 24 V, the contactor circuit, E-Stop, or the TOs still starting up — not at one drive |
+| 0x000F | FB_RecipeHandler | **EXPERIMENTAL velocity-mode path fault** (branch `exp/velocity-path-350`). `Error_Text`/`ErrorDetail` name the guard: velocity command aborted by another motion command, off path / moving backwards beyond `VelPath_MaxDeviation`, run permission lost, or command lost between segments. Axes are halted. See `docs/MotionSmoothing.md` §9.3 |
 | 0x0021 | FB_Process (TO poller) | X axis TO fault (StatusBits.Error, no active MC command) |
 | 0x0022 | FB_Process (TO poller) | Z axis TO fault |
 | 0x0023 | FB_Process (TO poller) | Tool axis TO fault |

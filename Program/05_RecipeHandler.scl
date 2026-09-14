@@ -188,8 +188,8 @@ VERSION : 0.3
         // emits. Change them together or the transfers go out of step.
         // <<< GENERATED:CHUNK_GEOMETRY -- do not hand-edit; run tools/gen_recipe_slots.py >>>
         CHUNK_LINES    : Int := 100;
-        CHUNK_COUNT    : Int := 10;
-        LINES_MAX      : Int := 1000; // = CHUNK_LINES * CHUNK_COUNT, and the bound of
+        CHUNK_COUNT    : Int := 4;
+        LINES_MAX      : Int := 400; // = CHUNK_LINES * CHUNK_COUNT, and the bound of
                                       // DB_SelectedRecipe.Lines + the pre-scan guard
         // <<< END GENERATED:CHUNK_GEOMETRY >>>
         // <<< GENERATED:PROGRAM_COUNT -- do not hand-edit; run tools/gen_recipe_slots.py >>>
@@ -248,18 +248,6 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines10,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         2:  CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Header,
@@ -271,18 +259,6 @@ BEGIN
                 3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines3,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines4,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines10,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         3:  CASE #chunkPhase OF
@@ -296,18 +272,6 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines10,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         4:  CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Header,
@@ -319,18 +283,6 @@ BEGIN
                 3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines3,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines4,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines10,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         5:  CASE #chunkPhase OF
@@ -344,18 +296,6 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines10,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         6:  CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Header,
@@ -367,18 +307,6 @@ BEGIN
                 3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines3,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines4,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines10,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         7:  CASE #chunkPhase OF
@@ -392,18 +320,6 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines10,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         8:  CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Header,
@@ -415,18 +331,6 @@ BEGIN
                 3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines3,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines4,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines10,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         9:  CASE #chunkPhase OF
@@ -440,18 +344,6 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines10,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         10: CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Header,
@@ -463,18 +355,6 @@ BEGIN
                 3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines3,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines4,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines5,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines6,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines7,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines8,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                9: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines9,
-                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
-                10:#retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines10,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
     END_CASE;
@@ -763,7 +643,7 @@ VERSION : 0.1
     VAR_IN_OUT
         // Bound to "DB_SelectedRecipe".Lines -- the work-memory buffer, never a
         // DB_RecipeProgram* (those are load-memory only). Must match that DB.
-        Lines : Array[0..999] of "RecipeLine"; // Recipe lines storage (in/out DB reference)
+        Lines : Array[0..399] of "RecipeLine"; // Recipe lines storage (in/out DB reference)
     END_VAR
     VAR
         state : Int;                // Local state machine
@@ -991,7 +871,7 @@ VERSION : 0.1
     VAR_IN_OUT
         // Bound to "DB_SelectedRecipe".Lines -- the work-memory buffer, never a
         // DB_RecipeProgram* (those are load-memory only). Must match that DB.
-        Lines : Array[0..999] of "RecipeLine"; // Reference to recipe lines in DB
+        Lines : Array[0..399] of "RecipeLine"; // Reference to recipe lines in DB
         Axis_X : TO_PositioningAxis;           // Axis TO IN_OUT
         Axis_Z : TO_PositioningAxis;
     END_VAR
@@ -1048,6 +928,48 @@ VERSION : 0.1
         fbMoveZ : "FB_Axis_AbsPos";
         fbHaltX : "FB_Axis_Halt";
         fbHaltZ : "FB_Axis_Halt";
+
+        // ---------------------------------------------------------------------
+        // Velocity-mode continuous path (EXPERIMENTAL, branch exp/velocity-path-350)
+        // ---------------------------------------------------------------------
+        // Runs of consecutive CMD_LINEAR lines are driven with MC_MoveVelocity
+        // instead of MC_MoveAbsolute, so the axes do not stop at every recipe line.
+        // Design, guards and test plan: docs/MotionSmoothing.md section 9.
+        //
+        // TWO instances per axis, used alternately (A, B, A, ...). MC_MoveVelocity
+        // latches Velocity only on a rising edge of Execute; with one instance every
+        // new segment would need an Execute-low scan first. Raising the OTHER
+        // instance aborts the running one and applies the new vector in the same
+        // scan. An instance is never raised twice in a row, so it always sees at
+        // least one Execute-low scan before its next edge.
+        //
+        // MC_MoveVelocity does NOT stop when Execute drops. Every way out of this
+        // mode other than the MC_MoveAbsolute hand-over must therefore halt the
+        // axes: Pause/Stop/ERROR through bHaltTrig, Reset through vmHaltReq.
+        mcVelXA : MC_MoveVelocity;
+        mcVelXB : MC_MoveVelocity;
+        mcVelZA : MC_MoveVelocity;
+        mcVelZB : MC_MoveVelocity;
+        vmActive    : Bool;         // A velocity command owns the axes right now
+        vmUseB      : Bool;         // Which instance pair carries the live command
+        vmHaltReq   : Bool;         // Reset left the axes moving -- hold MC_Halt until stopped
+        vmEligible  : Bool;         // This line runs in velocity mode (computed in EXEC)
+        vmWasActive : Bool;         // EXEC is handing a velocity run over to MC_MoveAbsolute
+        vmErr       : Bool;         // Live instance pair reports Error (from last call)
+        vmAborted   : Bool;         // Live instance pair was aborted by someone else
+        vmVelX      : Real;         // Signed X velocity of the live segment (mm/s)
+        vmVelZ      : Real;         // Signed Z velocity of the live segment (mm/s)
+        vmDX        : Real;         // Launch vector, actual position -> line end (mm)
+        vmDZ        : Real;
+        vmDist      : Real;
+        vmUX        : Real;         // Unit direction of the live segment
+        vmUZ        : Real;
+        vmSegLen    : Real;         // Length of the live segment at launch (mm)
+        vmRem       : Real;         // Remaining distance along the segment (mm)
+        vmLat       : Real;         // Distance off the segment line (mm)
+        vmSwitchDist : Real;        // Remaining distance at which the next line takes over (mm)
+        actX        : Real;         // Axis ActualPosition snapshot
+        actZ        : Real;
         
         // Timers for move timeout and dwell
         tonMoveTimeout : TON;
@@ -1081,6 +1003,7 @@ VERSION : 0.1
         STATE_STEP_WAIT : Int := 65;  // Wait for StepNext in SingleStepMode
         STATE_CYL_GOTO      : Int := 70;   // CMD=40: set BackSupport TargetPos and trigger extend
         STATE_CYL_GOTO_WAIT : Int := 71;   // CMD=40: wait for BackSupport AtSetpoint or error
+        STATE_VEL_WAIT      : Int := 32;   // Velocity-mode segment in progress (EXPERIMENTAL)
         STATE_DONE : Int := 99;
         STATE_PAUSED : Int := 800;         // Pause entry: halt axes, then retract
         STATE_PAUSE_RETRACT : Int := 801;  // Moving to retracted (tool-clear) position
@@ -1125,6 +1048,9 @@ BEGIN
     //   IDLE(0) → READ(10) → EXEC(20) → WAIT(30) → NEXT(60) → READ(10) → ...
     //   Special branches: TOOL_REQ(40)→TOOL_WAIT(50), SPINDLE(55), DWELL(57),
     //                     STEP_WAIT(65), PAUSED(800), STOPPING(850), DONE(99), ERROR(999)
+    //   Velocity mode (EXPERIMENTAL): READ(10) -> EXEC(20) -> VEL_WAIT(32) -> READ(10) ...
+    //                     for runs of CMD_LINEAR lines; the last line of a run falls
+    //                     back to EXEC -> WAIT(30) with MC_MoveAbsolute.
     // All axis moves are performed via fbMoveX / fbMoveZ.
     // Spindle and tool change requests are passed to FB_Process via flags (no direct drive access).
     // =========================================================================
@@ -1165,6 +1091,12 @@ BEGIN
         #bMoveX := FALSE;
         #bMoveZ := FALSE;
         #bHaltTrig := FALSE;
+        // Velocity mode: dropping Execute does not stop MC_MoveVelocity, and IDLE
+        // drives bHaltTrig FALSE -- so a reset taken mid-run latches its own halt.
+        IF #vmActive THEN
+            #vmHaltReq := TRUE;
+        END_IF;
+        #vmActive := FALSE;
         // Clear stale resume target from a previous pause. STATE_READ, not
         // STATE_EXEC -- see the declaration comment for why 20 is unsafe now
         // that STATE_EXEC is hoisted out of the CASE.
@@ -1200,6 +1132,8 @@ BEGIN
         // Required because the pause-retract states (801/803) leave bTrigMove TRUE;
         // without this, MC_MoveAbsolute and MC_Halt would fight on the same axis.
         #bTrigMove := FALSE;
+        // Velocity mode: release the velocity command; bHaltTrig above stops the axes.
+        #vmActive := FALSE;
         #Paused := FALSE;
         // Clear BackSupport Cmd_Extend -- if stop fires during CMD=40 (STATE_CYL_GOTO_WAIT),
         // without this the cylinder keeps extending through the entire stop/home sequence.
@@ -1207,12 +1141,12 @@ BEGIN
         #state := STATE_STOPPING;
     END_IF;
 
-    // Move timeout timer -- only counts during STATE_WAIT.
+    // Move timeout timer -- only counts during STATE_WAIT and STATE_VEL_WAIT.
     // PT is DB_MachineConfig.Timeout_Motion (T#300S as configured in FC_LoadConfig).
     // If the axis does not return Done within it, error 16#0008 (Motion Timeout) is raised.
     // Do NOT quote the figure in comments or operator strings -- it drifted once already:
     // three ErrorDetail strings said '(30s limit)' while the real value was 300 s (ITEM-56e).
-    #tonMoveTimeout(IN := #state = STATE_WAIT, PT := "DB_MachineConfig".Timeout_Motion);
+    #tonMoveTimeout(IN := (#state = STATE_WAIT) OR (#state = STATE_VEL_WAIT), PT := "DB_MachineConfig".Timeout_Motion);
 
     // Pause retract/return move timeout -- counts only while a pause move is in progress.
     // Guards against a stuck axis hanging the machine in the retract or return phase.
@@ -1232,7 +1166,9 @@ BEGIN
             #bTrigMove := FALSE;
             #bHaltTrig := FALSE;
             
-            IF #rtStart AND #LineCount > 0 THEN
+            // NOT vmHaltReq: a reset taken during a velocity run is still braking;
+            // starting a move now would fight that MC_Halt.
+            IF #rtStart AND #LineCount > 0 AND NOT #vmHaltReq THEN
                 #lineIndex := #StartLine;   // 0 = normal start; >0 = warm restart
                 #currX := #Axis_X.ActualPosition;
                 #currZ := #Axis_Z.ActualPosition;
@@ -1469,6 +1405,118 @@ BEGIN
                 END_IF;
             END_IF;
             
+        // -----------------------------------------------------------------
+        // === STATE_VEL_WAIT (32) -- EXPERIMENTAL velocity-mode segment ===
+        // -----------------------------------------------------------------
+        // The axes are moving under MC_MoveVelocity toward #targX/#targZ. Nothing
+        // here ends in v = 0: when the remaining distance drops under vmSwitchDist
+        // the line is counted done and STATE_READ launches the next one (EXEC
+        // computes its vector from the ACTUAL position, so the lag of that scan is
+        // corrected on the next segment instead of accumulating).
+        //
+        // Guard order matters: Pause first (operator intent), then run permission,
+        // then faults, then completion. Every exit except completion drops
+        // vmActive AND brings in a halt (bHaltTrig / STATE_ERROR), because
+        // MC_MoveVelocity keeps running when Execute drops.
+        32: // VEL_WAIT
+            #bTrigMove := FALSE;
+            #actX := #Axis_X.ActualPosition;
+            #actZ := #Axis_Z.ActualPosition;
+            #vmRem := (#targX - #actX) * #vmUX + (#targZ - #actZ) * #vmUZ;
+            #vmLat := ABS((#targX - #actX) * #vmUZ - (#targZ - #actZ) * #vmUX);
+
+            IF #Pause THEN
+                #vmActive := FALSE;
+                #bHaltTrig := TRUE;
+                // STATE_PAUSED waits for halt Done only on axes flagged as moving.
+                #bMoveX := TRUE;
+                #bMoveZ := TRUE;
+                // Resume re-reads the line and EXEC relaunches from the interruption
+                // point -- same path as a pause taken in STATE_WAIT.
+                #pauseReturnState := STATE_READ;
+                #state := STATE_PAUSED;
+
+            ELSIF NOT #Start THEN
+                // FB_Process left RUNNING without Stop/Pause/Reset reaching us
+                // (e.g. its own ERROR). A position move would just finish; a
+                // velocity command would not, so stop here.
+                #vmActive := FALSE;
+                #ErrorID := 16#000F;
+                "DB_Diagnostic".Error_Text := 'Velocity path: run permission lost';
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                        IN1 := INT_TO_STRING(#lineIndex), IN2 := ' run permission lost'));
+                #state := STATE_ERROR;
+
+            ELSIF #vmErr THEN
+                #vmActive := FALSE;
+                IF (#vmUseB AND #mcVelXB.Error) OR (NOT #vmUseB AND #mcVelXA.Error) THEN
+                    #ErrorID := 16#0001;
+                    IF #vmUseB THEN
+                        "DB_Diagnostic".MoveX_ErrorID := #mcVelXB.ErrorID;
+                    ELSE
+                        "DB_Diagnostic".MoveX_ErrorID := #mcVelXA.ErrorID;
+                    END_IF;
+                    "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := "DB_Diagnostic".MoveX_ErrorID);
+                    "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'X velocity move failed: ', IN2 := "DB_Diagnostic".TO_ErrorText);
+                ELSE
+                    #ErrorID := 16#0002;
+                    IF #vmUseB THEN
+                        "DB_Diagnostic".MoveZ_ErrorID := #mcVelZB.ErrorID;
+                    ELSE
+                        "DB_Diagnostic".MoveZ_ErrorID := #mcVelZA.ErrorID;
+                    END_IF;
+                    "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := "DB_Diagnostic".MoveZ_ErrorID);
+                    "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Z velocity move failed: ', IN2 := "DB_Diagnostic".TO_ErrorText);
+                END_IF;
+                // Single-writer: ErrorText from FB_AlarmManager (FB_Process forwards #ErrorID)
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                        IN1 := INT_TO_STRING(#lineIndex), IN2 := CONCAT(
+                                        IN1 := ' TO:', IN2 := "DB_Diagnostic".TO_ErrorText)));
+                #state := STATE_ERROR;
+
+            ELSIF #vmAborted THEN
+                // Another motion command took the axis (FB_Process PNP halt, a manual
+                // command, ...). Do NOT carry on to the next line -- that would
+                // relaunch motion straight through whatever stopped it.
+                #vmActive := FALSE;
+                #ErrorID := 16#000F;
+                "DB_Diagnostic".Error_Text := 'Velocity path: aborted by another motion command';
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                        IN1 := INT_TO_STRING(#lineIndex), IN2 := ' velocity cmd aborted'));
+                #state := STATE_ERROR;
+
+            ELSIF #vmLat > "DB_MachineConfig".VelPath_MaxDeviation
+               OR #vmRem > #vmSegLen + "DB_MachineConfig".VelPath_MaxDeviation THEN
+                // Off the line, or moving AWAY from the end point. Either means the
+                // commanded vector is not what the axes are doing.
+                #vmActive := FALSE;
+                #ErrorID := 16#000F;
+                "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Velocity path deviation mm: ',
+                                                     IN2 := REAL_TO_STRING(MAX(IN1 := #vmLat, IN2 := #vmRem - #vmSegLen)));
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                        IN1 := INT_TO_STRING(#lineIndex), IN2 := ' off path'));
+                #state := STATE_ERROR;
+
+            ELSIF #tonMoveTimeout.Q THEN
+                #vmActive := FALSE;
+                #ErrorID := 16#0008;
+                "DB_Diagnostic".Error_Text := 'Motion Timeout: velocity path';
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Vel path no progress - Ln:',
+                                        IN2 := INT_TO_STRING(#lineIndex));
+                #state := STATE_ERROR;
+
+            ELSIF #vmRem <= #vmSwitchDist THEN
+                // Segment done. The axes keep their current velocity for the scan it
+                // takes READ/EXEC to launch the next line -- no halt, no stop.
+                // SingleStepMode is deliberately NOT honoured here (the axes are
+                // moving). EXEC refuses velocity mode while it is on, so the next line
+                // lands with MC_MoveAbsolute and single-step takes over from there.
+                #currX := #targX;
+                #currZ := #targZ;
+                #lineIndex := #lineIndex + 1;
+                #state := STATE_READ;
+            END_IF;
+
         // -----------------------------------------------------------------
         // === STATE_TOOL_REQ (40) ===
         // -----------------------------------------------------------------
@@ -1821,6 +1869,7 @@ BEGIN
             #bMoveX := FALSE;
             #bMoveZ := FALSE;
             #bHaltTrig := TRUE;   // Safely stop both axes (was FALSE -- BUG FIX)
+            #vmActive := FALSE;   // Velocity mode: release the command; the halt above stops the axes
             // Ensure diagnostic block contains the latest recipe error context
             // Error_ProcessState is NOT written here (removed 2026-08-17): #state is this
             // FB's own state number, a different numbering space from FB_Process's, and in
@@ -1856,6 +1905,32 @@ BEGIN
     // Full argument: docs/RecipeHandler_ScanLatency.md
     // -------------------------------------------------------------------------
     IF #state = STATE_EXEC THEN
+        // --- Velocity mode (EXPERIMENTAL) -- is this line part of a run? ---------
+        // Only a CMD_LINEAR line with a real feed whose NEXT line is the same. The
+        // last line of a run, rapids, F=0 lines and single-step all use the
+        // MC_MoveAbsolute path below and end exactly on the programmed point.
+        #vmEligible := FALSE;
+        IF "DB_MachineConfig".VelPath_Enable AND #Start AND NOT "DB_HMI".SingleStepMode
+           AND #Lines[#lineIndex].CMD = CMD_LINEAR AND #Lines[#lineIndex].F > 0
+           AND #lineIndex + 1 < #LineCount THEN
+            // Nested, not one expression: SCL evaluates every operand of AND, and
+            // #Lines[#lineIndex + 1] on the last line would index past the array.
+            IF #Lines[#lineIndex + 1].CMD = CMD_LINEAR AND #Lines[#lineIndex + 1].F > 0 THEN
+                #vmEligible := TRUE;
+            END_IF;
+        END_IF;
+
+        // Leaving a velocity run: plan the MC_MoveAbsolute from where the axes really
+        // are (currX/currZ hold the previous NOMINAL end point), and command BOTH
+        // axes below -- an axis with < 0.01 mm left but a live velocity would
+        // otherwise never be told to stop.
+        #vmWasActive := #vmActive AND NOT #vmEligible;
+        IF #vmWasActive THEN
+            #currX := #Axis_X.ActualPosition;
+            #currZ := #Axis_Z.ActualPosition;
+            #vmActive := FALSE;
+        END_IF;
+
         // Linear interpolation: both axes start and finish simultaneously.
         // velX/velZ split proportionally over total distance.
         // This ensures X and Z reach target in the same time (true linear path).
@@ -1866,6 +1941,10 @@ BEGIN
         // Determine which axes need to move
         #bMoveX := #deltaX > 0.01;  // 0.01mm threshold
         #bMoveZ := #deltaZ > 0.01;
+        IF #vmWasActive THEN
+            #bMoveX := TRUE;   // see the hand-over comment above
+            #bMoveZ := TRUE;
+        END_IF;
         
         // Calculate velocity
         IF #Lines[#lineIndex].CMD = CMD_RAPID OR #Lines[#lineIndex].F = 0 THEN
@@ -1907,8 +1986,65 @@ BEGIN
             #velZ := "DB_MachineConfig".MinVelocity; 
         END_IF;
         
+        IF #vmEligible THEN
+            // --- Velocity-mode launch -------------------------------------------
+            // Vector from the ACTUAL position, not from currX/currZ: whatever the
+            // previous segment over- or under-ran is absorbed here.
+            #actX := #Axis_X.ActualPosition;
+            #actZ := #Axis_Z.ActualPosition;
+            #vmDX := #targX - #actX;
+            #vmDZ := #targZ - #actZ;
+            #vmDist := SQRT(#vmDX * #vmDX + #vmDZ * #vmDZ);
+            // Lead distance, capped at HALF the segment. The cap is what keeps a slow
+            // scan safe: at a ~100 ms OB1 cycle and 5 mm/s the uncapped lead can exceed
+            // a whole 1 mm chord, and every line would then be "done" on arrival.
+            #vmSwitchDist := MIN(IN1 := #feedrate * "DB_MachineConfig".VelPath_LeadTime,
+                                 IN2 := 0.5 * #vmDist);
+
+            IF #vmActive AND (#vmErr OR #vmAborted) THEN
+                // The live command died between VEL_WAIT's last check and this scan.
+                #vmActive := FALSE;
+                #ErrorID := 16#000F;
+                "DB_Diagnostic".Error_Text := 'Velocity path: command lost between segments';
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                        IN1 := INT_TO_STRING(#lineIndex), IN2 := ' velocity cmd lost'));
+                #state := STATE_ERROR;
+            ELSIF #vmDist <= 0.01 THEN
+                // Degenerate line (end point already reached). Take the next line on the
+                // NEXT scan via STATE_READ -- not STATE_NEXT, which costs a second scan.
+                //
+                // This used to skip every line shorter than the lead distance. With a slow
+                // scan that skip could chain: each skipped line costs scans, the axes run on
+                // the stale vector meanwhile, and VEL_WAIT's deviation guard never runs
+                // because the state never gets there. A real segment is now always
+                // commanded; only a genuinely zero-length line is skipped.
+                #currX := #targX;
+                #currZ := #targZ;
+                #lineIndex := #lineIndex + 1;
+                #state := STATE_READ;
+            ELSE
+                #vmVelX := #feedrate * #vmDX / #vmDist;
+                #vmVelZ := #feedrate * #vmDZ / #vmDist;
+                // Below the TO start/stop velocity a non-zero command is rejected;
+                // an exact 0.0 is the permitted "hold" value.
+                IF ABS(#vmVelX) < "DB_MachineConfig".MinVelocity THEN #vmVelX := 0.0; END_IF;
+                IF ABS(#vmVelZ) < "DB_MachineConfig".MinVelocity THEN #vmVelZ := 0.0; END_IF;
+                #vmUX := #vmDX / #vmDist;
+                #vmUZ := #vmDZ / #vmDist;
+                #vmSegLen := #vmDist;
+                IF #vmActive THEN
+                    #vmUseB := NOT #vmUseB;   // same-scan hand-off to the other instance pair
+                END_IF;
+                #vmActive := TRUE;
+                #velX := ABS(#vmVelX);        // diagnostics only
+                #velZ := ABS(#vmVelZ);
+                #bMoveX := FALSE;             // no MC_MoveAbsolute in this mode
+                #bMoveZ := FALSE;
+                #tonMoveTimeout(IN := FALSE, PT := "DB_MachineConfig".Timeout_Motion);
+                #state := STATE_VEL_WAIT;
+            END_IF;
         // Skip if no movement needed
-        IF NOT #bMoveX AND NOT #bMoveZ THEN
+        ELSIF NOT #bMoveX AND NOT #bMoveZ THEN
             #state := STATE_NEXT;
         ELSE
             // Trigger movement
@@ -1925,8 +2061,28 @@ BEGIN
     // -------------------------------------------------------------------------
     #fbMoveX(Execute := #bTrigMove AND #bMoveX, Position := #targX, Velocity := #velX, Axis := #Axis_X);
     #fbMoveZ(Execute := #bTrigMove AND #bMoveZ, Position := #targZ, Velocity := #velZ, Axis := #Axis_Z);
-    #fbHaltX(Execute := #bHaltTrig, Axis := #Axis_X);
-    #fbHaltZ(Execute := #bHaltTrig, Axis := #Axis_Z);
+    #fbHaltX(Execute := #bHaltTrig OR #vmHaltReq, Axis := #Axis_X);
+    #fbHaltZ(Execute := #bHaltTrig OR #vmHaltReq, Axis := #Axis_Z);
+
+    // Velocity mode (EXPERIMENTAL). Direction := 0 = direction from the sign of
+    // Velocity. Exactly one pair has Execute TRUE while vmActive; see the VAR block.
+    #mcVelXA(Axis := #Axis_X, Execute := #vmActive AND NOT #vmUseB, Velocity := #vmVelX, Direction := 0);
+    #mcVelXB(Axis := #Axis_X, Execute := #vmActive AND #vmUseB, Velocity := #vmVelX, Direction := 0);
+    #mcVelZA(Axis := #Axis_Z, Execute := #vmActive AND NOT #vmUseB, Velocity := #vmVelZ, Direction := 0);
+    #mcVelZB(Axis := #Axis_Z, Execute := #vmActive AND #vmUseB, Velocity := #vmVelZ, Direction := 0);
+    // Status of the LIVE pair, read by VEL_WAIT / EXEC next scan. The pair just
+    // switched away from reports CommandAborted by design and is not looked at.
+    IF #vmUseB THEN
+        #vmErr     := #mcVelXB.Error OR #mcVelZB.Error;
+        #vmAborted := #mcVelXB.CommandAborted OR #mcVelZB.CommandAborted;
+    ELSE
+        #vmErr     := #mcVelXA.Error OR #mcVelZA.Error;
+        #vmAborted := #mcVelXA.CommandAborted OR #mcVelZA.CommandAborted;
+    END_IF;
+    // Reset-path halt releases once both axes report stopped.
+    IF #vmHaltReq AND #fbHaltX.Done AND #fbHaltZ.Done THEN
+        #vmHaltReq := FALSE;
+    END_IF;
     
     // Calculate progress
     IF #LineCount > 0 THEN

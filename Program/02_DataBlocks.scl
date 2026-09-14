@@ -393,6 +393,15 @@ VERSION : 0.3
         MinVelocity : Real := 1.0;      // mm/s - TO minimum
         FeedrateConvFactor : Real := 60.0; // divisor to convert recipe F (mm/min) to axis velocity (mm/s)
 
+        // EXPERIMENTAL -- velocity-mode continuous path (branch exp/velocity-path-350).
+        // Tuning values: FC_LoadConfig writes all three on every restart, so an online
+        // change lasts until the next power cycle. VelPath_Enable is forced FALSE there
+        // -- the experiment must be switched on deliberately, every session.
+        // Design and test plan: docs/MotionSmoothing.md section 9.
+        VelPath_Enable       : Bool := FALSE; // TRUE = runs of G1 lines use MC_MoveVelocity (no stop per line)
+        VelPath_LeadTime     : Real := 0.15;  // s -- next line takes over at feed x this before the end point (capped at half the segment). Set ~1.5 x OB1 cycle time
+        VelPath_MaxDeviation : Real := 1.0;   // mm -- off-path / backwards distance that faults with 16#000F
+
         // Tool Configuration -- HMI-EDITABLE: active slot count (1-4)
         ToolCount    : Int  := 3;
         ToolVelocity : Real := 50.0;   // deg/s -- turret rotation speed (clamped by TO max)
@@ -1319,16 +1328,16 @@ VERSION : 0.1
 NON_RETAIN
     VAR
         Header : "RecipeHeader";                // Copy of the selected recipe's header
-        // DO NOT SHRINK THIS ARRAY (user decision 2026-08-10).
-        // It is 12,070 B -- 71% of all data-block work memory -- and the recipes in
-        // gcodes/ are only 38..314 lines, so this looks like 7 KB of obvious waste.
-        // It is not: those are TEST recipes. Production parts are expected to use the
-        // full 1000 lines. Shrinking it is a LAST RESORT if no other work-memory
-        // reclaim is sufficient, and it is a coupled change -- the recipe DB bound
-        // (LINES_PER_RECIPE in tools/gen_recipe_slots.py), the pre-scan guard
-        // (06_MainProcess.scl, activeLineCount > 1000) and the SpinningCam output must
-        // all move together, or READ_DBL fails on a length mismatch.
-        Lines  : Array[0..999] of "RecipeLine"; // Copy of the selected recipe's lines
+        // EXPERIMENTAL BOUND (branch exp/velocity-path-350, user decision 2026-09-14).
+        // Was Array[0..999] with a "do not shrink" rule (2026-08-10): production parts
+        // use ~1000 lines. Shrunk to 400 on this branch only, to free ~14 KB of work
+        // memory for the velocity-mode path experiment; the 999-line parts need a
+        // coarser CAM export to run here. Coupled change -- these move together or
+        // READ_DBL fails on a length mismatch: LINES_PER_RECIPE / CHUNK_LINES in
+        // tools/gen_recipe_slots.py, the two Lines InOuts in 05_RecipeHandler.scl,
+        // the pre-scan guard (06_MainProcess.scl, activeLineCount > 400) and the
+        // SpinningCam output.
+        Lines  : Array[0..399] of "RecipeLine"; // Copy of the selected recipe's lines
     END_VAR
 BEGIN
 END_DATA_BLOCK

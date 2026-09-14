@@ -290,6 +290,9 @@ BEGIN
                 // drive-power fault in the SAME scan -- see the drive-power block in
                 // FB_Process. ErrorDetail names the axes and their TO codes.
                 16#000E: #ActiveErrorText := 'Drive power failed on several axes - check 24V/E-Stop';
+                // EXPERIMENTAL velocity-mode path (FB_RecipeHandler STATE_VEL_WAIT). Detail
+                // text says which guard fired: aborted / off path / run permission lost.
+                16#000F: #ActiveErrorText := 'Velocity path fault - see detail';
                 16#0012: #ActiveErrorText := 'ToolHeadLock: extend timeout - check cylinder/sensor';
                 16#0010: #ActiveErrorText := 'User pressed STOP';
                 // TO (Technology Object) fault poller (FB_Process, StatusBits.Error rising edge)
@@ -2383,7 +2386,9 @@ BEGIN
             // 999 against an Array[0..349], so a header claiming 400+ lines read past
             // the end of the array. Closed by construction: the guard and the array
             // are both 1000 now. Keep them in step if the array size ever changes.
-            IF #activeLineCount <= 0 OR #activeLineCount > 1000 THEN
+            // exp/velocity-path-350 (2026-09-14): guard lowered 1000 -> 400 together with
+            // DB_SelectedRecipe.Lines. The comment above predates this branch.
+            IF #activeLineCount <= 0 OR #activeLineCount > 400 THEN
                 #newErrorFlag := TRUE;     // BUG FIX: was missing -- alarm manager never latched 16#0310,
                                            // so HMI showed ERROR state with empty text and no history entry
                 #newErrorCode := 16#0310;  // Recipe: invalid line count (not loaded?)

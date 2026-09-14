@@ -14,11 +14,11 @@ from pathlib import Path
 REPO = Path(r"C:\Users\PC\Documents\Automation\Cursor\MexicoMetalSpinning")
 sys.path.insert(0, str(REPO / "tools"))
 from split_recipe_db import recipe_checksum  # noqa: E402  (the one true algorithm)
+from gen_recipe_slots import CHUNK_LINES, CHUNK_COUNT  # noqa: E402  (geometry has one owner)
 
 SRC = REPO / "gcodes" / "DB_RecipeProgram1.scl"
 DST = REPO / "gcodes" / "test" / "DB_RecipeProgram3_passmarkers.scl"
 SLOT = 3
-CHUNK_LINES, CHUNK_COUNT = 100, 10
 
 LINE_RE = re.compile(
     r"Lines(\d+)\[(\d+)\]\.X\s*:=\s*(-?[\d.]+);\s*"

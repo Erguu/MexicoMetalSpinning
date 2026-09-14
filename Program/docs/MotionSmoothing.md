@@ -86,6 +86,12 @@ buffer, so every line ends at v = 0. This is a firmware limit, not a code defect
 
 ## 3. What To Change
 
+> ⚠️ **None of these produces continuous motion** (noted 2026-09-12). They shorten each stop;
+> `MC_MoveAbsolute` on a PTO axis still ends every line at v = 0. At 3 mm chords and 85 %
+> effective feed the axis still stops ~330 times per metre of path. Treat #1–#3 as a stopgap and
+> as the **baseline measurement** (§8) — the controller decision is in
+> `CNC_Controller_Options.md` §0.
+
 | # | Change | Where | Touches recipe? | Gain |
 |---|---|---|---|---|
 | 1 | **Smoothing time 0.3 → 0.03 s** | TIA TO config | No | 28 % → 49 % |
@@ -205,6 +211,10 @@ the target is reached), require redesigning `FB_Axis_AbsPos` (`CommandAborted` a
 `03_AxisControl.scl:87`), and make the pause-retract interruption point ambiguous. **You are
 already buying this capability with the CODESYS machine.**
 
+> **2026-09-14:** the objection above is to abort-and-replace with `MC_MoveAbsolute`. A
+> *velocity-mode* alternation (`MC_MoveVelocity`) that answers each point is being tried on
+> branch `exp/velocity-path-350` — see §9.
+
 ---
 
 ## 7. Next Machine
@@ -227,3 +237,130 @@ External pulse-output controllers for *this* machine (Syntec 6TB vs DDCS) are co
 | Timed pass vs. programmed feed | Confirms/kills the whole model |
 | OB1 max cycle time | Sizes the item #4 saving now that it is implemented (2 scans/line; the ~20 ms figure still assumes 10 ms). Record it **before and after** the item #4 download — the fused READ+EXEC scan does slightly more work in one scan |
 | Drive filter parameter | Item #3 |
+
+---
+
+## 9. Velocity-Mode Continuous Path — EXPERIMENTAL (branch `exp/velocity-path-350`, 2026-09-14)
+
+**Status: written, NOT compiled, NOT run.** Off by default: `DB_MachineConfig.VelPath_Enable`
+is forced FALSE by `FC_LoadConfig` on every restart, so this build behaves exactly like the
+position-move handler until the flag is set online.
+
+§6 rejected blending as *abort-and-replace with `MC_MoveAbsolute`*. This is a different
+mechanism, and it answers §6's objections rather than ignoring them: corner geometry is bounded
+by a checked deviation limit, position tracking is re-anchored to `ActualPosition` on every
+segment, `FB_Axis_AbsPos` is untouched, and pause resumes through the existing
+`STATE_READ` path.
+
+### 9.1 What it does
+
+Runs of consecutive `CMD_LINEAR` lines are driven with `MC_MoveVelocity`. A line joins the run
+when **all** of these hold (evaluated in `STATE_EXEC`):
+
+- `VelPath_Enable`, `Start` (run permission) and **not** `SingleStepMode`
+- this line is `CMD=1` with `F > 0`, **and the next line is too**
+
+The last line of a run, every rapid, every `F = 0` line and anything in single-step use the
+unchanged `MC_MoveAbsolute` path and end **exactly** on the programmed point. So a run always
+finishes with a position move — before a `CMD=40/41`, a tool change, a dwell, a marker, a rapid
+or the end of the program.
+
+### 9.2 How a segment works
+
+| Step | Where | What |
+|---|---|---|
+| Launch | `STATE_EXEC` | Vector from the axes' **actual** position to the line end point: `v = feed · (target − actual) / distance`, signed, `Direction := 0`. Components below `MinVelocity` become exactly `0.0` |
+| Run | `STATE_VEL_WAIT(32)` | Each scan: remaining distance along the segment `rem`, and distance off the line `lat` |
+| Hand-off | `STATE_VEL_WAIT` → `READ` → `EXEC` | When `rem ≤ feed × VelPath_LeadTime` the line is done; the next line launches on the **other** instance pair in the same scan it is read. The axes never stop |
+| Short line | `STATE_EXEC` | A line shorter than the lead distance is skipped with the current velocity left running; the next line re-aims |
+| End of run | `STATE_EXEC` | `currX/Z := ActualPosition`, `MC_MoveAbsolute` on **both** axes (forced — an axis with < 0.01 mm left but a live velocity would otherwise never be told to stop) |
+
+**Why actual position and not the nominal end point:** the scan it takes `READ`/`EXEC` to launch
+the next line means every hand-off is slightly late. Aiming each new segment from where the axes
+really are corrects that error once instead of letting ~400 of them add up. On an open-loop PTO
+axis `ActualPosition` is the counted pulse output, so it does not lag.
+
+**Why two `MC_MoveVelocity` instances per axis:** it latches `Velocity` only on a rising edge of
+`Execute`. One instance would need an `Execute`-low scan before every new vector. Raising the
+*other* instance aborts the running one in the same scan. The instances alternate, so each one
+always sees at least one low scan before its next edge.
+
+### 9.3 Runaway guards — the part that matters
+
+`MC_MoveVelocity` **does not stop when `Execute` drops.** A position move that loses its
+supervisor just finishes; a velocity move keeps going to the hardware limit. Every exit from the
+mode except the `MC_MoveAbsolute` hand-over therefore brings in a halt:
+
+| Exit | Halt through | Result |
+|---|---|---|
+| Pause | `bHaltTrig` → `STATE_PAUSED(800)` | Existing retract/return; resume re-reads the line and relaunches from the interruption point |
+| Stop | `bHaltTrig` → `STATE_STOPPING(850)` | Existing stop path |
+| Handler fault | `STATE_ERROR(999)` sets `bHaltTrig` | — |
+| Reset mid-run | **`vmHaltReq`** latch (IDLE drives `bHaltTrig` FALSE, so it needs its own) | Held until both halts report `Done`; IDLE refuses a new start until then |
+| `Start` drops without Stop/Pause/Reset | `STATE_ERROR`, `16#000F` "run permission lost" | — |
+| **Another command takes the axis** (FB_Process PNP halt, anything else) | `CommandAborted` on the live pair → `STATE_ERROR`, `16#000F` | Without this the next line would relaunch motion straight through whatever stopped it. Checked in `VEL_WAIT` *and* again at launch, because the abort can land in the scan between |
+| TO / drive error | `16#0001` / `16#0002` with TO text, as for position moves | — |
+| Off the line by more than `VelPath_MaxDeviation`, or moving **away** from the end point by more than it | `STATE_ERROR`, `16#000F` with the distance in `Error_Text` | — |
+| No progress for `Timeout_Motion` | `16#0008` (existing timer, now also counts in `VEL_WAIT`) | Stall, not runaway |
+
+`16#000F` is severity 3 (motion tier), text `'Velocity path fault - see detail'`; the detail
+names which guard fired. Row added to `tools/hmi_texts.csv` — **add it to the WinCC text list
+by hand**.
+
+### 9.4 Reset-path checkpoints (CLAUDE.md rule)
+
+| # | Checkpoint | Covered by |
+|---|---|---|
+| 1 | Hard reset | `FB_Process` resets the handler (`Reset` input) and pulses `bHaltAllAxes`; handler `Reset` block sets `vmHaltReq` if a run was live and clears `vmActive` |
+| 2 | Recipe reset | Same `IF #Reset THEN` block |
+| 3 | STATE_STOPPED | Reached only through Stop (halt in 850) or a handler reset (`vmHaltReq`) |
+| 4 | STATE_ERROR | Handler 999 clears `vmActive` and holds `bHaltTrig` every scan |
+
+No new timer. `tonMoveTimeout` is reused and reset at every launch.
+
+### 9.5 Configuration (`DB_MachineConfig`, written by `FC_LoadConfig`)
+
+| Tag | Default | Meaning |
+|---|---|---|
+| `VelPath_Enable` | **FALSE** (forced every restart) | Master switch. Set online to try it |
+| `VelPath_LeadTime` | 0.15 s | Next line takes over at `feed × this` before the end point (0.75 mm at 5 mm/s), **capped at half the segment**. Rule: **≈ 1.5 × OB1 cycle time.** Was 0.05 s, sized for an assumed 10 ms scan; the user reported ~100–110 ms (unmeasured) on 2026-09-14 |
+| `VelPath_MaxDeviation` | 1.0 mm | Off-path / backwards fault threshold |
+
+Online changes last until the next power cycle — deliberate for an experiment.
+
+### 9.6 What is not known, and what can only be learned on the machine
+
+1. **Does this TO accept `Velocity = 0.0` with `Direction = 0`?** Siemens documents 0.0 as
+   permitted; if this firmware disagrees, the first purely axial or radial segment faults with
+   `16#0001`/`16#0002`. Fix would be to hold that axis with its own instance idle instead.
+2. **Real scan time — the most important number for this mode.** User recollection
+   2026-09-14: **~100–110 ms**, not the 10 ms §2 and §8 assumed. At 100 ms and 5 mm/s the axes
+   travel **0.5 mm per scan**, so a hand-off can land up to ~1 mm late (sampling + the launch
+   scan). Consequences already built in: lead capped at half the segment, no multi-line skip
+   (a slow scan made the old skip chain along a stale vector with no guard running). What stays
+   true: position error does **not** accumulate (each segment re-aims from actual position), and
+   every guard still fires — but up to ~1 mm later. **Measure it first** (TIA → Online &
+   Diagnostics → Cycle time: shortest / current / longest) and set `VelPath_LeadTime ≈ 1.5 ×`
+   the longest. Also note: at 100 ms the *position-move* handler loses ~200 ms per line to its
+   2-scan dead time (§2), which alone explains much of the slow feed.
+3. **Corner behaviour with the jerk limiter on.** A direction change still goes through the TO's
+   S-curve (§2). Expected corner deviation at 5 mm/s and ~10° per chord is ~0.02 mm, but it is
+   arithmetic, not a measurement. §4 step 2 (t1 = 0.06 s) helps this mode too.
+4. **Memory.** Four `MC_MoveVelocity` multi-instances and ~70 lines of logic. Compile and read
+   the work-memory figure before anything else.
+
+**PLCSIM cannot test any of this** (S7-1200 motion is not simulated — see CLAUDE.md). What PLCSIM
+*can* check: that the project compiles, and that with `VelPath_Enable = FALSE` nothing changed.
+
+### 9.7 Test order
+
+| Step | Action | Expect | If it fails |
+|---|---|---|---|
+| 0 | Compile; note work memory %. `VelPath_Enable = FALSE`: run a known program | Identical to master behaviour | Revert the branch — the off state must be a no-op |
+| 1 | §8: measure OB1 max cycle time; time one pass with the flag off | Baseline | — |
+| 2 | **Drive power isolated** (open-loop PTO reports motion with nothing moving). Flag on, run one roughing pass | No `16#000F`; `CurrentLine` advances continuously; `STATE_VEL_WAIT` visible in the handler instance | Read `DB_Diagnostic.Error_Text` — it says which guard fired |
+| 3 | Same, press Pause mid-run, then Continue | Halts, retracts, returns, carries on | — |
+| 4 | Same, press Stop mid-run; then Reset mid-run | Axes stop; Reset → no motion afterwards | **Stop testing** — a runaway guard is broken |
+| 5 | Drive power on, mandrel empty, flag on, one roughing pass | Continuous motion, no stop per line | Flag off |
+| 6 | Time the same pass as step 1 | Close to programmed feed | Tune `VelPath_LeadTime` |
+| 7 | Cut a part, compare with a flag-off part | Finish at least as good | Flag off, record why |
