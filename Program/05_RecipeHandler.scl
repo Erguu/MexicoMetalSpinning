@@ -706,8 +706,10 @@ BEGIN
             END_IF;
             
             FOR #scanIndex := #scanIndex TO #scanEndIndex DO
-                // Only check motion commands (G0=0, G1=1) for bounding box and limits
-                IF #Lines[#scanIndex].CMD <= 1 THEN
+                // Only check motion commands (G0=0, G1=1, continuous G1=2) for bounding box and limits.
+                // CMD=2 MUST be inside this test -- a continuous line left out would skip the
+                // soft-limit check entirely.
+                IF #Lines[#scanIndex].CMD <= 2 THEN
                     // Update bounding box
                     IF #Lines[#scanIndex].X < #MinX THEN #MinX := #Lines[#scanIndex].X; END_IF;
                     IF #Lines[#scanIndex].X > #MaxX THEN #MaxX := #Lines[#scanIndex].X; END_IF;
@@ -751,7 +753,17 @@ BEGIN
                 END_IF;
 
                 // #4 -- Feedrate check: G1 F-value above MaxVelocity (mm/min → mm/s for comparison)
-                IF #Lines[#scanIndex].CMD = 1 AND #Lines[#scanIndex].F > 0 THEN
+                // Continuous G1 (CMD=2) must carry a real feed. With F = 0 the handler runs a
+                // motion line as a rapid, and velocity mode could never apply to it.
+                IF #Lines[#scanIndex].CMD = 2 AND #Lines[#scanIndex].F <= 0 THEN
+                    IF #ErrorLine < 0 THEN
+                        #ErrorLine := #scanIndex;
+                        #ErrorDesc := 'CMD=2 continuous G1 needs F > 0';
+                    END_IF;
+                    #Valid := FALSE;
+                END_IF;
+
+                IF (#Lines[#scanIndex].CMD = 1 OR #Lines[#scanIndex].CMD = 2) AND #Lines[#scanIndex].F > 0 THEN
                     IF INT_TO_REAL(#Lines[#scanIndex].F) / "DB_MachineConfig".FeedrateConvFactor > "DB_MachineConfig".MaxVelocity THEN
                         IF #ErrorLine < 0 THEN
                             #ErrorLine := #scanIndex;
@@ -932,7 +944,7 @@ VERSION : 0.1
         // ---------------------------------------------------------------------
         // Velocity-mode continuous path (EXPERIMENTAL, branch exp/velocity-path-350)
         // ---------------------------------------------------------------------
-        // Runs of consecutive CMD_LINEAR lines are driven with MC_MoveVelocity
+        // Runs of CMD_LINEAR_CONT (CMD=2) lines are driven with MC_MoveVelocity
         // instead of MC_MoveAbsolute, so the axes do not stop at every recipe line.
         // Design, guards and test plan: docs/MotionSmoothing.md section 9.
         //
@@ -968,6 +980,17 @@ VERSION : 0.1
         vmRem       : Real;         // Remaining distance along the segment (mm)
         vmLat       : Real;         // Distance off the segment line (mm)
         vmSwitchDist : Real;        // Remaining distance at which the next line takes over (mm)
+        vmNDX       : Real;         // Programmed segment: previous programmed end point -> this line's end
+        vmNDZ       : Real;
+        vmNLen      : Real;
+        vmAhead     : Real;         // How far this line's end point still is AHEAD of the axes, along the programmed segment (mm)
+        vmNLat      : Real;         // Distance of the axes from the programmed segment line (mm)
+        vmSkipDist  : Real;         // vmAhead at or below which the line counts as already passed (mm)
+        vmLeadDist  : Real;         // Distance the axes cover in VelPath_LeadTime at the live commanded speed (mm)
+        vmLoop      : Int;          // Same-scan catch-up loop counter
+        vmNextOK    : Bool;         // Next line may itself run in velocity mode (catch-up may skip into it)
+        vmUnsupScans : Int;         // Safety net 2: consecutive scans a velocity instance is Busy with no command live
+        vmSkipCount : Int;          // Lines skipped by the catch-up loop in THIS scan
         actX        : Real;         // Axis ActualPosition snapshot
         actZ        : Real;
         
@@ -1004,6 +1027,9 @@ VERSION : 0.1
         STATE_CYL_GOTO      : Int := 70;   // CMD=40: set BackSupport TargetPos and trigger extend
         STATE_CYL_GOTO_WAIT : Int := 71;   // CMD=40: wait for BackSupport AtSetpoint or error
         STATE_VEL_WAIT      : Int := 32;   // Velocity-mode segment in progress (EXPERIMENTAL)
+        VM_CATCHUP_MAX      : Int := 10;   // Most passed lines skipped in ONE scan (simulation needed 2 at T = 0.1 s)
+        VM_UNSUPERVISED_SCANS : Int := 2;  // Safety net 2 grace: a hand-over MC_MoveAbsolute or MC_Halt aborts the
+                                           // velocity command within ~1 scan; Busy on the 3rd scan = unsupervised
         STATE_DONE : Int := 99;
         STATE_PAUSED : Int := 800;         // Pause entry: halt axes, then retract
         STATE_PAUSE_RETRACT : Int := 801;  // Moving to retracted (tool-clear) position
@@ -1014,6 +1040,10 @@ VERSION : 0.1
         
         CMD_RAPID : Byte := 0;
         CMD_LINEAR : Byte := 1;
+        // EXPERIMENTAL (exp/velocity-path-350): G1 that MAY blend into the next line.
+        // Per-line, not modal, so a warm restart or pause-resume from any line is
+        // correct without scanning backwards. CMD=1 stays an exact stop, always.
+        CMD_LINEAR_CONT : Byte := 2;
         CMD_TOOL_CHANGE : Byte := 10;
         CMD_SPINDLE_ON : Byte := 20;
         CMD_SPINDLE_OFF : Byte := 21;
@@ -1049,7 +1079,7 @@ BEGIN
     //   Special branches: TOOL_REQ(40)→TOOL_WAIT(50), SPINDLE(55), DWELL(57),
     //                     STEP_WAIT(65), PAUSED(800), STOPPING(850), DONE(99), ERROR(999)
     //   Velocity mode (EXPERIMENTAL): READ(10) -> EXEC(20) -> VEL_WAIT(32) -> READ(10) ...
-    //                     for runs of CMD_LINEAR lines; the last line of a run falls
+    //                     for runs of CMD=2 (continuous G1) lines; the last line of a run falls
     //                     back to EXEC -> WAIT(30) with MC_MoveAbsolute.
     // All axis moves are performed via fbMoveX / fbMoveZ.
     // Spindle and tool change requests are passed to FB_Process via flags (no direct drive access).
@@ -1288,7 +1318,7 @@ BEGIN
                         #TotalPasses := #Lines[#lineIndex].F;
                         #state := STATE_NEXT;
 
-                    CMD_RAPID, CMD_LINEAR:
+                    CMD_RAPID, CMD_LINEAR, CMD_LINEAR_CONT:
                         #state := STATE_EXEC;
 
                     ELSE
@@ -1890,7 +1920,7 @@ BEGIN
     // would not reach MC_MoveAbsolute until the next scan -- both give the scan
     // back, and the second does it silently.
     //
-    // Only the CMD_RAPID / CMD_LINEAR branch of STATE_READ sets state 20, so every
+    // Only the CMD_RAPID / CMD_LINEAR / CMD_LINEAR_CONT branch of STATE_READ sets state 20, so every
     // non-motion CMD still gets its own scan. That is required, not incidental:
     // STATE_READ writes the BackSupport solenoid flags directly for CMD_ATMO, and
     // two recipe lines sharing a scan would collide.
@@ -1906,18 +1936,76 @@ BEGIN
     // -------------------------------------------------------------------------
     IF #state = STATE_EXEC THEN
         // --- Velocity mode (EXPERIMENTAL) -- is this line part of a run? ---------
-        // Only a CMD_LINEAR line with a real feed whose NEXT line is the same. The
-        // last line of a run, rapids, F=0 lines and single-step all use the
-        // MC_MoveAbsolute path below and end exactly on the programmed point.
+        // The CAM decides: only a CMD_LINEAR_CONT (CMD=2) line with a real feed whose
+        // NEXT line is a G1 (CMD=1 or 2) with a real feed. CMD=2 is permission, not a
+        // promise -- before a rapid, a marker, a cylinder/spindle/tool line or the end it
+        // still lands exactly. CMD=1, rapids, single-step and VelPath_Enable = FALSE all
+        // use the MC_MoveAbsolute path below and end exactly on the programmed point, so
+        // a recipe without CMD=2 behaves exactly as before whatever the flag says.
         #vmEligible := FALSE;
         IF "DB_MachineConfig".VelPath_Enable AND #Start AND NOT "DB_HMI".SingleStepMode
-           AND #Lines[#lineIndex].CMD = CMD_LINEAR AND #Lines[#lineIndex].F > 0
+           AND #Lines[#lineIndex].CMD = CMD_LINEAR_CONT AND #Lines[#lineIndex].F > 0
            AND #lineIndex + 1 < #LineCount THEN
             // Nested, not one expression: SCL evaluates every operand of AND, and
             // #Lines[#lineIndex + 1] on the last line would index past the array.
-            IF #Lines[#lineIndex + 1].CMD = CMD_LINEAR AND #Lines[#lineIndex + 1].F > 0 THEN
+            IF (#Lines[#lineIndex + 1].CMD = CMD_LINEAR OR #Lines[#lineIndex + 1].CMD = CMD_LINEAR_CONT)
+               AND #Lines[#lineIndex + 1].F > 0 THEN
                 #vmEligible := TRUE;
             END_IF;
+        END_IF;
+
+        // --- Same-scan catch-up (2026-09-14) -------------------------------------
+        // With a slow scan and short chords (first real exports: 0.4 mm chords, 0.5 mm of
+        // travel per 100 ms scan) the axes can already be past this line's end point, and
+        // past the next one too. Skipping ONE passed line per scan was simulated on the
+        // real program 2 and was NOT enough: the axes kept an old heading while the curve
+        // bent away (0.77 mm off path, and a 16#000F fault in pass 1). Skipping ALL passed
+        // lines in the same scan and aiming at the first point genuinely ahead gave 0.023 mm
+        // and no reversals (tools/sim_velocity_path.py, docs/MotionSmoothing.md 9.2).
+        //
+        // "Passed" is measured along the PROGRAMMED segment (currX/currZ = previous
+        // programmed end point), so it does not depend on how late the last hand-off was.
+        // A line is skipped only INTO a line that is itself velocity-eligible, so the
+        // loop can never swallow the hand-over line of a run. Off the programmed line by
+        // more than VelPath_MaxDeviation -> EXIT, and the fault branch below fires on the
+        // same line. Everything below this block (feed, vector) uses the updated line.
+        #vmSkipCount := 0;
+        IF #vmEligible AND #vmActive AND NOT (#vmErr OR #vmAborted) THEN
+            #vmLeadDist := SQRT(#vmVelX * #vmVelX + #vmVelZ * #vmVelZ) * "DB_MachineConfig".VelPath_LeadTime;
+            FOR #vmLoop := 1 TO VM_CATCHUP_MAX DO
+                #vmNDX := #targX - #currX;
+                #vmNDZ := #targZ - #currZ;
+                #vmNLen := SQRT(#vmNDX * #vmNDX + #vmNDZ * #vmNDZ);
+                IF #vmNLen <= 0.01 THEN
+                    EXIT;   // degenerate line -- handled by the launch branch below
+                END_IF;
+                #vmDX := #targX - #Axis_X.ActualPosition;
+                #vmDZ := #targZ - #Axis_Z.ActualPosition;
+                #vmAhead := (#vmDX * #vmNDX + #vmDZ * #vmNDZ) / #vmNLen;
+                #vmNLat := ABS(#vmDX * #vmNDZ - #vmDZ * #vmNDX) / #vmNLen;
+                IF #vmNLat > "DB_MachineConfig".VelPath_MaxDeviation OR #vmAhead > #vmLeadDist THEN
+                    EXIT;
+                END_IF;
+                // Is the NEXT line velocity-eligible? Nested so no index past LineCount is read.
+                #vmNextOK := FALSE;
+                IF #lineIndex + 2 < #LineCount THEN
+                    IF #Lines[#lineIndex + 1].CMD = CMD_LINEAR_CONT AND #Lines[#lineIndex + 1].F > 0 THEN
+                        IF (#Lines[#lineIndex + 2].CMD = CMD_LINEAR OR #Lines[#lineIndex + 2].CMD = CMD_LINEAR_CONT)
+                           AND #Lines[#lineIndex + 2].F > 0 THEN
+                            #vmNextOK := TRUE;
+                        END_IF;
+                    END_IF;
+                END_IF;
+                IF NOT #vmNextOK THEN
+                    EXIT;   // last line before the hand-over: the single skip below handles it
+                END_IF;
+                #currX := #targX;
+                #currZ := #targZ;
+                #lineIndex := #lineIndex + 1;
+                #vmSkipCount := #vmSkipCount + 1;
+                #targX := #Lines[#lineIndex].X;
+                #targZ := #Lines[#lineIndex].Z;
+            END_FOR;
         END_IF;
 
         // Leaving a velocity run: plan the MC_MoveAbsolute from where the axes really
@@ -2001,6 +2089,26 @@ BEGIN
             #vmSwitchDist := MIN(IN1 := #feedrate * "DB_MachineConfig".VelPath_LeadTime,
                                  IN2 := 0.5 * #vmDist);
 
+            // Short-segment catch-up (2026-09-14). With a slow scan a short line (the
+            // first real exports have 0.4 mm chords at 5 mm/s = 0.5 mm per 100 ms scan) can
+            // be over before the axes are even commanded toward it. Aiming from the actual
+            // position at an end point that is already BEHIND the axes would pull them
+            // backwards and zig-zag. So measure progress along the PROGRAMMED segment
+            // (currX/currZ = previous programmed end point), independent of how late the
+            // last hand-off was, and treat a passed end point as done.
+            #vmNDX := #targX - #currX;
+            #vmNDZ := #targZ - #currZ;
+            #vmNLen := SQRT(#vmNDX * #vmNDX + #vmNDZ * #vmNDZ);
+            IF #vmNLen > 0.01 THEN
+                #vmAhead := (#vmDX * #vmNDX + #vmDZ * #vmNDZ) / #vmNLen;
+                #vmNLat := ABS(#vmDX * #vmNDZ - #vmDZ * #vmNDX) / #vmNLen;
+            ELSE
+                #vmAhead := 0.0;
+                #vmNLat := 0.0;
+            END_IF;
+            #vmSkipDist := MIN(IN1 := #feedrate * "DB_MachineConfig".VelPath_LeadTime,
+                               IN2 := 0.5 * #vmNLen);
+
             IF #vmActive AND (#vmErr OR #vmAborted) THEN
                 // The live command died between VEL_WAIT's last check and this scan.
                 #vmActive := FALSE;
@@ -2009,7 +2117,7 @@ BEGIN
                 "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
                                         IN1 := INT_TO_STRING(#lineIndex), IN2 := ' velocity cmd lost'));
                 #state := STATE_ERROR;
-            ELSIF #vmDist <= 0.01 THEN
+            ELSIF #vmDist <= 0.01 OR #vmNLen <= 0.01 THEN
                 // Degenerate line (end point already reached). Take the next line on the
                 // NEXT scan via STATE_READ -- not STATE_NEXT, which costs a second scan.
                 //
@@ -2022,6 +2130,52 @@ BEGIN
                 #currZ := #targZ;
                 #lineIndex := #lineIndex + 1;
                 #state := STATE_READ;
+            ELSIF #vmActive AND #vmNLat > "DB_MachineConfig".VelPath_MaxDeviation THEN
+                // Checked BEFORE the catch-up skip: skipping is only allowed while the axes
+                // are still on the programmed path. This is the deviation guard for lines
+                // that never reach STATE_VEL_WAIT.
+                #vmActive := FALSE;
+                #ErrorID := 16#000F;
+                "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Velocity path off programmed line mm: ',
+                                                     IN2 := REAL_TO_STRING(#vmNLat));
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                        IN1 := INT_TO_STRING(#lineIndex), IN2 := ' off path (catch-up)'));
+                #state := STATE_ERROR;
+            ELSIF #vmActive AND #vmSkipCount >= VM_CATCHUP_MAX THEN
+                // The catch-up loop used its whole budget in one scan: more than
+                // VM_CATCHUP_MAX programmed points lie inside the lead distance. That is a
+                // recipe (segment length) problem, not something to ride through one line
+                // per scan. Stop. (Real program 2 needed at most 2 at a 100 ms scan.)
+                #vmActive := FALSE;
+                #ErrorID := 16#000F;
+                "DB_Diagnostic".Error_Text := 'Velocity path: too many points inside lead distance - check CAM segment length';
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                        IN1 := INT_TO_STRING(#lineIndex), IN2 := ' catch-up limit'));
+                #state := STATE_ERROR;
+            ELSIF #vmActive AND #vmAhead <= #vmSkipDist THEN
+                // Axes are already at (or past) this line's end point: count it done and
+                // take the next line on the next scan, keeping the current velocity. Never
+                // aim backwards. Bounded by geometry -- it can only fire for end points the
+                // axes have genuinely reached -- and guarded by the vmNLat test above.
+                #currX := #targX;
+                #currZ := #targZ;
+                #lineIndex := #lineIndex + 1;
+                #state := STATE_READ;
+            ELSIF #vmActive AND (#vmDX * #vmVelX + #vmDZ * #vmVelZ) < 0.0 THEN
+                // NO REVERSAL WITHIN A RUN. The new vector would turn the path more than
+                // 90 degrees against the current direction of travel (vmVelX/Z still hold the
+                // live command here). Inside a run that never happens on a valid recipe:
+                // SpinningCam emits CMD=1 (exact stop) at turns >= its stop angle, default
+                // 90 degrees, and a passed point is skipped above. So a velocity command is
+                // never allowed to drive the axes back along the path -- stop instead.
+                // If the CAM stop angle is ever raised above 90 degrees, this fires on those
+                // corners: safe, and the fix is the CAM setting, never removing this branch.
+                #vmActive := FALSE;
+                #ErrorID := 16#000F;
+                "DB_Diagnostic".Error_Text := 'Velocity path: next segment would reverse the direction of travel';
+                "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                        IN1 := INT_TO_STRING(#lineIndex), IN2 := ' reverse blocked'));
+                #state := STATE_ERROR;
             ELSE
                 #vmVelX := #feedrate * #vmDX / #vmDist;
                 #vmVelZ := #feedrate * #vmDZ / #vmDist;
@@ -2059,6 +2213,30 @@ BEGIN
     // bTrigMove AND bMoveX/Z: active only in EXEC state and when axis is needed
     // bHaltTrig: TRUE in STOPPING and PAUSED states -- decelerates axis to stop
     // -------------------------------------------------------------------------
+    // =========================================================================
+    // VELOCITY-MODE SAFETY NET (EXPERIMENTAL) -- every scan, whatever the state
+    // =========================================================================
+    // MC_MoveVelocity keeps the axes moving until something stops them. Every exit
+    // path in the state machine stops them explicitly -- but that is many separate
+    // places, and one missed or broken path means an axis driving to its hardware
+    // limit. These two checks do not depend on any of those paths being right:
+    //
+    //   NET 1 (here, BEFORE the motion calls): a velocity command may only be live in
+    //         READ / EXEC / VEL_WAIT. In any other state -- however it got there --
+    //         drop it and halt. Before the calls, so the dropped Execute and the
+    //         halt reach the TO in the same scan.
+    //   NET 2 (after the motion calls): a velocity instance still Busy while no
+    //         velocity command is supposed to be live, for more than
+    //         VM_UNSUPERVISED_SCANS scans -> halt and fault 16#000F. Catches a hand-over
+    //         MC_MoveAbsolute that never took over (the handler would otherwise sit in
+    //         STATE_WAIT with no path guard for Timeout_Motion), and anything else.
+    //
+    // DO NOT remove, weaken or move either net behind a state test.
+    IF #vmActive AND NOT (#state = STATE_READ OR #state = STATE_EXEC OR #state = STATE_VEL_WAIT) THEN
+        #vmActive := FALSE;
+        #vmHaltReq := TRUE;
+    END_IF;
+
     #fbMoveX(Execute := #bTrigMove AND #bMoveX, Position := #targX, Velocity := #velX, Axis := #Axis_X);
     #fbMoveZ(Execute := #bTrigMove AND #bMoveZ, Position := #targZ, Velocity := #velZ, Axis := #Axis_Z);
     #fbHaltX(Execute := #bHaltTrig OR #vmHaltReq, Axis := #Axis_X);
@@ -2079,8 +2257,30 @@ BEGIN
         #vmErr     := #mcVelXA.Error OR #mcVelZA.Error;
         #vmAborted := #mcVelXA.CommandAborted OR #mcVelZA.CommandAborted;
     END_IF;
-    // Reset-path halt releases once both axes report stopped.
-    IF #vmHaltReq AND #fbHaltX.Done AND #fbHaltZ.Done THEN
+    // NET 2 -- unsupervised velocity command (see the safety-net header above the calls).
+    IF NOT #vmActive AND (#mcVelXA.Busy OR #mcVelXB.Busy OR #mcVelZA.Busy OR #mcVelZB.Busy) THEN
+        #vmUnsupScans := #vmUnsupScans + 1;
+    ELSE
+        #vmUnsupScans := 0;
+    END_IF;
+    IF #vmUnsupScans > VM_UNSUPERVISED_SCANS THEN
+        #vmHaltReq := TRUE;
+        #vmUnsupScans := 0;
+        IF #state <> STATE_IDLE AND #state <> STATE_DONE AND #state <> STATE_ERROR THEN
+            #ErrorID := 16#000F;
+            "DB_Diagnostic".Error_Text := 'Velocity path: velocity command active without supervision - halted';
+            "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
+                                    IN1 := INT_TO_STRING(#lineIndex), IN2 := ' unsupervised vel cmd'));
+            #state := STATE_ERROR;
+        END_IF;
+    END_IF;
+    // Reset/safety-net halt releases once both axes report the halt Done, OR both are
+    // at standstill with no velocity command busy -- the second so a halt that cannot
+    // complete (drive already off) can never lock the handler out of the next start.
+    IF #vmHaltReq
+       AND NOT (#mcVelXA.Busy OR #mcVelXB.Busy OR #mcVelZA.Busy OR #mcVelZB.Busy)
+       AND ((#fbHaltX.Done AND #fbHaltZ.Done)
+            OR (#Axis_X.StatusBits.StandStill AND #Axis_Z.StatusBits.StandStill)) THEN
         #vmHaltReq := FALSE;
     END_IF;
     

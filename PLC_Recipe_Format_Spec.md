@@ -46,6 +46,7 @@ rewrites `02b_RecipePrograms.scl`, the `FB_RecipeLoader` `CASE`, `PROGRAM_COUNT`
 |-----|----------------|-----------|---------|--------------------------|-------------------|
 | 0   | RAPID          | Yes       | No      | Ignored                  | G0 Xnnn Znnn      |
 | 1   | LINEAR         | Yes       | Yes     | Ignored                  | G1 Xnnn Znnn Fnnn |
+| 2   | LINEAR_CONT    | Yes       | Yes, **> 0** | Ignored             | G1, continuous (G64-style) — **experimental, see note** |
 | 10  | TOOL_CHANGE    | No        | No      | External tool code (Byte, 0-255) | M6 Tn      |
 | 20  | SPINDLE_ON     | No        | No      | Speed ÷ 10 (0-255=0-2550 RPM) | M3 Snnn     |
 | 21  | SPINDLE_OFF    | No        | No      | Ignored                  | M5                |
@@ -56,6 +57,17 @@ rewrites `02b_RecipePrograms.scl`, the `FB_RecipeLoader` `CASE`, `PROGRAM_COUNT`
 | 51  | PASS_MARK      | No        | Yes (passes in op) | Pass number in op (1-based) | —      |
 | 99  | PROGRAM_END    | No        | No      | Ignored                  | M30               |
 
+> **CMD=2 — continuous G1. EXPERIMENTAL, PLC branch `exp/velocity-path-350` only.** Same
+> geometry and feed as `CMD=1`, but the line **may blend** into the next line without stopping
+> (`MC_MoveVelocity`) when that next line is `CMD=1` or `CMD=2` with `F > 0`. Before anything
+> else — a rapid, a marker, a spindle/cylinder/tool/dwell line, the end — it still lands exactly.
+> `CMD=1` **always** stops exactly on its point, so the CAM chooses exact points line by line.
+> `F` must be > 0 (pre-scan rejects `CMD=2` with `F = 0`). Per line, not modal, so a restart
+> from any line is correct. `DB_MachineConfig.VelPath_Enable = FALSE` or single-step runs every
+> `CMD=2` as `CMD=1`. **Never load a `CMD=2` recipe on a PLC build without this support (master
+> included):** the old handler skips unknown commands, so the axes would go straight to the next
+> `CMD=1` target, and the old pre-scan does not soft-limit-check the skipped lines.
+>
 > **CMD=50 / CMD=51 — display only, and optional.** Zero-motion marker lines that carry the
 > operation and pass number to `DB_HMI.CurrentOp / TotalOps / CurrentPass / TotalPasses`, so the
 > operator sees "Op 1, pass 3 of 10" instead of only "line 47". They command nothing: no actuator,

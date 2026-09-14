@@ -235,7 +235,7 @@ STATE_READ(10)         → Read line, determine command type
 STATE_EXEC(20)         → Calculate motion parameters, start
 STATE_WAIT(30)         → Wait for motion completion (30s timeout)
 STATE_VEL_WAIT(32)     → EXPERIMENTAL (exp/velocity-path-350, DB_MachineConfig.VelPath_Enable, forced FALSE at power-up):
-                         run of G1 lines under MC_MoveVelocity, no stop per line; faults 16#000F. See docs/MotionSmoothing.md §9
+                         run of CMD=2 (continuous G1) lines under MC_MoveVelocity, no stop per line; faults 16#000F. See docs/MotionSmoothing.md §9
 STATE_TOOL_REQ(40)     → Generate tool change request
 STATE_TOOL_WAIT(50)    → Wait for tool change confirmation from FB_Process
 STATE_SPINDLE(55)      → Forward spindle command via flag to FB_Process
@@ -256,7 +256,9 @@ STATE_ERROR(999)       → Error, wait for reset
 **Command table (CMD byte):**
 ```
 0  = G0 Rapid      → RapidVelocity × RapidOverride
-1  = G1 Linear     → F (mm/min) × FeedrateOverride
+1  = G1 Linear     → F (mm/min) × FeedrateOverride. Always an exact stop
+2  = G1 Continuous → EXPERIMENTAL (exp/velocity-path-350): as CMD=1 but may blend into the next G1 (CMD=1/2)
+                     via MC_MoveVelocity; F must be > 0 (pre-scan). Never load on a build without it
 10 = Tool Change   → Param = tool code (e.g. 101) → ToolCode_List mapping
 20 = Spindle ON    → Param = RPM/10 (×10 = actual RPM)
 21 = Spindle OFF   → —

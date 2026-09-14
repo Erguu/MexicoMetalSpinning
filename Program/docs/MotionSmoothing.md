@@ -254,14 +254,22 @@ segment, `FB_Axis_AbsPos` is untouched, and pause resumes through the existing
 
 ### 9.1 What it does
 
-Runs of consecutive `CMD_LINEAR` lines are driven with `MC_MoveVelocity`. A line joins the run
-when **all** of these hold (evaluated in `STATE_EXEC`):
+**The CAM decides, per line** (changed 2026-09-14 from "any run of `CMD=1` lines"): a new code
+**`CMD=2` = continuous G1** marks a line that may blend. `CMD=1` stays an exact stop, always, so a
+recipe without `CMD=2` runs exactly as before whatever `VelPath_Enable` says. A line runs under
+`MC_MoveVelocity` when **all** of these hold (evaluated in `STATE_EXEC`):
 
 - `VelPath_Enable`, `Start` (run permission) and **not** `SingleStepMode`
-- this line is `CMD=1` with `F > 0`, **and the next line is too**
+- this line is **`CMD=2`** with `F > 0`, **and the next line is `CMD=1` or `CMD=2`** with `F > 0`
 
-The last line of a run, every rapid, every `F = 0` line and anything in single-step use the
-unchanged `MC_MoveAbsolute` path and end **exactly** on the programmed point. So a run always
+`CMD=2` is permission, not a promise. Every `CMD=1` line, the `CMD=2` line before anything else,
+every rapid and anything in single-step use the unchanged `MC_MoveAbsolute` path and end
+**exactly** on the programmed point. A `CMD=2` → `CMD=1` pair blends into the `CMD=1` line and
+lands it exactly — that is how the CAM ends a run on a precise point. Pre-scan includes `CMD=2`
+in the soft-limit check (`CMD <= 2`) and rejects `CMD=2` with `F = 0`. Why per line and not a
+modal on/off marker: warm restart and pause-resume start from an arbitrary line, and a per-line
+code needs no state rebuilt by scanning backwards. **A `CMD=2` recipe must never run on a PLC
+build without this support** — the old handler skips unknown commands. So a run always
 finishes with a position move — before a `CMD=40/41`, a tool change, a dwell, a marker, a rapid
 or the end of the program.
 
@@ -272,7 +280,8 @@ or the end of the program.
 | Launch | `STATE_EXEC` | Vector from the axes' **actual** position to the line end point: `v = feed · (target − actual) / distance`, signed, `Direction := 0`. Components below `MinVelocity` become exactly `0.0` |
 | Run | `STATE_VEL_WAIT(32)` | Each scan: remaining distance along the segment `rem`, and distance off the line `lat` |
 | Hand-off | `STATE_VEL_WAIT` → `READ` → `EXEC` | When `rem ≤ feed × VelPath_LeadTime` the line is done; the next line launches on the **other** instance pair in the same scan it is read. The axes never stop |
-| Short line | `STATE_EXEC` | A line shorter than the lead distance is skipped with the current velocity left running; the next line re-aims |
+| Zero-length line | `STATE_EXEC` | Programmed length ≤ 0.01 mm: counted done, next line on the next scan |
+| **Already passed — same-scan catch-up** (2026-09-14) | `STATE_EXEC` | While a run is moving, **every** line whose end point the axes are already within `live speed × LeadTime` of — **measured along the programmed segment** (previous programmed end → this end) — is skipped **in the same scan** (up to `VM_CATCHUP_MAX` = 10), but only into a line that is itself velocity-eligible; the vector is then aimed at the first point genuinely ahead. The last line before a hand-over, if already passed, is counted done and the next line read on the next scan. **Simulated on the real program 2 (0.41–2.66 mm chords, F300):** at T = 0.1 s, one skip per scan left 0.77 mm path error and a `16#000F` fault; the same-scan loop gave **0.023 mm, no reversals, no fault, at most 2 lines per scan**; at T = 0.05 / 0.02 s ≤ 0.01 mm. Re-run with `tools/sim_velocity_path.py` once T is measured. Added because the first real exports have 0.4 mm chords — shorter than one 100 ms scan of travel — and aiming at a passed point would pull the axes backwards. Refused with `16#000F` if the axes are further than `VelPath_MaxDeviation` off the programmed line |
 | End of run | `STATE_EXEC` | `currX/Z := ActualPosition`, `MC_MoveAbsolute` on **both** axes (forced — an axis with < 0.01 mm left but a live velocity would otherwise never be told to stop) |
 
 **Why actual position and not the nominal end point:** the scan it takes `READ`/`EXEC` to launch
@@ -299,9 +308,33 @@ mode except the `MC_MoveAbsolute` hand-over therefore brings in a halt:
 | Reset mid-run | **`vmHaltReq`** latch (IDLE drives `bHaltTrig` FALSE, so it needs its own) | Held until both halts report `Done`; IDLE refuses a new start until then |
 | `Start` drops without Stop/Pause/Reset | `STATE_ERROR`, `16#000F` "run permission lost" | — |
 | **Another command takes the axis** (FB_Process PNP halt, anything else) | `CommandAborted` on the live pair → `STATE_ERROR`, `16#000F` | Without this the next line would relaunch motion straight through whatever stopped it. Checked in `VEL_WAIT` *and* again at launch, because the abort can land in the scan between |
+| Off the programmed line while catching up past short lines | `STATE_EXEC`, `STATE_ERROR`, `16#000F` "off path (catch-up)" | The deviation guard for lines that never reach `STATE_VEL_WAIT` |
+| Catch-up used all `VM_CATCHUP_MAX` (10) skips in one scan — too many points inside the lead distance | `STATE_EXEC` → `STATE_ERROR`, `16#000F` "catch-up limit" | A segment-length problem in the recipe, not something to ride through one line per scan. Program 2 needed at most 2 |
+| **Next segment would reverse the direction of travel** (turn > 90° against the live velocity) | `STATE_EXEC` → `STATE_ERROR`, `16#000F` "reverse blocked" | **A velocity command never drives the axes back along the path.** Valid runs cannot contain such a turn: SpinningCam marks turns ≥ its stop angle (default 90°) `CMD=1`, and passed points are skipped. Keep the CAM stop angle ≤ 90°; above that this fault fires — safe, fix the setting, never the branch |
 | TO / drive error | `16#0001` / `16#0002` with TO text, as for position moves | — |
 | Off the line by more than `VelPath_MaxDeviation`, or moving **away** from the end point by more than it | `STATE_ERROR`, `16#000F` with the distance in `Error_Text` | — |
 | No progress for `Timeout_Motion` | `16#0008` (existing timer, now also counts in `VEL_WAIT`) | Stall, not runaway |
+
+**Safety net, independent of every row above (2026-09-15).** Each row is a separate code path,
+and one broken path would leave an axis driving to its hardware limit. Two checks run every scan
+in `FB_RecipeHandler`, whatever the state:
+
+- **Net 1 — state invariant** (before the motion calls): a velocity command may only be live in
+  `READ`/`EXEC`/`VEL_WAIT`. In any other state it is dropped and both axes halted in the same scan.
+- **Net 2 — unsupervised-command watchdog** (after the motion calls): any `MC_MoveVelocity`
+  instance still `Busy` while no velocity command should be live, for more than
+  `VM_UNSUPERVISED_SCANS` (2) scans → halt + `16#000F` "unsupervised vel cmd". This closes the one
+  gap the audit found in the rows above: the end-of-run hand-over trusts `MC_MoveAbsolute` to take
+  the axis over, and if it never started the handler sat in `STATE_WAIT` — with no path guard —
+  for `Timeout_Motion` (300 s).
+- The halt latch `vmHaltReq` releases on halt `Done` **or** both axes at standstill with nothing
+  busy, so a halt that cannot finish (drive already off) never locks out the next start.
+
+Verified by reading, not by test: the handler call (`06:3868`) is at the top level of
+`FB_Process`, which has no early `RETURN`, so both nets run every scan the CPU is in RUN. Below
+all of this sit the two layers the PLC logic cannot defeat: **E-Stop** drops drive power through
+the safety relay, and the **TO software / hardware limits** stop the axis. Confirm both are
+active before the first velocity-mode test (§9.6).
 
 `16#000F` is severity 3 (motion tier), text `'Velocity path fault - see detail'`; the detail
 names which guard fired. Row added to `tools/hmi_texts.csv` — **add it to the WinCC text list
@@ -324,7 +357,7 @@ No new timer. `tonMoveTimeout` is reused and reset at every launch.
 |---|---|---|
 | `VelPath_Enable` | **FALSE** (forced every restart) | Master switch. Set online to try it |
 | `VelPath_LeadTime` | 0.15 s | Next line takes over at `feed × this` before the end point (0.75 mm at 5 mm/s), **capped at half the segment**. Rule: **≈ 1.5 × OB1 cycle time.** Was 0.05 s, sized for an assumed 10 ms scan; the user reported ~100–110 ms (unmeasured) on 2026-09-14 |
-| `VelPath_MaxDeviation` | 1.0 mm | Off-path / backwards fault threshold |
+| `VelPath_MaxDeviation` | **0.3 mm** | Off-path / backwards fault threshold. Was 1.0 mm — too loose: on the final pass the roller–mandrel gap is only the sheet thickness (0.8 mm). Simulated hand-off error is ~0.02 mm, so 0.3 mm leaves room for jerk and drive lag without crying wolf |
 
 Online changes last until the next power cycle — deliberate for an experiment.
 

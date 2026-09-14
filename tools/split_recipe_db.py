@@ -108,6 +108,7 @@ MASK32 = 0xFFFFFFFF
 
 # Display-only marker lines (2026-09-06). They command nothing; the checksum folds
 # them like any other line. See Program/docs/letter_spinningcam_pass_markers.md.
+CMD_LINEAR_CONT = 2   # continuous G1 (branch exp/velocity-path-350) -- needs F > 0
 CMD_OP_MARK = 50      # Param = operation number, F = total operations
 CMD_PASS_MARK = 51    # Param = pass number in op, F = total passes in that op
 
@@ -242,6 +243,18 @@ def check_common(text: str) -> int:
     return line_count
 
 
+def check_continuous(text: str, line_count: int) -> None:
+    """CMD=2 (continuous G1) must carry F > 0 -- mirrors FB_RecipePreScan.
+
+    With F = 0 the handler runs a motion line as a rapid, so velocity mode could
+    never apply, and the PLC rejects the recipe at pre-scan. Catch it here first.
+    """
+    for g, (cmd, _param, f) in sorted(parse_lines(text).items()):
+        if g < line_count and cmd == CMD_LINEAR_CONT and f <= 0:
+            raise RecipeError(f"line {g} is CMD=2 (continuous G1) with F = {f}; it needs"
+                              " F > 0 or the PLC pre-scan rejects the recipe")
+
+
 def check_flat(text: str) -> int:
     line_count = check_common(text)
     cmds = {int(i): int(v) for i, v in CMD_RE.findall(text)}
@@ -254,6 +267,7 @@ def check_flat(text: str) -> int:
         raise RecipeError(f"line {line_count - 1} (LineCount-1) has CMD ="
                           f" {cmds.get(line_count - 1)}, expected 99. The END marker is"
                           " mandatory -- without it the PLC stops with 16#0313")
+    check_continuous(text, line_count)
     return line_count
 
 
@@ -366,6 +380,7 @@ def check_chunked(text: str) -> int:
             f"global line {end} (LineCount-1) maps to Lines{c}[{i}], which has CMD ="
             f" {cmds.get((c, i))}, expected 99. Either the END marker is missing or the"
             " file was chunked against a different geometry")
+    check_continuous(text, line_count)
     return line_count
 
 
