@@ -54,8 +54,10 @@ from __future__ import annotations
 
 import argparse
 import io
+import math
 import pathlib
 import re
+import struct
 import sys
 
 # Imported, not copied: the chunk geometry has to agree with the loader CASE and
@@ -93,6 +95,9 @@ CHUNKS_MARKER_RE = re.compile(r"^//[ \t]*CHUNKS:[ \t]*(\d+)[ \t]*[xX][ \t]*(\d+)
 # on a flat file. See Program/docs/letter_spinningcam_recipe_checksum.md.
 FIELD_RE = re.compile(
     r"\bLines(\d*)\[(\d+)\]\.(CMD|Param|F)[ \t]*:=[ \t]*(-?\d+)[ \t]*;")
+# Coordinates, for the zero-length CMD=2 check only (the checksum deliberately excludes X/Z).
+XZ_RE = re.compile(
+    r"\bLines(\d*)\[(\d+)\]\.(X|Z)[ \t]*:=[ \t]*(-?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?)[ \t]*;")
 PROVIDES_RE = re.compile(
     r"^([ \t]*)Header\.ProvidesChecksum[ \t]*:=[ \t]*(\w+)[ \t]*;.*$", re.M)
 # UDINT# prefix optional on read, and optional on write too -- measured on the real
@@ -243,16 +248,45 @@ def check_common(text: str) -> int:
     return line_count
 
 
-def check_continuous(text: str, line_count: int) -> None:
-    """CMD=2 (continuous G1) must carry F > 0 -- mirrors FB_RecipePreScan.
+def _f32(x: float) -> float:
+    """Round to IEEE single precision -- the PLC's REAL."""
+    return struct.unpack("f", struct.pack("f", x))[0]
 
-    With F = 0 the handler runs a motion line as a rapid, so velocity mode could
-    never apply, and the PLC rejects the recipe at pre-scan. Catch it here first.
+
+def check_continuous(text: str, line_count: int) -> None:
+    """CMD=2 (continuous G1) rules -- mirrors FB_RecipePreScan.
+
+    * F > 0. With F = 0 the handler runs a motion line as a rapid, so velocity mode
+      could never apply.
+    * Not zero-length. A CMD=2 line that repeats the previous motion point is skipped
+      by the handler READ -> EXEC -> READ without reaching STATE_VEL_WAIT, where Pause
+      and the path-deviation guard live, while the axes keep moving on the old
+      heading. Computed in float32 with the PLC's exact expression and 0.01 mm
+      threshold, so this check and the pre-scan agree on every line.
     """
-    for g, (cmd, _param, f) in sorted(parse_lines(text).items()):
+    lines = parse_lines(text)
+    for g, (cmd, _param, f) in sorted(lines.items()):
         if g < line_count and cmd == CMD_LINEAR_CONT and f <= 0:
             raise RecipeError(f"line {g} is CMD=2 (continuous G1) with F = {f}; it needs"
                               " F > 0 or the PLC pre-scan rejects the recipe")
+
+    xz: dict[int, list[float]] = {}
+    for chunk, idx, axis, value in XZ_RE.findall(text):
+        g = (int(chunk) - 1) * CHUNK_LINES + int(idx) if chunk else int(idx)
+        xz.setdefault(g, [0.0, 0.0])[0 if axis == "X" else 1] = _f32(float(value))
+    prev = None
+    for g in range(line_count):
+        cmd = lines.get(g, [0, 0, 0])[0]
+        if cmd > CMD_LINEAR_CONT:
+            continue            # non-motion lines do not move the point
+        x, z = xz.get(g, [0.0, 0.0])
+        if cmd == CMD_LINEAR_CONT and prev is not None:
+            dx, dz = _f32(x - prev[0]), _f32(z - prev[1])
+            if _f32(math.sqrt(_f32(_f32(dx * dx) + _f32(dz * dz)))) <= _f32(0.01):
+                raise RecipeError(f"line {g} is CMD=2 (continuous G1) with zero length --"
+                                  " it repeats the previous motion point. The PLC pre-scan"
+                                  " rejects it; drop the duplicate point in the CAM")
+        prev = (x, z)
 
 
 def check_flat(text: str) -> int:

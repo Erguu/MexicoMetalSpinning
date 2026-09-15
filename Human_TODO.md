@@ -365,8 +365,8 @@ On a program made of many short moves that is a small speed-up. Nothing else cha
 - [ ] **Check one part against a known-good one.** The axes now restart about 20 ms sooner at
       every corner. There is no reason for that to mark the part. Look once anyway.
 
-Do not expect a big difference. The real limit is the TO smoothing time, still at 0.3 s, worth
-roughly 20× this. See `Program/docs/MotionSmoothing.md`.
+Do not expect a big difference. The real limit is the TO smoothing time, worth roughly 20× this.
+~~Still at 0.3 s.~~ **Set to 0.06 s on 2026-09-15** (X and Z). See `Program/docs/MotionSmoothing.md`.
 
 Why it stops at 2 scans and not 0: `Program/docs/RecipeHandler_ScanLatency.md`.
 

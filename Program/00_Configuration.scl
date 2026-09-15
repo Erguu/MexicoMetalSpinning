@@ -223,8 +223,9 @@ BEGIN
     // experimental motion mode must never be inherited across a power cycle.
     // See docs/MotionSmoothing.md section 9 before switching it on.
     "DB_MachineConfig".VelPath_Enable       := FALSE;
-    "DB_MachineConfig".VelPath_LeadTime     := 0.15;   // s  -- takeover lead (feed x time = distance). ~1.5 x OB1 cycle;
-                                                       //       sized for the ~100 ms cycle reported 2026-09-14 (unmeasured)
+    "DB_MachineConfig".VelPath_LeadTime     := 0.0675; // s  -- takeover lead (feed x time = distance). 1.5 x OB1 cycle;
+                                                       //       cycle MEASURED 40-45 ms (2026-09-15). Simulated on program 1:
+                                                       //       0.023 mm worst path error; the old 0.15 s gave 0.167 mm
     "DB_MachineConfig".VelPath_MaxDeviation := 0.3;    // mm -- off-path fault threshold (16#000F). Was 1.0: the
                                                        //       final-pass roller-mandrel gap is only the sheet
                                                        //       thickness (0.8 mm). Simulated error is ~0.02 mm

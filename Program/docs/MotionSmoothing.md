@@ -20,7 +20,7 @@ X and Z are identical.
 | Acceleration | 153.8423 mm/s² |
 | Deceleration | 184.6108 mm/s² |
 | **Jerk limiter** | **ACTIVE** |
-| Smoothing time t1 / t2 | **0.3 s / 0.36 s** |
+| Smoothing time t1 / t2 | **0.3 s / 0.36 s** — **t1 changed to 0.06 s on 2026-09-15** (see §9.6 item 3) |
 | Jerk | 512.8076 mm/s³ |
 
 | Process | Value |
@@ -280,7 +280,7 @@ or the end of the program.
 | Launch | `STATE_EXEC` | Vector from the axes' **actual** position to the line end point: `v = feed · (target − actual) / distance`, signed, `Direction := 0`. Components below `MinVelocity` become exactly `0.0` |
 | Run | `STATE_VEL_WAIT(32)` | Each scan: remaining distance along the segment `rem`, and distance off the line `lat` |
 | Hand-off | `STATE_VEL_WAIT` → `READ` → `EXEC` | When `rem ≤ feed × VelPath_LeadTime` the line is done; the next line launches on the **other** instance pair in the same scan it is read. The axes never stop |
-| Zero-length line | `STATE_EXEC` | Programmed length ≤ 0.01 mm: counted done, next line on the next scan |
+| Zero-length line | `STATE_EXEC` | Programmed length ≤ 0.01 mm: counted done, next line on the next scan. **A `CMD=2` zero-length line is refused at pre-scan (2026-09-15)** — see §9.3 |
 | **Already passed — same-scan catch-up** (2026-09-14) | `STATE_EXEC` | While a run is moving, **every** line whose end point the axes are already within `live speed × LeadTime` of — **measured along the programmed segment** (previous programmed end → this end) — is skipped **in the same scan** (up to `VM_CATCHUP_MAX` = 10), but only into a line that is itself velocity-eligible; the vector is then aimed at the first point genuinely ahead. The last line before a hand-over, if already passed, is counted done and the next line read on the next scan. **Simulated on the real program 2 (0.41–2.66 mm chords, F300):** at T = 0.1 s, one skip per scan left 0.77 mm path error and a `16#000F` fault; the same-scan loop gave **0.023 mm, no reversals, no fault, at most 2 lines per scan**; at T = 0.05 / 0.02 s ≤ 0.01 mm. Re-run with `tools/sim_velocity_path.py` once T is measured. Added because the first real exports have 0.4 mm chords — shorter than one 100 ms scan of travel — and aiming at a passed point would pull the axes backwards. Refused with `16#000F` if the axes are further than `VelPath_MaxDeviation` off the programmed line |
 | End of run | `STATE_EXEC` | `currX/Z := ActualPosition`, `MC_MoveAbsolute` on **both** axes (forced — an axis with < 0.01 mm left but a live velocity would otherwise never be told to stop) |
 
@@ -304,7 +304,8 @@ mode except the `MC_MoveAbsolute` hand-over therefore brings in a halt:
 |---|---|---|
 | Pause | `bHaltTrig` → `STATE_PAUSED(800)` | Existing retract/return; resume re-reads the line and relaunches from the interruption point |
 | Stop | `bHaltTrig` → `STATE_STOPPING(850)` | Existing stop path |
-| Handler fault | `STATE_ERROR(999)` sets `bHaltTrig` | — |
+| Handler fault | **`vmHaltReq` set in the fault branch itself**, then `STATE_ERROR(999)` holds `bHaltTrig` | **Same-scan halt (2026-09-15).** Before, the halt came only from the ERROR branch — which runs on the *next* scan — so the axes kept the stale vector one scan after the guard fired. Applies to every `16#000F`/`0001`/`0002`/`0008` exit in `VEL_WAIT` and the `EXEC` launch block |
+| **Chain of zero-length `CMD=2` lines** | Refused at pre-scan (`'CMD=2 zero-length: repeats previous point'`), mirrored by `split_recipe_db.py --check` | Each such line loops `READ` → `EXEC` without reaching `VEL_WAIT`, so Pause, run permission and the deviation guard never run while the axes keep moving. Stop, E-Stop and FB_Process errors (MC_Power off) were still effective. Program 2: none (shortest chord 0.405 mm) |
 | Reset mid-run | **`vmHaltReq`** latch (IDLE drives `bHaltTrig` FALSE, so it needs its own) | Held until both halts report `Done`; IDLE refuses a new start until then |
 | `Start` drops without Stop/Pause/Reset | `STATE_ERROR`, `16#000F` "run permission lost" | — |
 | **Another command takes the axis** (FB_Process PNP halt, anything else) | `CommandAborted` on the live pair → `STATE_ERROR`, `16#000F` | Without this the next line would relaunch motion straight through whatever stopped it. Checked in `VEL_WAIT` *and* again at launch, because the abort can land in the scan between |
@@ -332,9 +333,14 @@ in `FB_RecipeHandler`, whatever the state:
 
 Verified by reading, not by test: the handler call (`06:3868`) is at the top level of
 `FB_Process`, which has no early `RETURN`, so both nets run every scan the CPU is in RUN. Below
-all of this sit the two layers the PLC logic cannot defeat: **E-Stop** drops drive power through
-the safety relay, and the **TO software / hardware limits** stop the axis. Confirm both are
-active before the first velocity-mode test (§9.6).
+all of this sit two layers the recipe handler cannot defeat: **E-Stop** drops every contactor and
+enable output in `FC_ContactorControl` straight from `Safety_Estop`, and switches MC_Power off in the
+same scan (`06:1342`), which aborts every `MC_MoveVelocity` job; and the **TO software / hardware
+limits** stop the axis. **Neither is independent of the PLC as far as the repo shows** — the E-Stop
+path runs through PLC outputs on a standard CPU, and `Wiring_Diagram.md` still has "contactor
+drop-out on E-Stop is hardware-independent of the PLC output" unticked. (This section said "through
+the safety relay" until 2026-09-15; that was never verified.) Confirm the wiring and the TO limits
+before the first velocity-mode test (§9.6), and never run a velocity test with `Bypass_EStop` set.
 
 `16#000F` is severity 3 (motion tier), text `'Velocity path fault - see detail'`; the detail
 names which guard fired. Row added to `tools/hmi_texts.csv` — **add it to the WinCC text list
@@ -356,7 +362,7 @@ No new timer. `tonMoveTimeout` is reused and reset at every launch.
 | Tag | Default | Meaning |
 |---|---|---|
 | `VelPath_Enable` | **FALSE** (forced every restart) | Master switch. Set online to try it |
-| `VelPath_LeadTime` | 0.15 s | Next line takes over at `feed × this` before the end point (0.75 mm at 5 mm/s), **capped at half the segment**. Rule: **≈ 1.5 × OB1 cycle time.** Was 0.05 s, sized for an assumed 10 ms scan; the user reported ~100–110 ms (unmeasured) on 2026-09-14 |
+| `VelPath_LeadTime` | **0.0675 s** | Next line takes over at `feed × this` before the end point (0.34 mm at 5 mm/s), **capped at half the segment**. Rule: **≈ 1.5 × OB1 cycle time.** History: 0.05 s (assumed 10 ms scan) → 0.15 s (recalled ~100 ms, 2026-09-14) → **0.0675 s, cycle measured 40–45 ms (2026-09-15)**. Simulated on program 1 (357 `CMD=2` lines, 10 runs, max turn 23°): lead 0.15 / 0.09 / **0.0675** / 0.045 s → worst path error 0.167 / 0.046 / **0.023** / 0.041 mm, corner miss 0.132 / 0.084 / **0.064** / 0.043 mm, no faults. Too long overshoots into passed points; too short lands late |
 | `VelPath_MaxDeviation` | **0.3 mm** | Off-path / backwards fault threshold. Was 1.0 mm — too loose: on the final pass the roller–mandrel gap is only the sheet thickness (0.8 mm). Simulated hand-off error is ~0.02 mm, so 0.3 mm leaves room for jerk and drive lag without crying wolf |
 
 Online changes last until the next power cycle — deliberate for an experiment.
@@ -366,8 +372,10 @@ Online changes last until the next power cycle — deliberate for an experiment.
 1. **Does this TO accept `Velocity = 0.0` with `Direction = 0`?** Siemens documents 0.0 as
    permitted; if this firmware disagrees, the first purely axial or radial segment faults with
    `16#0001`/`16#0002`. Fix would be to hold that axis with its own instance idle instead.
-2. **Real scan time — the most important number for this mode.** User recollection
-   2026-09-14: **~100–110 ms**, not the 10 ms §2 and §8 assumed. At 100 ms and 5 mm/s the axes
+2. **Real scan time — the most important number for this mode.** **MEASURED 2026-09-15: 40–45 ms**
+   — `VelPath_LeadTime` retuned to 0.0675 s (§9.5). The rest of this item was written for the
+   recalled value and overstates the problem by ~2×: at 45 ms and 5 mm/s the axes travel 0.23 mm per
+   scan. Original note — user recollection 2026-09-14: **~100–110 ms**, not the 10 ms §2 and §8 assumed. At 100 ms and 5 mm/s the axes
    travel **0.5 mm per scan**, so a hand-off can land up to ~1 mm late (sampling + the launch
    scan). Consequences already built in: lead capped at half the segment, no multi-line skip
    (a slow scan made the old skip chain along a stale vector with no guard running). What stays
@@ -376,9 +384,28 @@ Online changes last until the next power cycle — deliberate for an experiment.
    Diagnostics → Cycle time: shortest / current / longest) and set `VelPath_LeadTime ≈ 1.5 ×`
    the longest. Also note: at 100 ms the *position-move* handler loses ~200 ms per line to its
    2-scan dead time (§2), which alone explains much of the slow feed.
-3. **Corner behaviour with the jerk limiter on.** A direction change still goes through the TO's
-   S-curve (§2). Expected corner deviation at 5 mm/s and ~10° per chord is ~0.02 mm, but it is
-   arithmetic, not a measurement. §4 step 2 (t1 = 0.06 s) helps this mode too.
+3. **Corner behaviour with the jerk limiter on — OBSERVED 2026-09-15: `16#000F` "Velocity path
+   deviation mm: 0.351".** The old estimate here (~0.02 mm) assumed 5 mm/s; program 1's `CMD=2`
+   lines run at **F 499–800 mm/min (8–13 mm/s)** with turns up to 23°. Each axis follows its new
+   velocity through the jerk-limited S-curve, so after every turn the axes keep drifting along the
+   old heading. `tools/sim_velocity_path.py` does not model that; a scratch model that does (per-axis
+   jerk + accel limits, 1 ms integration, 45 ms scan, lead 0.0675 s) reproduces the fault:
+
+   | TO smoothing t1 | Override 100% | 150% | 200% |
+   |---|---|---|---|
+   | **0.3 s (current)** | **0.381 mm — faults** (line 126) | 1.38 mm | 3.69 mm |
+   | 0.06 s | 0.121 mm | 0.297 mm (at the limit) | 1.15 mm |
+
+   The guard value equals the real path error — the fault is telling the truth, the roller did
+   leave the path. **Fixes, in order:** t1 = 0.06 s (§4 step 2), keep feed override ≤ 100% in
+   velocity mode, or lower the CAM feed. **Do not raise `VelPath_MaxDeviation`** — the final-pass
+   gap is 0.8 mm.
+
+   The fault fired at **line 13** of the 16:03 export: 15.5° turn + feed jump 499 → 747 mm/min onto
+   an 8.2 mm segment. The model gave 0.294 mm there at t1 = 0.3 s (0.118 mm at 0.06 s, 0.080 mm at
+   0.03 s). **RESULT 2026-09-15: user set t1 = 0.06 s on the machine and the fault is gone** —
+   first velocity-mode prediction confirmed on hardware. Still unmeasured: the real path error
+   (TIA Trace of `ActualPosition`), 150% override (model: 0.297 mm, at the limit), and 0.03 s.
 4. **Memory.** Four `MC_MoveVelocity` multi-instances and ~70 lines of logic. Compile and read
    the work-memory figure before anything else.
 

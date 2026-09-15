@@ -399,7 +399,7 @@ VERSION : 0.3
         // -- the experiment must be switched on deliberately, every session.
         // Design and test plan: docs/MotionSmoothing.md section 9.
         VelPath_Enable       : Bool := FALSE; // TRUE = runs of G1 lines use MC_MoveVelocity (no stop per line)
-        VelPath_LeadTime     : Real := 0.15;  // s -- next line takes over at feed x this before the end point (capped at half the segment). Set ~1.5 x OB1 cycle time
+        VelPath_LeadTime     : Real := 0.0675; // s -- next line takes over at feed x this before the end point (capped at half the segment). Set ~1.5 x OB1 cycle time
         VelPath_MaxDeviation : Real := 0.3;   // mm -- off-path / backwards distance that faults with 16#000F. Keep well under the final-pass roller-mandrel gap (sheet thickness, 0.8 mm)
 
         // Tool Configuration -- HMI-EDITABLE: active slot count (1-4)

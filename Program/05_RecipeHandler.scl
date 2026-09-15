@@ -657,6 +657,13 @@ VERSION : 0.1
         mapIndex : Int;             // Tool mapping loop index
         mapFound : Bool;            // Tool mapping search result
         cylTarget : Real;           // reserved (ITEM-38 ruler range check removed -- BackSupport is full-stroke on this machine)
+        // Zero-length CMD=2 check (2026-09-15). Previous motion line's programmed end point --
+        // the same point FB_RecipeHandler holds in currX/currZ when it launches the next line.
+        prevMotionValid : Bool;     // FALSE until the first motion line (its start is wherever the axes are)
+        prevMotionX : Real;
+        prevMotionZ : Real;
+        segDX : Real;
+        segDZ : Real;
     END_VAR
     CONST
         // Recipe format: RecipeLine.Param encodes spindle speed as RPM ÷ 10.
@@ -691,6 +698,7 @@ BEGIN
                 #MaxZ := "DB_MachineConfig".SoftLimit_MinZ;
                 #ErrorLine := -1;
                 #Valid := TRUE;
+                #prevMotionValid := FALSE;
                 #state := 10;
             END_IF;
             
@@ -750,6 +758,31 @@ BEGIN
                         END_IF;
                         #Valid := FALSE;
                     END_IF;
+
+                    // Zero-length continuous line (2026-09-15). A CMD=2 line that repeats the
+                    // previous motion point is skipped by the handler's degenerate-line branch,
+                    // READ -> EXEC -> READ, without ever reaching STATE_VEL_WAIT -- where Pause,
+                    // run permission and the path-deviation guard live -- while the velocity
+                    // command keeps the axes on the old heading. A chain of them is unsupervised
+                    // for 2 scans per line. Refuse the recipe instead.
+                    // Expression and 0.01 mm threshold are IDENTICAL to the handler's vmNLen test
+                    // on purpose: same REAL arithmetic, so the two can never disagree on a line.
+                    // Non-motion lines (markers, spindle, cylinder) do not move the point, exactly
+                    // as they do not touch currX/currZ in the handler.
+                    IF #Lines[#scanIndex].CMD = 2 AND #prevMotionValid THEN
+                        #segDX := #Lines[#scanIndex].X - #prevMotionX;
+                        #segDZ := #Lines[#scanIndex].Z - #prevMotionZ;
+                        IF SQRT(#segDX * #segDX + #segDZ * #segDZ) <= 0.01 THEN
+                            IF #ErrorLine < 0 THEN
+                                #ErrorLine := #scanIndex;
+                                #ErrorDesc := 'CMD=2 zero-length: repeats previous point';
+                            END_IF;
+                            #Valid := FALSE;
+                        END_IF;
+                    END_IF;
+                    #prevMotionX := #Lines[#scanIndex].X;
+                    #prevMotionZ := #Lines[#scanIndex].Z;
+                    #prevMotionValid := TRUE;
                 END_IF;
 
                 // #4 -- Feedrate check: G1 F-value above MaxVelocity (mm/min → mm/s for comparison)
@@ -1446,8 +1479,16 @@ BEGIN
         //
         // Guard order matters: Pause first (operator intent), then run permission,
         // then faults, then completion. Every exit except completion drops
-        // vmActive AND brings in a halt (bHaltTrig / STATE_ERROR), because
-        // MC_MoveVelocity keeps running when Execute drops.
+        // vmActive AND brings in a halt, because MC_MoveVelocity keeps running
+        // when Execute drops.
+        //
+        // Fault exits set vmHaltReq THEMSELVES (2026-09-15). "Going to STATE_ERROR"
+        // is NOT a halt in the scan it happens: the ERROR branch that sets bHaltTrig
+        // only runs on the NEXT scan, so the axes used to keep the stale vector for a
+        // whole extra scan after the guard had already fired. The MC_Halt calls sit
+        // below the state machine, so vmHaltReq set here reaches the TO in the same
+        // scan the velocity command drops. Same rule for the fault branches in the
+        // STATE_EXEC launch block. Never remove those lines as "redundant with ERROR".
         32: // VEL_WAIT
             #bTrigMove := FALSE;
             #actX := #Axis_X.ActualPosition;
@@ -1471,6 +1512,7 @@ BEGIN
                 // (e.g. its own ERROR). A position move would just finish; a
                 // velocity command would not, so stop here.
                 #vmActive := FALSE;
+                #vmHaltReq := TRUE;   // halt THIS scan -- see the VEL_WAIT header
                 #ErrorID := 16#000F;
                 "DB_Diagnostic".Error_Text := 'Velocity path: run permission lost';
                 "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
@@ -1479,6 +1521,7 @@ BEGIN
 
             ELSIF #vmErr THEN
                 #vmActive := FALSE;
+                #vmHaltReq := TRUE;   // halt THIS scan -- see the VEL_WAIT header
                 IF (#vmUseB AND #mcVelXB.Error) OR (NOT #vmUseB AND #mcVelXA.Error) THEN
                     #ErrorID := 16#0001;
                     IF #vmUseB THEN
@@ -1509,6 +1552,7 @@ BEGIN
                 // command, ...). Do NOT carry on to the next line -- that would
                 // relaunch motion straight through whatever stopped it.
                 #vmActive := FALSE;
+                #vmHaltReq := TRUE;   // halt THIS scan -- see the VEL_WAIT header
                 #ErrorID := 16#000F;
                 "DB_Diagnostic".Error_Text := 'Velocity path: aborted by another motion command';
                 "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
@@ -1520,6 +1564,7 @@ BEGIN
                 // Off the line, or moving AWAY from the end point. Either means the
                 // commanded vector is not what the axes are doing.
                 #vmActive := FALSE;
+                #vmHaltReq := TRUE;   // halt THIS scan -- see the VEL_WAIT header
                 #ErrorID := 16#000F;
                 "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Velocity path deviation mm: ',
                                                      IN2 := REAL_TO_STRING(MAX(IN1 := #vmLat, IN2 := #vmRem - #vmSegLen)));
@@ -1529,6 +1574,7 @@ BEGIN
 
             ELSIF #tonMoveTimeout.Q THEN
                 #vmActive := FALSE;
+                #vmHaltReq := TRUE;   // halt THIS scan -- see the VEL_WAIT header
                 #ErrorID := 16#0008;
                 "DB_Diagnostic".Error_Text := 'Motion Timeout: velocity path';
                 "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Vel path no progress - Ln:',
@@ -2112,6 +2158,7 @@ BEGIN
             IF #vmActive AND (#vmErr OR #vmAborted) THEN
                 // The live command died between VEL_WAIT's last check and this scan.
                 #vmActive := FALSE;
+                #vmHaltReq := TRUE;   // halt THIS scan -- see the VEL_WAIT header
                 #ErrorID := 16#000F;
                 "DB_Diagnostic".Error_Text := 'Velocity path: command lost between segments';
                 "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
@@ -2135,6 +2182,7 @@ BEGIN
                 // are still on the programmed path. This is the deviation guard for lines
                 // that never reach STATE_VEL_WAIT.
                 #vmActive := FALSE;
+                #vmHaltReq := TRUE;   // halt THIS scan -- see the VEL_WAIT header
                 #ErrorID := 16#000F;
                 "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Velocity path off programmed line mm: ',
                                                      IN2 := REAL_TO_STRING(#vmNLat));
@@ -2147,6 +2195,7 @@ BEGIN
                 // recipe (segment length) problem, not something to ride through one line
                 // per scan. Stop. (Real program 2 needed at most 2 at a 100 ms scan.)
                 #vmActive := FALSE;
+                #vmHaltReq := TRUE;   // halt THIS scan -- see the VEL_WAIT header
                 #ErrorID := 16#000F;
                 "DB_Diagnostic".Error_Text := 'Velocity path: too many points inside lead distance - check CAM segment length';
                 "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
@@ -2171,6 +2220,7 @@ BEGIN
                 // If the CAM stop angle is ever raised above 90 degrees, this fires on those
                 // corners: safe, and the fix is the CAM setting, never removing this branch.
                 #vmActive := FALSE;
+                #vmHaltReq := TRUE;   // halt THIS scan -- see the VEL_WAIT header
                 #ErrorID := 16#000F;
                 "DB_Diagnostic".Error_Text := 'Velocity path: next segment would reverse the direction of travel';
                 "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
