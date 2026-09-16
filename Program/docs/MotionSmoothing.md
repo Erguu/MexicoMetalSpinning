@@ -20,8 +20,13 @@ X and Z are identical.
 | Acceleration | 153.8423 mm/s² |
 | Deceleration | 184.6108 mm/s² |
 | **Jerk limiter** | **ACTIVE** |
-| Smoothing time t1 / t2 | **0.3 s / 0.36 s** — **t1 changed to 0.06 s on 2026-09-15** (see §9.6 item 3) |
-| Jerk | 512.8076 mm/s³ |
+| Ramp-up / ramp-down time | 0.26 s / 0.2166667 s (to max velocity, without jerk) |
+| Smoothing time t1 / t2 | **0.06 s / 0.072 s** (was 0.3 s / 0.36 s until 2026-09-15, see §9.6 item 3) |
+| Jerk | **2564.038 mm/s³** (was 512.8076 at t1 = 0.3 s). Same both ways: acc / t1 = dec / t2 |
+
+Values confirmed by the user 2026-09-16. With them, a speed change below `a²/j = 9.2 mm/s`
+(13.3 mm/s decelerating) never reaches full acceleration; its duration is `2√(Δv/j)`: 40 ms for
+1 mm/s, 112 ms for 8 mm/s.
 
 | Process | Value |
 |---|---|
@@ -34,6 +39,8 @@ X and Z are identical.
 ## 2. Diagnosis
 
 ### The jerk limiter is the main problem
+
+*Diagnosis written with the original t1 = 0.3 s (jerk 512.8). At today's jerk the threshold is 9.2 mm/s — see §1.*
 
 Acceleration only reaches its configured value above `a²/j = 153.84² / 512.81 = 46.1 mm/s`.
 **Max velocity is 40 mm/s, so acceleration is never reached — at any speed.** Every move is
@@ -362,8 +369,8 @@ No new timer. `tonMoveTimeout` is reused and reset at every launch.
 | Tag | Default | Meaning |
 |---|---|---|
 | `VelPath_Enable` | **FALSE** (forced every restart) | Master switch. Set online to try it |
-| `VelPath_LeadTime` | **0.0675 s** | Next line takes over at `feed × this` before the end point (0.34 mm at 5 mm/s), **capped at half the segment**. Rule: **≈ 1.5 × OB1 cycle time.** History: 0.05 s (assumed 10 ms scan) → 0.15 s (recalled ~100 ms, 2026-09-14) → **0.0675 s, cycle measured 40–45 ms (2026-09-15)**. Simulated on program 1 (357 `CMD=2` lines, 10 runs, max turn 23°): lead 0.15 / 0.09 / **0.0675** / 0.045 s → worst path error 0.167 / 0.046 / **0.023** / 0.041 mm, corner miss 0.132 / 0.084 / **0.064** / 0.043 mm, no faults. Too long overshoots into passed points; too short lands late |
-| `VelPath_MaxDeviation` | **0.3 mm** | Off-path / backwards fault threshold. Was 1.0 mm — too loose: on the final pass the roller–mandrel gap is only the sheet thickness (0.8 mm). Simulated hand-off error is ~0.02 mm, so 0.3 mm leaves room for jerk and drive lag without crying wolf |
+| `VelPath_LeadTime` | **0.09 s** (was 0.0675 until 2026-09-16) | Next line takes over at `feed × this` before the end point (0.34 mm at 5 mm/s), **capped at half the segment**. Rule: **≈ 1.5 × OB1 cycle time.** History: 0.05 s (assumed 10 ms scan) → 0.15 s (recalled ~100 ms, 2026-09-14) → **0.0675 s, cycle measured 40–45 ms (2026-09-15)**. Simulated on program 1 (357 `CMD=2` lines, 10 runs, max turn 23°): lead 0.15 / 0.09 / **0.0675** / 0.045 s → worst path error 0.167 / 0.046 / **0.023** / 0.041 mm, corner miss 0.132 / 0.084 / **0.064** / 0.043 mm, no faults. **Those figures are from the old instant-velocity model.** With jerk modelled (2026-09-16, §9.6 item 5) the optimum moves to **≈0.09 s** (0.164 → 0.115 mm on the 2026-09-16 export). Too long overshoots into passed points; too short lands late |
+| `VelPath_MaxDeviation` | **0.3 mm** (start value) | Off-path / backwards fault threshold. **Operator-owned since 2026-09-16:** HMI-editable, *not* written by `FC_LoadConfig`, needs a Retain tick; the handler clamps it to `VM_MAXDEV_MIN..VM_MAXDEV_MAX` = 0.05..1.0 mm into `#vmMaxDev`, and every guard reads the clamped copy. Fault texts show the limit in force. Was 1.0 mm — on the final pass the roller–mandrel gap is only the sheet thickness (0.8 mm), so a value near that stops protecting the mandrel. Made adjustable because `16#000F` kept firing on the machine |
 
 Online changes last until the next power cycle — deliberate for an experiment.
 
@@ -388,8 +395,9 @@ Online changes last until the next power cycle — deliberate for an experiment.
    deviation mm: 0.351".** The old estimate here (~0.02 mm) assumed 5 mm/s; program 1's `CMD=2`
    lines run at **F 499–800 mm/min (8–13 mm/s)** with turns up to 23°. Each axis follows its new
    velocity through the jerk-limited S-curve, so after every turn the axes keep drifting along the
-   old heading. `tools/sim_velocity_path.py` does not model that; a scratch model that does (per-axis
-   jerk + accel limits, 1 ms integration, 45 ms scan, lead 0.0675 s) reproduces the fault:
+   old heading. `tools/sim_velocity_path.py` did not model that at the time; a scratch model that did
+   (per-axis jerk + accel limits, 1 ms integration, 45 ms scan, lead 0.0675 s) reproduced the fault.
+   **The sim now models it (2026-09-16, see item 5)**:
 
    | TO smoothing t1 | Override 100% | 150% | 200% |
    |---|---|---|---|
@@ -398,15 +406,36 @@ Online changes last until the next power cycle — deliberate for an experiment.
 
    The guard value equals the real path error — the fault is telling the truth, the roller did
    leave the path. **Fixes, in order:** t1 = 0.06 s (§4 step 2), keep feed override ≤ 100% in
-   velocity mode, or lower the CAM feed. **Do not raise `VelPath_MaxDeviation`** — the final-pass
-   gap is 0.8 mm.
+   velocity mode, or lower the CAM feed. Raising `VelPath_MaxDeviation` is the operator's call since
+   2026-09-16 (HMI, clamped 0.05..1.0 mm) — but it hides the error rather than fixing it, and the
+   final-pass gap is 0.8 mm.
 
    The fault fired at **line 13** of the 16:03 export: 15.5° turn + feed jump 499 → 747 mm/min onto
    an 8.2 mm segment. The model gave 0.294 mm there at t1 = 0.3 s (0.118 mm at 0.06 s, 0.080 mm at
    0.03 s). **RESULT 2026-09-15: user set t1 = 0.06 s on the machine and the fault is gone** —
    first velocity-mode prediction confirmed on hardware. Still unmeasured: the real path error
    (TIA Trace of `ActualPosition`), 150% override (model: 0.297 mm, at the limit), and 0.03 s.
-4. **Memory.** Four `MC_MoveVelocity` multi-instances and ~70 lines of logic. Compile and read
+5. **Jerk-aware simulation (2026-09-16).** `tools/sim_velocity_path.py` now drives each axis through
+   the TO's jerk-limited profile (defaults = this machine: acc 153.8 / dec 184.6, t1 0.06 / t2 0.072)
+   and measures the path every 1 ms. `--ideal` keeps the old instant-velocity model for comparison;
+   `--override` and `--sync` (proposal F, synchronised ramps) are options. Checks and results:
+
+   | Check | Result |
+   |---|---|
+   | Old ideal numbers unchanged with `--ideal` | Yes (program 1 of 2026-09-16: 0.0494 mm) |
+   | Synthetic copy of the fault corner (15.5°, 499 → 747, 8.2 mm), all orientations, t1 = 0.06 | 0.101–0.159 mm, mean 0.120 — scratch model said 0.118 |
+   | Same, t1 = 0.03 | 0.043–0.079 mm — scratch model 0.080 |
+   | Same, t1 = 0.3 | 0.144–0.265 mm — scratch model 0.294, machine 0.351. **The model is optimistic at long t1** (no servo following error) |
+   | Program 1 (2026-09-16 export, v1.034), lead 0.0675 | **0.164 mm** (ideal model: 0.049) |
+
+   Lead-time sweep on that program (t1 = 0.06, no faults at any value): 0.0675 → 0.164 mm,
+   0.08 → 0.154, **0.09 → 0.115**, 0.10 → 0.146, 0.12 → 0.175, 0.14 → 0.202. So **proposal A
+   (turn earlier) is worth ~30 %** and has a clear optimum; longer leads cut corners on the inside.
+   **Proposal F (`--sync`) gains almost nothing** (0.163 at 0.0675, 0.119 at 0.09): the remaining
+   error is timing (turn late / hand-off on a scan boundary), not X:Z ratio mismatch. The hand
+   estimate of ~0.04 mm for F assumed a perfectly centred blend and was wrong. Not yet changed on
+   the machine yet. **Default changed to 0.09 s on 2026-09-16** (`FC_LoadConfig` + DB start value, user decision).
+6. **Memory.** Four `MC_MoveVelocity` multi-instances and ~70 lines of logic. Compile and read
    the work-memory figure before anything else.
 
 **PLCSIM cannot test any of this** (S7-1200 motion is not simulated — see CLAUDE.md). What PLCSIM

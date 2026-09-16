@@ -533,6 +533,7 @@ CAM post-processors can drop the trailing `G0 X0 Z0`; the PLC parks the axes its
 | **Sanding Time** | `DB_MachineConfig.SandTime_s` | **Int, SECONDS** | **0** | **New 2026-08-29.** How long the spindle keeps turning after a program finishes, so the operator can sand the part before removing it. **`0` = feature off.** Whole seconds — type `10` for ten seconds. Clamped by the PLC to 0..600 s |
 | **Sanding Speed** | `DB_MachineConfig.SandSpeed` | Real | **0.0** | RPM during the sanding dwell. `0.0` also disables it. Clamped by the PLC to `DB_Spindle.MinSpeed` (120) / `MaxSpeed` (3000) — a mistyped value cannot command an out-of-range RPM |
 | **Sanding active** | `DB_HMI.SandActive` | Bool | — | **read-only.** TRUE while the dwell is running. See the safety note below |
+| **Path Deviation Limit** | `DB_MachineConfig.VelPath_MaxDeviation` | Real, **mm** | **0.3** | **Branch `exp/velocity-path-350` only, 2026-09-16.** How far the axes may leave the programmed path in velocity mode before `16#000F` stops the machine. The PLC clamps it to **0.05..1.0 mm** (a typo cannot switch the guard off). The final-pass roller-to-mandrel gap is the 0.8 mm sheet — a limit near or above that no longer protects the mandrel. The fault text (`DB_Diagnostic.Error_Text`) shows the measured deviation **and** the limit in force. Needs a Retain tick |
 
 > **Units.** `SandTime_s` is a plain `Int` of **whole seconds**, deliberately not the `Time` type
 > the other machine timers use. An S7 `Time` is milliseconds underneath, so an operator typing `10`
@@ -565,7 +566,7 @@ CAM post-processors can drop the trailing `G0 X0 Z0`; the PLC parks the axes its
 > HMI-editable field in it reverted to its start value on a power cycle — the sheet-load park
 > position typed by the operator was silently lost and the machine came back parking at 200.0 /
 > 170.0. The keyword is now removed, **but the DB is not automatically retentive**: tick **Retain**
-> on `SheetLoadPos_X`, `SheetLoadPos_Z`, `SheetLoadTol`, `SandTime_s` and `SandSpeed` in the TIA DB editor. An SCL source
+> on `SheetLoadPos_X`, `SheetLoadPos_Z`, `SheetLoadTol`, `SandTime_s`, `SandSpeed` and (velocity branch) `VelPath_MaxDeviation` in the TIA DB editor. An SCL source
 > import cannot set per-tag retentivity, so **re-check those boxes after every import of
 > `02_DataBlocks.scl`**. Changing retentivity re-initialises the DB on the next download — re-enter
 > the park position on the HMI once afterwards.

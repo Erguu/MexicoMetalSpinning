@@ -84,13 +84,16 @@ import sys
 # the 1..LINES_PER_RECIPE guard enforced by STATE_PRE_SCAN(12). These are coupled:
 # changing one without the other is ITEM-42 all over again.
 #
-# EXPERIMENTAL (branch exp/velocity-path-350, 2026-09-14): 1000 -> 400 to buy work
-# memory for the velocity-mode path experiment. (The branch name says 350 -- that
-# was the first choice, changed the same day to 400 so the chunk size stays at
-# master's proven 100 lines.) The 999-line production parts do not fit -- they
-# need a coarser CAM export (~2.5 mm chords). Do not merge this value to master
-# without that decision being made for production.
-LINES_PER_RECIPE = 400
+# EXPERIMENTAL (branch exp/velocity-path-350): 1000 -> 400 (2026-09-14) -> 500
+# (2026-09-16) to buy work memory for the velocity-mode path experiment. The
+# branch name says 350 -- the first choice, dropped the same day because it
+# forced an untested 70-line chunk; every value since has been a whole number of
+# master's proven 100-line chunks. 500 costs ~2.3 KB of work memory against 400
+# (one extra READ_DBL site per slot, ~1.1 KB, plus 1.2 KB of DB_SelectedRecipe)
+# and still frees ~11.7 KB against the 1000-line layout. The 999-line production
+# parts STILL do not fit -- they need a coarser CAM export (~2 mm chords). Do not
+# merge this value to master without that decision being made for production.
+LINES_PER_RECIPE = 500
 BYTES_PER_LINE = 12
 HEADER_BYTES = 48
 
@@ -110,7 +113,7 @@ HEADER_BYTES = 48
 #   larger  -> fewer call sites, but closer to the size that already fails
 # 100 lines = 1200 B per transfer, 11 call sites per slot (10 chunks + Header).
 # At 5 slots that is ~6.4 KB of call sites + 1.2 KB staging.
-# At 400 lines: the same 100-line chunk, 5 call sites per slot (4 chunks + Header).
+# At 500 lines: the same 100-line chunk, 6 call sites per slot (5 chunks + Header).
 # Keeping 100 is deliberate -- it is the only chunk size that has loaded cleanly
 # (PLCSIM), and a 400-line export is master's layout truncated after Lines4.
 CHUNK_LINES = 100

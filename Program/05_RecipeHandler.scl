@@ -188,8 +188,8 @@ VERSION : 0.3
         // emits. Change them together or the transfers go out of step.
         // <<< GENERATED:CHUNK_GEOMETRY -- do not hand-edit; run tools/gen_recipe_slots.py >>>
         CHUNK_LINES    : Int := 100;
-        CHUNK_COUNT    : Int := 4;
-        LINES_MAX      : Int := 400; // = CHUNK_LINES * CHUNK_COUNT, and the bound of
+        CHUNK_COUNT    : Int := 5;
+        LINES_MAX      : Int := 500; // = CHUNK_LINES * CHUNK_COUNT, and the bound of
                                       // DB_SelectedRecipe.Lines + the pre-scan guard
         // <<< END GENERATED:CHUNK_GEOMETRY >>>
         // <<< GENERATED:PROGRAM_COUNT -- do not hand-edit; run tools/gen_recipe_slots.py >>>
@@ -248,6 +248,8 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         2:  CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Header,
@@ -259,6 +261,8 @@ BEGIN
                 3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines3,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines4,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines5,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         3:  CASE #chunkPhase OF
@@ -272,6 +276,8 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         4:  CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Header,
@@ -283,6 +289,8 @@ BEGIN
                 3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines3,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines4,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines5,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         5:  CASE #chunkPhase OF
@@ -296,6 +304,8 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         6:  CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Header,
@@ -307,6 +317,8 @@ BEGIN
                 3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines3,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines4,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines5,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         7:  CASE #chunkPhase OF
@@ -320,6 +332,8 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         8:  CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Header,
@@ -331,6 +345,8 @@ BEGIN
                 3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines3,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines4,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines5,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         9:  CASE #chunkPhase OF
@@ -344,6 +360,8 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         10: CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Header,
@@ -355,6 +373,8 @@ BEGIN
                 3: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines3,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines4,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines5,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
     END_CASE;
@@ -643,7 +663,7 @@ VERSION : 0.1
     VAR_IN_OUT
         // Bound to "DB_SelectedRecipe".Lines -- the work-memory buffer, never a
         // DB_RecipeProgram* (those are load-memory only). Must match that DB.
-        Lines : Array[0..399] of "RecipeLine"; // Recipe lines storage (in/out DB reference)
+        Lines : Array[0..499] of "RecipeLine"; // Recipe lines storage (in/out DB reference)
     END_VAR
     VAR
         state : Int;                // Local state machine
@@ -916,7 +936,7 @@ VERSION : 0.1
     VAR_IN_OUT
         // Bound to "DB_SelectedRecipe".Lines -- the work-memory buffer, never a
         // DB_RecipeProgram* (those are load-memory only). Must match that DB.
-        Lines : Array[0..399] of "RecipeLine"; // Reference to recipe lines in DB
+        Lines : Array[0..499] of "RecipeLine"; // Reference to recipe lines in DB
         Axis_X : TO_PositioningAxis;           // Axis TO IN_OUT
         Axis_Z : TO_PositioningAxis;
     END_VAR
@@ -1002,6 +1022,7 @@ VERSION : 0.1
         vmWasActive : Bool;         // EXEC is handing a velocity run over to MC_MoveAbsolute
         vmErr       : Bool;         // Live instance pair reports Error (from last call)
         vmAborted   : Bool;         // Live instance pair was aborted by someone else
+        vmMaxDev    : Real;         // VelPath_MaxDeviation clamped to VM_MAXDEV_MIN..VM_MAXDEV_MAX (mm), every scan
         vmVelX      : Real;         // Signed X velocity of the live segment (mm/s)
         vmVelZ      : Real;         // Signed Z velocity of the live segment (mm/s)
         vmDX        : Real;         // Launch vector, actual position -> line end (mm)
@@ -1061,6 +1082,11 @@ VERSION : 0.1
         STATE_CYL_GOTO_WAIT : Int := 71;   // CMD=40: wait for BackSupport AtSetpoint or error
         STATE_VEL_WAIT      : Int := 32;   // Velocity-mode segment in progress (EXPERIMENTAL)
         VM_CATCHUP_MAX      : Int := 10;   // Most passed lines skipped in ONE scan (simulation needed 2 at T = 0.1 s)
+        VM_MAXDEV_MIN       : Real := 0.05; // mm -- floor for the operator-set deviation limit (0 / negative / typo -> strict)
+        VM_MAXDEV_MAX       : Real := 1.0;  // mm -- ceiling: a typo (3, 30) must not switch the path guard off.
+                                            //       1.0 was the original default. The final-pass roller-mandrel
+                                            //       gap is the 0.8 mm sheet -- above that the guard no longer
+                                            //       protects the mandrel. Raise only with that in mind.
         VM_UNSUPERVISED_SCANS : Int := 2;  // Safety net 2 grace: a hand-over MC_MoveAbsolute or MC_Halt aborts the
                                            // velocity command within ~1 scan; Busy on the 3rd scan = unsupervised
         STATE_DONE : Int := 99;
@@ -1202,6 +1228,17 @@ BEGIN
         // without this the cylinder keeps extending through the entire stop/home sequence.
         "DB_Cylinder_BackSupport".Cmd_Extend := FALSE;
         #state := STATE_STOPPING;
+    END_IF;
+
+    // Velocity-path deviation limit (2026-09-16). OPERATOR-OWNED: DB_MachineConfig.
+    // VelPath_MaxDeviation is set from the HMI and is no longer written by FC_LoadConfig.
+    // Clamped here, once, and every guard reads #vmMaxDev -- never the raw config value,
+    // so a mistyped 0 or 30 cannot make the guard fire constantly or never.
+    #vmMaxDev := "DB_MachineConfig".VelPath_MaxDeviation;
+    IF NOT (#vmMaxDev >= VM_MAXDEV_MIN) THEN      // also catches NaN
+        #vmMaxDev := VM_MAXDEV_MIN;
+    ELSIF #vmMaxDev > VM_MAXDEV_MAX THEN
+        #vmMaxDev := VM_MAXDEV_MAX;
     END_IF;
 
     // Move timeout timer -- only counts during STATE_WAIT and STATE_VEL_WAIT.
@@ -1559,15 +1596,16 @@ BEGIN
                                         IN1 := INT_TO_STRING(#lineIndex), IN2 := ' velocity cmd aborted'));
                 #state := STATE_ERROR;
 
-            ELSIF #vmLat > "DB_MachineConfig".VelPath_MaxDeviation
-               OR #vmRem > #vmSegLen + "DB_MachineConfig".VelPath_MaxDeviation THEN
+            ELSIF #vmLat > #vmMaxDev
+               OR #vmRem > #vmSegLen + #vmMaxDev THEN
                 // Off the line, or moving AWAY from the end point. Either means the
                 // commanded vector is not what the axes are doing.
                 #vmActive := FALSE;
                 #vmHaltReq := TRUE;   // halt THIS scan -- see the VEL_WAIT header
                 #ErrorID := 16#000F;
                 "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Velocity path deviation mm: ',
-                                                     IN2 := REAL_TO_STRING(MAX(IN1 := #vmLat, IN2 := #vmRem - #vmSegLen)));
+                                              IN2 := CONCAT(IN1 := REAL_TO_STRING(MAX(IN1 := #vmLat, IN2 := #vmRem - #vmSegLen)),
+                                              IN2 := CONCAT(IN1 := ' limit ', IN2 := REAL_TO_STRING(#vmMaxDev))));
                 "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
                                         IN1 := INT_TO_STRING(#lineIndex), IN2 := ' off path'));
                 #state := STATE_ERROR;
@@ -2029,7 +2067,7 @@ BEGIN
                 #vmDZ := #targZ - #Axis_Z.ActualPosition;
                 #vmAhead := (#vmDX * #vmNDX + #vmDZ * #vmNDZ) / #vmNLen;
                 #vmNLat := ABS(#vmDX * #vmNDZ - #vmDZ * #vmNDX) / #vmNLen;
-                IF #vmNLat > "DB_MachineConfig".VelPath_MaxDeviation OR #vmAhead > #vmLeadDist THEN
+                IF #vmNLat > #vmMaxDev OR #vmAhead > #vmLeadDist THEN
                     EXIT;
                 END_IF;
                 // Is the NEXT line velocity-eligible? Nested so no index past LineCount is read.
@@ -2177,7 +2215,7 @@ BEGIN
                 #currZ := #targZ;
                 #lineIndex := #lineIndex + 1;
                 #state := STATE_READ;
-            ELSIF #vmActive AND #vmNLat > "DB_MachineConfig".VelPath_MaxDeviation THEN
+            ELSIF #vmActive AND #vmNLat > #vmMaxDev THEN
                 // Checked BEFORE the catch-up skip: skipping is only allowed while the axes
                 // are still on the programmed path. This is the deviation guard for lines
                 // that never reach STATE_VEL_WAIT.
@@ -2185,7 +2223,8 @@ BEGIN
                 #vmHaltReq := TRUE;   // halt THIS scan -- see the VEL_WAIT header
                 #ErrorID := 16#000F;
                 "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Velocity path off programmed line mm: ',
-                                                     IN2 := REAL_TO_STRING(#vmNLat));
+                                              IN2 := CONCAT(IN1 := REAL_TO_STRING(#vmNLat),
+                                              IN2 := CONCAT(IN1 := ' limit ', IN2 := REAL_TO_STRING(#vmMaxDev))));
                 "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
                                         IN1 := INT_TO_STRING(#lineIndex), IN2 := ' off path (catch-up)'));
                 #state := STATE_ERROR;

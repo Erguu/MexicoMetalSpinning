@@ -222,13 +222,15 @@ BEGIN
     // Enable is forced FALSE on every restart -- same philosophy as Bypass_EStop: an
     // experimental motion mode must never be inherited across a power cycle.
     // See docs/MotionSmoothing.md section 9 before switching it on.
-    "DB_MachineConfig".VelPath_Enable       := FALSE;
-    "DB_MachineConfig".VelPath_LeadTime     := 0.0675; // s  -- takeover lead (feed x time = distance). 1.5 x OB1 cycle;
-                                                       //       cycle MEASURED 40-45 ms (2026-09-15). Simulated on program 1:
-                                                       //       0.023 mm worst path error; the old 0.15 s gave 0.167 mm
-    "DB_MachineConfig".VelPath_MaxDeviation := 0.3;    // mm -- off-path fault threshold (16#000F). Was 1.0: the
-                                                       //       final-pass roller-mandrel gap is only the sheet
-                                                       //       thickness (0.8 mm). Simulated error is ~0.02 mm
+    "DB_MachineConfig".VelPath_Enable       := TRUE;
+    "DB_MachineConfig".VelPath_LeadTime     := 0.09;   // s  -- takeover lead (feed x time = distance). Covers the scan delay
+                                                       //       (OB1 40-45 ms) AND the drive's jerk-limited ramp (t1 0.06 s).
+                                                       //       Jerk-aware sim, program 1 (2026-09-16): 0.0675 -> 0.164 mm,
+                                                       //       0.09 -> 0.115 mm, 0.12 -> 0.175 mm. Retune if t1 or the cycle changes
+    // VelPath_MaxDeviation is NOT written here (2026-09-16): it is operator-owned, set
+    // from the HMI, and needs a manual TIA Retain tick (docs/RETAINED_TAGS.md). Do not
+    // "complete" this block by adding it back -- that would reset the operator's value
+    // at every power-up. FB_RecipeHandler clamps it to 0.05..1.0 mm.
 
     // =========================================================================
     // SECTION 2 -- HOMING (REFERENCE SEEK)

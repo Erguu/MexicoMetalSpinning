@@ -18,7 +18,7 @@ array slice or a variable index -- so a chunk has to exist as a separately DECLA
 member:
 
     Lines : Array[0..LINES_PER_RECIPE-1]  ->  Lines1 .. LinesN : Array[0..CHUNK_LINES-1]
-    (exp/velocity-path-350: 400 lines -> Lines1..Lines4 of 100; master: 1000 -> 10 of 100)
+    (exp/velocity-path-350: 500 lines -> Lines1..Lines5 of 100; master: 1000 -> 10 of 100)
 
 This script performs that rewrite on an existing CAM export, so you are not blocked
 waiting for the post-processor to change. Once SpinningCam emits the layout itself,

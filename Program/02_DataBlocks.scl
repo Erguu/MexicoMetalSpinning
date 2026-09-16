@@ -394,13 +394,16 @@ VERSION : 0.3
         FeedrateConvFactor : Real := 60.0; // divisor to convert recipe F (mm/min) to axis velocity (mm/s)
 
         // EXPERIMENTAL -- velocity-mode continuous path (branch exp/velocity-path-350).
-        // Tuning values: FC_LoadConfig writes all three on every restart, so an online
-        // change lasts until the next power cycle. VelPath_Enable is forced FALSE there
-        // -- the experiment must be switched on deliberately, every session.
+        // VelPath_Enable and VelPath_LeadTime are written by FC_LoadConfig on every
+        // restart, so an online change lasts until the next power cycle. VelPath_Enable
+        // is forced FALSE there -- the experiment must be switched on deliberately.
+        // VelPath_MaxDeviation is OPERATOR-OWNED (2026-09-16): HMI-editable, NOT written
+        // by FC_LoadConfig, needs a manual Retain tick (docs/RETAINED_TAGS.md). Without
+        // the tick it falls back to the 0.3 start value at power-up.
         // Design and test plan: docs/MotionSmoothing.md section 9.
-        VelPath_Enable       : Bool := FALSE; // TRUE = runs of G1 lines use MC_MoveVelocity (no stop per line)
-        VelPath_LeadTime     : Real := 0.0675; // s -- next line takes over at feed x this before the end point (capped at half the segment). Set ~1.5 x OB1 cycle time
-        VelPath_MaxDeviation : Real := 0.3;   // mm -- off-path / backwards distance that faults with 16#000F. Keep well under the final-pass roller-mandrel gap (sheet thickness, 0.8 mm)
+        VelPath_Enable       : Bool := TRUE; // TRUE = runs of G1 lines use MC_MoveVelocity (no stop per line)
+        VelPath_LeadTime     : Real := 0.09;   // s -- next line takes over at feed x this before the end point (capped at half the segment). Tuned with the jerk-aware sim (scan 45 ms, t1 0.06)
+        VelPath_MaxDeviation : Real := 1.0;   // mm -- HMI-EDITABLE. Off-path / backwards distance that faults with 16#000F. PLC clamps to 0.05..1.0. Keep under the final-pass roller-mandrel gap (sheet thickness, 0.8 mm)
 
         // Tool Configuration -- HMI-EDITABLE: active slot count (1-4)
         ToolCount    : Int  := 3;
@@ -1330,14 +1333,15 @@ NON_RETAIN
         Header : "RecipeHeader";                // Copy of the selected recipe's header
         // EXPERIMENTAL BOUND (branch exp/velocity-path-350, user decision 2026-09-14).
         // Was Array[0..999] with a "do not shrink" rule (2026-08-10): production parts
-        // use ~1000 lines. Shrunk to 400 on this branch only, to free ~14 KB of work
-        // memory for the velocity-mode path experiment; the 999-line parts need a
-        // coarser CAM export to run here. Coupled change -- these move together or
-        // READ_DBL fails on a length mismatch: LINES_PER_RECIPE / CHUNK_LINES in
+        // use ~1000 lines. Shrunk to 400 on this branch only (2026-09-14), raised to
+        // 500 on 2026-09-16, to free work memory for the velocity-mode path experiment;
+        // the 999-line parts need a coarser CAM export to run here. 500 still frees
+        // ~11.7 KB against the 1000-line layout. Coupled change -- these move together
+        // or READ_DBL fails on a length mismatch: LINES_PER_RECIPE / CHUNK_LINES in
         // tools/gen_recipe_slots.py, the two Lines InOuts in 05_RecipeHandler.scl,
-        // the pre-scan guard (06_MainProcess.scl, activeLineCount > 400) and the
+        // the pre-scan guard (06_MainProcess.scl, activeLineCount > 500) and the
         // SpinningCam output.
-        Lines  : Array[0..399] of "RecipeLine"; // Copy of the selected recipe's lines
+        Lines  : Array[0..499] of "RecipeLine"; // Copy of the selected recipe's lines
     END_VAR
 BEGIN
 END_DATA_BLOCK
