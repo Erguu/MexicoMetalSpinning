@@ -234,7 +234,7 @@ def main():
     ap.add_argument("--scan", type=float, default=0.045,
                     help="OB1 cycle time s (default 0.045, measured 40-45 ms 2026-09-15)")
     ap.add_argument("--lead", type=float, default=0.09, help="VelPath_LeadTime s (default 0.09, the PLC value)")
-    ap.add_argument("--maxdev", type=float, default=0.3, help="VelPath_MaxDeviation mm (PLC default 0.3)")
+    ap.add_argument("--maxdev", type=float, default=0.3, help="VelPath_MaxDeviation mm (PLC start value 2.0; PLC clamps 0.05..5.0)")
     ap.add_argument("--override", type=float, default=1.0, help="feed override factor (1.0 = 100 percent)")
     ap.add_argument("--acc", type=float, default=153.8423, help="TO acceleration mm/s^2")
     ap.add_argument("--dec", type=float, default=184.6107, help="TO deceleration mm/s^2")

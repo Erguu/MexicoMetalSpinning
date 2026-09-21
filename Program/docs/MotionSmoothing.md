@@ -370,7 +370,7 @@ No new timer. `tonMoveTimeout` is reused and reset at every launch.
 |---|---|---|
 | `VelPath_Enable` | **FALSE** (forced every restart) | Master switch. Set online to try it |
 | `VelPath_LeadTime` | **0.09 s** (was 0.0675 until 2026-09-16) | Next line takes over at `feed × this` before the end point (0.34 mm at 5 mm/s), **capped at half the segment**. Rule: **≈ 1.5 × OB1 cycle time.** History: 0.05 s (assumed 10 ms scan) → 0.15 s (recalled ~100 ms, 2026-09-14) → **0.0675 s, cycle measured 40–45 ms (2026-09-15)**. Simulated on program 1 (357 `CMD=2` lines, 10 runs, max turn 23°): lead 0.15 / 0.09 / **0.0675** / 0.045 s → worst path error 0.167 / 0.046 / **0.023** / 0.041 mm, corner miss 0.132 / 0.084 / **0.064** / 0.043 mm, no faults. **Those figures are from the old instant-velocity model.** With jerk modelled (2026-09-16, §9.6 item 5) the optimum moves to **≈0.09 s** (0.164 → 0.115 mm on the 2026-09-16 export). Too long overshoots into passed points; too short lands late |
-| `VelPath_MaxDeviation` | **0.3 mm** (start value) | Off-path / backwards fault threshold. **Operator-owned since 2026-09-16:** HMI-editable, *not* written by `FC_LoadConfig`, needs a Retain tick; the handler clamps it to `VM_MAXDEV_MIN..VM_MAXDEV_MAX` = 0.05..1.0 mm into `#vmMaxDev`, and every guard reads the clamped copy. Fault texts show the limit in force. Was 1.0 mm — on the final pass the roller–mandrel gap is only the sheet thickness (0.8 mm), so a value near that stops protecting the mandrel. Made adjustable because `16#000F` kept firing on the machine |
+| `VelPath_MaxDeviation` | **2.0 mm** (start value, raised from 1.0 on 2026-09-21) | Off-path / backwards fault threshold. **Operator-owned since 2026-09-16:** HMI-editable, *not* written by `FC_LoadConfig`, needs a Retain tick; the handler clamps it to `VM_MAXDEV_MIN..VM_MAXDEV_MAX` = **0.05..5.0 mm** into `#vmMaxDev`, and every guard reads the clamped copy. Fault texts show the limit in force — **the clamped one**, which is why a value typed above the ceiling looks like it was ignored. **The ceiling was 1.0 until 2026-09-21** (user: raising the tag on the HMI still faulted at `limit 1.0`). Made adjustable at all because `16#000F` kept firing on the machine. **The meaning changes above 0.8 mm:** on the final pass the roller–mandrel gap *is* the sheet thickness, so a limit above it no longer protects the mandrel — it only catches a runaway. Commission with the smallest value that runs |
 
 Online changes last until the next power cycle — deliberate for an experiment.
 
@@ -407,7 +407,7 @@ Online changes last until the next power cycle — deliberate for an experiment.
    The guard value equals the real path error — the fault is telling the truth, the roller did
    leave the path. **Fixes, in order:** t1 = 0.06 s (§4 step 2), keep feed override ≤ 100% in
    velocity mode, or lower the CAM feed. Raising `VelPath_MaxDeviation` is the operator's call since
-   2026-09-16 (HMI, clamped 0.05..1.0 mm) — but it hides the error rather than fixing it, and the
+   2026-09-16 (HMI, clamped 0.05..5.0 mm — ceiling raised from 1.0 on 2026-09-21) — but it hides the error rather than fixing it, and the
    final-pass gap is 0.8 mm.
 
    The fault fired at **line 13** of the 16:03 export: 15.5° turn + feed jump 499 → 747 mm/min onto

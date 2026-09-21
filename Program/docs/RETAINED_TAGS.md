@@ -29,7 +29,7 @@ Open the DB in the TIA project tree, find the tag, tick the **Retain** column.
 | `DB_MachineConfig` | `SheetLoadTol` | ± window counted as "at the park position" | `2.0` |
 | `DB_MachineConfig` | `SandTime_s` | End-of-program sanding dwell (2026-08-29), whole seconds. Operator-typed; `FC_LoadConfig` deliberately does **not** write it. Without the tick the feature silently switches **itself off** at every power cycle — `0` is the off value — and the operator finds the spindle no longer runs at the end of a part | `0` |
 | `DB_MachineConfig` | `SandSpeed` | Same. Reverting to `0.0` also disables the dwell (the arming test requires `> 0`), so the failure mode is "feature quietly gone", not "spindle at the wrong speed" | `0.0` |
-| `DB_MachineConfig` | `VelPath_MaxDeviation` | Velocity-mode path-deviation limit (2026-09-16, branch `exp/velocity-path-350`), operator-tuned from the HMI. `FC_LoadConfig` deliberately does **not** write it. Without the tick the operator's value is lost at every power cycle and `16#000F` comes back at the old limit. The PLC clamps it to 0.05..1.0 mm | `0.3` |
+| `DB_MachineConfig` | `VelPath_MaxDeviation` | Velocity-mode path-deviation limit (2026-09-16, branch `exp/velocity-path-350`), operator-tuned from the HMI. `FC_LoadConfig` deliberately does **not** write it. Without the tick the operator's value is lost at every power cycle and `16#000F` comes back at the start value below. The PLC clamps it to 0.05..5.0 mm (ceiling raised from 1.0 on 2026-09-21) and the fault text prints the **clamped** value | `2.0` |
 | `DB_Production` | `TotalStarted` | Production counting is worthless if it zeroes overnight | `0` |
 | `DB_Production` | `TotalOK` | Same | `0` |
 | `DB_Production` | `TotalNOK` | Same | `0` |

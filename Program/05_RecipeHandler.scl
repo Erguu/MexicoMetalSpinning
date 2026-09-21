@@ -1083,10 +1083,13 @@ VERSION : 0.1
         STATE_VEL_WAIT      : Int := 32;   // Velocity-mode segment in progress (EXPERIMENTAL)
         VM_CATCHUP_MAX      : Int := 10;   // Most passed lines skipped in ONE scan (simulation needed 2 at T = 0.1 s)
         VM_MAXDEV_MIN       : Real := 0.05; // mm -- floor for the operator-set deviation limit (0 / negative / typo -> strict)
-        VM_MAXDEV_MAX       : Real := 1.0;  // mm -- ceiling: a typo (3, 30) must not switch the path guard off.
-                                            //       1.0 was the original default. The final-pass roller-mandrel
-                                            //       gap is the 0.8 mm sheet -- above that the guard no longer
-                                            //       protects the mandrel. Raise only with that in mind.
+        VM_MAXDEV_MAX       : Real := 5.0;  // mm -- ceiling: a typo (30, 300) must not switch the path guard off.
+                                            //       Raised from 1.0 to 5.0 on 2026-09-21 (user) -- 1.0 was the
+                                            //       original default and the operator could not get past it.
+                                            //       NOTE the meaning changes above 0.8 mm: the final-pass
+                                            //       roller-mandrel gap IS the 0.8 mm sheet, so a limit set above
+                                            //       it no longer protects the mandrel -- it only catches a
+                                            //       runaway. Commission with the smallest value that runs.
         VM_UNSUPERVISED_SCANS : Int := 2;  // Safety net 2 grace: a hand-over MC_MoveAbsolute or MC_Halt aborts the
                                            // velocity command within ~1 scan; Busy on the 3rd scan = unsupervised
         STATE_DONE : Int := 99;
