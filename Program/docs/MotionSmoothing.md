@@ -289,7 +289,18 @@ or the end of the program.
 | Hand-off | `STATE_VEL_WAIT` → `READ` → `EXEC` | When `rem ≤ feed × VelPath_LeadTime` the line is done; the next line launches on the **other** instance pair in the same scan it is read. The axes never stop |
 | Zero-length line | `STATE_EXEC` | Programmed length ≤ 0.01 mm: counted done, next line on the next scan. **A `CMD=2` zero-length line is refused at pre-scan (2026-09-15)** — see §9.3 |
 | **Already passed — same-scan catch-up** (2026-09-14) | `STATE_EXEC` | While a run is moving, **every** line whose end point the axes are already within `live speed × LeadTime` of — **measured along the programmed segment** (previous programmed end → this end) — is skipped **in the same scan** (up to `VM_CATCHUP_MAX` = 10), but only into a line that is itself velocity-eligible; the vector is then aimed at the first point genuinely ahead. The last line before a hand-over, if already passed, is counted done and the next line read on the next scan. **Simulated on the real program 2 (0.41–2.66 mm chords, F300):** at T = 0.1 s, one skip per scan left 0.77 mm path error and a `16#000F` fault; the same-scan loop gave **0.023 mm, no reversals, no fault, at most 2 lines per scan**; at T = 0.05 / 0.02 s ≤ 0.01 mm. Re-run with `tools/sim_velocity_path.py` once T is measured. Added because the first real exports have 0.4 mm chords — shorter than one 100 ms scan of travel — and aiming at a passed point would pull the axes backwards. Refused with `16#000F` if the axes are further than `VelPath_MaxDeviation` off the programmed line |
-| End of run | `STATE_EXEC` | `currX/Z := ActualPosition`, `MC_MoveAbsolute` on **both** axes (forced — an axis with < 0.01 mm left but a live velocity would otherwise never be told to stop) |
+| End of run | `STATE_EXEC` | `currX/Z := ActualPosition`, `MC_MoveAbsolute` on **both** axes (forced — an axis with < 0.01 mm left but a live velocity would otherwise never be told to stop). **Speed floor (2026-09-25):** each axis gets at least the speed it is already carrying (`|vmVelX/Z|`, capped at the line's feed), not just its proportional share — see below |
+
+**Why the end-of-run speed floor (2026-09-25):** the proportional split `v = feed · Δaxis / Δtotal`
+is only right from standstill. At the end of a run the axes are still moving, and an axis with almost
+nothing left got a crawl speed — down to `MinVelocity` (0.001 mm/s). If that axis could not stop in
+the distance left, the TO overshot and crept back at the crawl speed. Found in the 2026-09-24 export
+of program 1, line 197: an X-only `CMD=1` link right after a `CMD=2` run, with Z still at 4.4 mm/s
+and 0–0.2 mm left (the jerk-limited stop needs ~0.18 mm). Estimated crawl: 0.6 s at 0.1 mm left,
+2–3 s at ~0.05 mm, up to `Timeout_Motion` near 0 — which depends on where the switch lands inside
+a scan, so it looks intermittent. With the floor the overshoot is the same (≤ ~0.2 mm), but it is
+recovered at the axis's own speed. The two axes no longer finish exactly together on that one
+line. Not yet run on the machine.
 
 **Why actual position and not the nominal end point:** the scan it takes `READ`/`EXEC` to launch
 the next line means every hand-off is slightly late. Aiming each new segment from where the axes

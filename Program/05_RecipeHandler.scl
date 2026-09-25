@@ -2152,7 +2152,22 @@ BEGIN
             #velX := #feedrate;
             #velZ := #feedrate;
         END_IF;
-        
+
+        // Hand-over speed floor (2026-09-25). The proportional split above assumes both
+        // axes start from standstill. At a hand-over they are still moving, and an axis
+        // with almost nothing left (e.g. an axis-parallel CMD=1 link right after a run --
+        // program 1 line 197, Z ~0..0.2 mm left at 4.4 mm/s) got a crawl speed, down to
+        // MinVelocity. It could not stop in the distance left, overshot, and crept back
+        // at that crawl speed for seconds. So never command an axis slower than the
+        // velocity it is already carrying, capped at this line's feed. The path error is
+        // bounded by the overshoot (~0.2 mm at 4.4 mm/s), recovered in milliseconds.
+        // Never remove this as "breaks linear interpolation" -- the split is only valid
+        // from standstill.
+        IF #vmWasActive THEN
+            #velX := MAX(IN1 := #velX, IN2 := MIN(IN1 := ABS(#vmVelX), IN2 := #feedrate));
+            #velZ := MAX(IN1 := #velZ, IN2 := MIN(IN1 := ABS(#vmVelZ), IN2 := #feedrate));
+        END_IF;
+
         // Ensure minimum velocity
         IF #bMoveX AND #velX < "DB_MachineConfig".MinVelocity THEN 
             #velX := "DB_MachineConfig".MinVelocity; 
