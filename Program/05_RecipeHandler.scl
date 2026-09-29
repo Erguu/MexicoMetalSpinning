@@ -1137,7 +1137,7 @@ VERSION : 0.1
         // opening this block ONLINE in TIA (the CONST section shows the CPU's copy),
         // or by an online/offline compare. Deliberately written nowhere: a DB field
         // would force a second block to be imported and downloaded.
-        BUILD_TAG : String[16] := '2026-09-29a';
+        BUILD_TAG : String[16] := '2026-09-29b';
 
         STATE_IDLE : Int := 0;
         STATE_READ : Int := 10;
