@@ -58,3 +58,5 @@
 1283	Spindle: Halt failed
 1284	Spindle: Speed not reached
 790	Recipe checksum mismatch - re-export and re-import
+14	Drive power failed on several axes - check 24V/E-Stop
+15	Velocity path fault - see detail

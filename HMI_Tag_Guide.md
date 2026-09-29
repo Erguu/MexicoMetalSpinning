@@ -54,7 +54,7 @@
 
 | HMI Object | PLC Address | Type | Description |
 |------------|-------------|------|-------------|
-| **Status Message** | `DB_HMI.StatusMsg` | String[50] | Text message (English) |
+| ~~**Status Message**~~ | ~~`DB_HMI.StatusMsg`~~ | — | **REMOVED 2026-09-29 (ITEM-55 stage 2)** — 'Status' text list keyed off `MachineState` (sanding: 'Sanding' list keyed off `SandActive`) |
 | **Current Line** | `DB_HMI.CurrentLine` | Int | Which step/line |
 | **Total Lines** | `DB_HMI.TotalLines` | Int | Total program lines |
 | **Current Op** | `DB_HMI.CurrentOp` | Int | Operation the current line belongs to (**0 = unknown**) |
@@ -106,7 +106,7 @@ Five counters that reconcile: `TotalStarted = TotalOK + TotalNOK + TotalStopped 
 
 > These are per-power-up figures until Retain is ticked on the five `Total*` tags in the TIA DB editor — see `Program/docs/RETAINED_TAGS.md`.
 | **Error Code** | `DB_HMI.ErrorID` | Word | Error number (0=OK) |
-| **Error Text** | `DB_HMI.ErrorText` | String[50] | Error description (English) |
+| ~~**Error Text**~~ | ~~`DB_HMI.ErrorText`~~ | — | **REMOVED 2026-09-29 (ITEM-55 stage 2)** — 'Errors' text list keyed off `ErrorID`, which also carries the E-Stop/door hint (1025–1029) |
 
 ### Spanish Language Mirrors — ❌ REMOVED 2026-08-10 (ITEM-55)
 
@@ -134,11 +134,11 @@ retype or re-translate.
 > list can tell them apart — otherwise the HMI shows the wrong hint. Rows are marked
 > `COLLISION` in the CSV.
 
-**English is still PLC-side for now.** `StatusMsg`, `ErrorText`, `ErrorDetail` and
-`WarningText` remain and behave exactly as before, so an English HMI keeps working
-with no changes. ITEM-55 **stage 2** removes those too once the text lists exist —
-doing it earlier would leave the operator with blank messages between download and
-HMI work. `ErrorDetail` stays English permanently: it is built at runtime with
+**Stage 2 done 2026-09-29:** `StatusMsg`, `ErrorText`, `WarningText`,
+`DB_Manual.MDI_StatusText`, `Axis_Status_*_Str`, `DB_Error.Details`/`History_Details` and
+`AlarmEntry.ErrorText` are **deleted** from the PLC — every message on the panel now comes
+from a text list (Errors/Status/Warnings/MDI/Sanding, sources in `tools/textlists/`).
+Delete the HMI tags that pointed at them, or the HMI compile fails. `ErrorDetail` stays English permanently: it is built at runtime with
 `CONCAT` (line numbers, tool codes, TO text) and cannot be a static text list.
 
 ---
@@ -179,7 +179,7 @@ HMI work. `ErrorDetail` stays English permanently: it is built at runtime with
 | **Entry error code** | `DB_AlarmHistory.Hist_Log[0..19].ErrorCode` | Word | 16#xxxx |
 | **Entry program** | `DB_AlarmHistory.Hist_Log[0..19].ProgramNum` | Int | Recipe program active (0=none) |
 | **Entry line** | `DB_AlarmHistory.Hist_Log[0..19].LineNum` | Int | Recipe line active (-1=outside recipe) |
-| **Entry text** | `DB_AlarmHistory.Hist_Log[0..19].ErrorText` | String[40] | English error text |
+| ~~**Entry text**~~ | ~~`DB_AlarmHistory.Hist_Log[0..19].ErrorText`~~ | — | **REMOVED 2026-09-29 (ITEM-55 stage 2)** — show `.ErrorCode` through the 'Errors' text list |
 
 **HMI table setup:** Connect all 20 rows to `Hist_Log[0..19]`. Sort by `.Timestamp` descending to show newest first. Show `Hist_Count` as a badge. `Hist_Head - 1 MOD 20` is the most recent entry index.
 
@@ -436,7 +436,7 @@ Use these exact words on the manual screen — they are what the operator sees:
 | HMI Object | PLC Address | Type | Description |
 |------------|-------------|------|-------------|
 | **MDI Status** | `DB_Manual.MDI_Status` | Int | 0=idle, 1=accepted/done, 2=unknown CMD, 3=invalid Param, 4=cylinder error |
-| **MDI Result** | `DB_Manual.MDI_StatusText` | String[24] | Result text (EN) |
+| ~~**MDI Result**~~ | ~~`DB_Manual.MDI_StatusText`~~ | — | **REMOVED 2026-09-29 (ITEM-55 stage 2)** — 'MDI' text list keyed off `MDI_Status` |
 | ~~**MDI Result (ES)**~~ | ~~`DB_Manual.MDI_StatusText_ES`~~ | — | **REMOVED 2026-08-10 (ITEM-55)** — use a WinCC text list keyed off `MDI_Status`; see the Spanish section near the top. Note `MDI_Status` has two key collisions to resolve first |
 
 Status clears automatically when manual mode is left.

@@ -1137,7 +1137,7 @@ VERSION : 0.1
         // opening this block ONLINE in TIA (the CONST section shows the CPU's copy),
         // or by an online/offline compare. Deliberately written nowhere: a DB field
         // would force a second block to be imported and downloaded.
-        BUILD_TAG : String[16] := '2026-09-29b';
+        BUILD_TAG : String[16] := '2026-09-29c';
 
         STATE_IDLE : Int := 0;
         STATE_READ : Int := 10;
@@ -1405,7 +1405,7 @@ BEGIN
                                 "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Tool code ', IN2 := INT_TO_STRING(#tmpToolCode));
                                 "DB_Diagnostic".Error_Line := #lineIndex;
                                 "DB_Diagnostic".Error_Code := #ErrorID;
-                                // Single-writer: ErrorText comes from FB_AlarmManager (FB_Process forwards
+                                // Single-writer: HMI error comes from FB_AlarmManager (FB_Process forwards
                                 // #ErrorID from STATE_RUNNING). The missing code number goes into ErrorDetail.
                                 "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Tool code ', IN2 := CONCAT(
                                                            IN1 := INT_TO_STRING(#tmpToolCode),
@@ -1531,7 +1531,7 @@ BEGIN
                         "DB_Diagnostic".MoveX_ErrorID := #fbMoveX.ErrorID;
                         "DB_Diagnostic".TO_ErrorText  := "FC_TO_ErrorText"(Code := #fbMoveX.ErrorID);
                         "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'X Move Failed: ', IN2 := "DB_Diagnostic".TO_ErrorText);
-                        // Single-writer: ErrorText from FB_AlarmManager (FB_Process forwards #ErrorID)
+                        // Single-writer: HMI error from FB_AlarmManager (FB_Process forwards #ErrorID)
                         "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
                                                    IN1 := INT_TO_STRING(#lineIndex), IN2 := CONCAT(
                                                    IN1 := ' TO:', IN2 := "DB_Diagnostic".TO_ErrorText)));
@@ -1540,7 +1540,7 @@ BEGIN
                         "DB_Diagnostic".MoveZ_ErrorID := #fbMoveZ.ErrorID;
                         "DB_Diagnostic".TO_ErrorText  := "FC_TO_ErrorText"(Code := #fbMoveZ.ErrorID);
                         "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Z Move Failed: ', IN2 := "DB_Diagnostic".TO_ErrorText);
-                        // Single-writer: ErrorText from FB_AlarmManager (FB_Process forwards #ErrorID)
+                        // Single-writer: HMI error from FB_AlarmManager (FB_Process forwards #ErrorID)
                         "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
                                                    IN1 := INT_TO_STRING(#lineIndex), IN2 := CONCAT(
                                                    IN1 := ' TO:', IN2 := "DB_Diagnostic".TO_ErrorText)));
@@ -1554,7 +1554,7 @@ BEGIN
                     "DB_Diagnostic".Error_Line := #lineIndex;
                     "DB_Diagnostic".Error_Code := #ErrorID;
                     // Determine which axis is stuck (based on bMoveX/Z state).
-                    // Single-writer: ErrorText from FB_AlarmManager; axis goes into ErrorDetail.
+                    // Single-writer: HMI error from FB_AlarmManager; axis goes into ErrorDetail.
                     IF #bMoveX AND #bMoveZ THEN
                         "DB_Diagnostic".Error_Text := 'Motion Timeout: X+Z axes';
                         "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'X+Z no Done - Ln:',
@@ -1664,7 +1664,7 @@ BEGIN
                     "DB_Diagnostic".TO_ErrorText := "FC_TO_ErrorText"(Code := "DB_Diagnostic".MoveZ_ErrorID);
                     "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'Z velocity move failed: ', IN2 := "DB_Diagnostic".TO_ErrorText);
                 END_IF;
-                // Single-writer: ErrorText from FB_AlarmManager (FB_Process forwards #ErrorID)
+                // Single-writer: HMI error from FB_AlarmManager (FB_Process forwards #ErrorID)
                 "DB_HMI".ErrorDetail := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
                                         IN1 := INT_TO_STRING(#lineIndex), IN2 := CONCAT(
                                         IN1 := ' TO:', IN2 := "DB_Diagnostic".TO_ErrorText)));
@@ -1778,7 +1778,7 @@ BEGIN
                 "DB_Diagnostic".Error_Text := 'Spindle did not reach target speed (timeout)';
                 "DB_Diagnostic".Error_Line := #lineIndex;
                 "DB_Diagnostic".Error_Code := #ErrorID;
-                // Single-writer: ErrorText from FB_AlarmManager (FB_Process forwards #ErrorID)
+                // Single-writer: HMI error from FB_AlarmManager (FB_Process forwards #ErrorID)
                 "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
                                           IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (10s limit)'));
                 #state := STATE_ERROR;
@@ -1829,7 +1829,7 @@ BEGIN
                 "DB_Diagnostic".Error_Text := 'Spindle did not stop (timeout)';
                 "DB_Diagnostic".Error_Line := #lineIndex;
                 "DB_Diagnostic".Error_Code := #ErrorID;
-                // Single-writer: ErrorText from FB_AlarmManager (FB_Process forwards #ErrorID)
+                // Single-writer: HMI error from FB_AlarmManager (FB_Process forwards #ErrorID)
                 "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
                                           IN1 := INT_TO_STRING(#lineIndex), IN2 := ' (15s limit)'));
                 #state := STATE_ERROR;
@@ -1880,7 +1880,7 @@ BEGIN
                                               IN2 := INT_TO_STRING(BYTE_TO_INT(#Lines[#lineIndex].Param)));
                 "DB_Diagnostic".Error_Line := #lineIndex;
                 "DB_Diagnostic".Error_Code := #ErrorID;
-                // Single-writer: ErrorText from FB_AlarmManager (FB_Process forwards #ErrorID)
+                // Single-writer: HMI error from FB_AlarmManager (FB_Process forwards #ErrorID)
                 "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'Ln:', IN2 := CONCAT(
                                           IN1 := INT_TO_STRING(#lineIndex), IN2 := ' target not reached'));
                 #state := STATE_ERROR;

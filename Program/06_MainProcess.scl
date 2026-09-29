@@ -194,10 +194,13 @@ END_FUNCTION_BLOCK
 // -----------------------------------------------------------------------------
 // FB_AlarmManager - Unified error management and monitoring
 // DOC:
-//  purpose: Single place to translate error codes to text, maintain active error state,
+//  purpose: Single place to maintain active error state (code, severity, source),
 //           append to centralized DB_Error history, and provide outputs for monitoring.
+//           Error TEXT is not held in the PLC (ITEM-55 stage 2, 2026-09-29): the HMI shows
+//           it from the WinCC 'Errors' text list keyed off DB_HMI.ErrorID, and the online
+//           fault trail is DB_Diagnostic.Error_Text / DB_HMI.ErrorDetail.
 //  inputs: NewError (rising edge), NewErrorCode, AcknowledgeError (edge)
-//  outputs: HasActiveError, ActiveErrorCode, ActiveErrorText, ActiveSeverity, ActiveSource, ActiveTime
+//  outputs: HasActiveError, ActiveErrorCode, ActiveSeverity, ActiveSource, ActiveTime
 //  notes: Updates legacy DB_AlarmHistory for backward compatibility but centralizes storage in DB_Error.
 // -----------------------------------------------------------------------------
 FUNCTION_BLOCK "FB_AlarmManager"
@@ -213,9 +216,9 @@ VERSION : 2.0
     VAR_OUTPUT
         HasActiveError : Bool;       // TRUE while an error is active (until ack)
         ActiveErrorCode : Word;      // Current active error code
-        ActiveErrorText : String[80];    // Human readable text for HMI (English)
-        // ActiveErrorText_ES removed 2026-08-10 (ITEM-55 stage 1) -- Spanish error
-        // text now lives in a WinCC text list keyed off DB_HMI.ErrorID.
+        // ActiveErrorText (EN) removed 2026-09-29 (ITEM-55 stage 2), _ES on 2026-08-10
+        // (stage 1). Both languages come from the WinCC 'Errors' text list keyed off
+        // DB_HMI.ErrorID. Wording archive: tools/hmi_texts.csv, tools/textlists/.
         ActiveSeverity : Byte;       // Priority tier: 1=warning, 2=project, 3=motion/TO, 4=safety (higher preempts lower on HMI display)
         ActiveSource : String[20];   // Source category string
         ActiveTime : DTL;            // Timestamp of active error
@@ -229,7 +232,6 @@ VERSION : 2.0
         internalErrorCode : Word;
         fromQueue : Bool;           // TRUE when error came from DB_SystemEvents queue
         newHistCode   : Word;       // new error code for history push (independent of first-error latch)
-        newHistText   : String[80]; // new error text for history push (independent of first-error latch)
         newHistSource : String[20]; // new error source for history push (independent of first-error latch)
         // latchedText_ES removed 2026-08-10 (ITEM-55 stage 1). It existed only to keep
         // the Spanish counterpart of the latched (displayed) error through the
@@ -264,102 +266,13 @@ BEGIN
         #ActiveErrorCode := #internalErrorCode;
         #SystemTimeStatus := RD_SYS_T(OUT => #currentTime);
 
-        // Translate code -> English text.
-        // Spanish was removed 2026-08-10 (ITEM-55 stage 1); the HMI resolves it from
-        // DB_HMI.ErrorID via a WinCC text list. This CASE is English only, and in
-        // ITEM-55 stage 2 it goes away entirely -- keep it until the WinCC text lists
-        // exist, or a download leaves the operator with no error text at all.
-        // Queue path: EN is overridden after the CASE with the richer diagnostic text
-        //   from DB_Diagnostic.Error_Text (contains TO codes, line numbers).
-        CASE #internalErrorCode OF
-                // Axis Movement Errors
-                16#0001: #ActiveErrorText := 'X Axis: Move command failed';
-                16#0002: #ActiveErrorText := 'Z Axis: Move command failed';
-                16#0003: #ActiveErrorText := 'X Axis: Homing failed';
-                16#0004: #ActiveErrorText := 'Z Axis: Homing failed';
-                16#0005: #ActiveErrorText := 'Drive fault - check servo';
-                16#0006: #ActiveErrorText := 'Tool Axis: Move failed';
-                16#0007: #ActiveErrorText := 'Tool Axis: Homing failed';
-                16#0008: #ActiveErrorText := 'Motion timeout - axis stuck';
-                16#0009: #ActiveErrorText := 'X drive power failed';
-                16#000A: #ActiveErrorText := 'Z drive power failed';
-                16#000B: #ActiveErrorText := 'Homing timeout - check ref switch';
-                16#000C: #ActiveErrorText := 'Drive ready timeout - check contactor/enable wiring';
-                16#000D: #ActiveErrorText := 'Tool drive power failed';           // ITEM-29
-                // Raised instead of 0009/000A/000D when more than one axis reports a
-                // drive-power fault in the SAME scan -- see the drive-power block in
-                // FB_Process. ErrorDetail names the axes and their TO codes.
-                16#000E: #ActiveErrorText := 'Drive power failed on several axes - check 24V/E-Stop';
-                // EXPERIMENTAL velocity-mode path (FB_RecipeHandler STATE_VEL_WAIT). Detail
-                // text says which guard fired: aborted / off path / run permission lost.
-                16#000F: #ActiveErrorText := 'Velocity path fault - see detail';
-                16#0012: #ActiveErrorText := 'ToolHeadLock: extend timeout - check cylinder/sensor';
-                16#0010: #ActiveErrorText := 'User pressed STOP';
-                // TO (Technology Object) fault poller (FB_Process, StatusBits.Error rising edge)
-                16#0021: #ActiveErrorText := 'X axis TO fault - check TO diagnostics';
-                16#0022: #ActiveErrorText := 'Z axis TO fault - check TO diagnostics';
-                16#0023: #ActiveErrorText := 'Tool axis TO fault - check TO diagnostics';
-                16#0024: #ActiveErrorText := 'Spindle TO fault - check TO diagnostics';
-                // Soft Limits
-                16#0101: #ActiveErrorText := 'X beyond MIN soft limit';
-                16#0102: #ActiveErrorText := 'X beyond MAX soft limit';
-                16#0103: #ActiveErrorText := 'Z beyond MIN soft limit';
-                16#0104: #ActiveErrorText := 'Z beyond MAX soft limit';
-                // PNP Proximity Zone Errors (auto mode only; homing and manual bypass these)
-                16#0121: #ActiveErrorText := 'PNP zone: X axis MIN proximity';
-                16#0122: #ActiveErrorText := 'PNP zone: X axis MAX proximity';
-                16#0123: #ActiveErrorText := 'PNP zone: Z axis MIN proximity';
-                16#0124: #ActiveErrorText := 'PNP zone: Z axis MAX proximity';
-                // Tool Errors
-                16#0201: #ActiveErrorText := 'Invalid tool number';
-                16#0202: #ActiveErrorText := 'Tool number out of range';
-                16#0203: #ActiveErrorText := 'Tool rotation timeout';
-                16#0204: #ActiveErrorText := 'Retract to tool pos failed';
-                16#0205: #ActiveErrorText := 'Tool rotation failed';
-                16#0206: #ActiveErrorText := 'Tool change timeout - check turret drive';
-                // Recipe/G-code Errors
-                16#0301: #ActiveErrorText := 'Recipe: Invalid command';
-                16#0302: #ActiveErrorText := 'Recipe: Parse error';
-                16#0303: #ActiveErrorText := 'Recipe: Empty program';
-                16#0304: #ActiveErrorText := 'Recipe: Line count zero';
-                16#0305: #ActiveErrorText := 'PreScan: Path exceeds limits';
-                16#0306: #ActiveErrorText := 'Recipe: Invalid feedrate';
-                16#0307: #ActiveErrorText := 'Recipe: Motion timeout';
-                16#0308: #ActiveErrorText := 'Recipe: Invalid tool number';
-                16#0309: #ActiveErrorText := 'BackSupport cylinder error - target not reached';
-                16#030A: #ActiveErrorText := 'Spindle at-speed timeout (10s)';
-                16#030B: #ActiveErrorText := 'Spindle stop timeout (15s)';
-                16#0310: #ActiveErrorText := 'Recipe not loaded - check TotalLines';
-                16#0311: #ActiveErrorText := 'Recipe has no tool table - regenerate in CAM';
-                16#0312: #ActiveErrorText := 'Recipe load from load memory failed';
-                16#0313: #ActiveErrorText := 'Recipe data empty/corrupt - no END marker';
-                16#0314: #ActiveErrorText := 'Recipe copy did not land - re-import recipe DB';
-                16#0316: #ActiveErrorText := 'Recipe checksum mismatch - re-export and re-import';
-                // Safety Errors
-                16#0401: #ActiveErrorText := 'EMERGENCY STOP ACTIVE!';
-                16#0402: #ActiveErrorText := 'Safety door is open';
-                16#0403: #ActiveErrorText := 'Drives not ready';
-                16#0404: #ActiveErrorText := 'Air pressure too low';
-                16#0405: #ActiveErrorText := 'Safety interlock active';
-                16#0406: #ActiveErrorText := 'E-Stop contact discrepancy!';
-                // Spindle Errors
-                16#0501: #ActiveErrorText := 'Spindle: Power-on failed';
-                16#0502: #ActiveErrorText := 'Spindle: Run command failed';
-                16#0503: #ActiveErrorText := 'Spindle: Halt failed';
-                16#0504: #ActiveErrorText := 'Spindle: Speed not reached';
-                16#0505: #ActiveErrorText := 'Spindle: Drive enable timeout';
-                // NOTE: Siemens TO (Technology Object) error codes (16#8xxx) are NOT passed here
-                // directly. They are decoded via FC_TO_ErrorText and written to
-                // DB_Diagnostic.TO_ErrorText + DB_HMI.ErrorDetail at the point of failure.
-                // This CASE only handles project-level error codes (16#0001-16#05FF).
-                ELSE
-                    #ActiveErrorText    := 'Unknown error code';
-            END_CASE;
-        // Queue path: override the CASE text with the detailed diagnostic text
-        // (TO codes, line numbers) -- richer than the generic per-code wording.
-        IF #fromQueue THEN
-            #ActiveErrorText := "DB_Diagnostic".Error_Text;
-        END_IF;
+        // Code -> text translation DELETED 2026-09-29 (ITEM-55 stage 2): a 65-entry CASE
+        // of English literals that no screen displayed any more. The operator's text is
+        // the WinCC 'Errors' text list keyed off DB_HMI.ErrorID; the rich per-event text
+        // (TO codes, line numbers) is DB_Diagnostic.Error_Text, which the queue path above
+        // still fills. Adding a new error code therefore means: add the code here in the
+        // severity mapping below if it needs a tier, and add a row to the Errors text list
+        // (tools/textlists/Errors_*.tsv + TIA) -- there is no PLC text to write.
 
         // Severity & source mapping (explicit ranges)
         // Priority tiers (higher tier preempts lower on the HMI display, see latch below):
@@ -394,7 +307,6 @@ BEGIN
 
         // Save new error info for history before the latch guard may restore output vars
         #newHistCode   := #ActiveErrorCode;
-        #newHistText   := #ActiveErrorText;
         #newHistSource := #ActiveSource;
 
         // Severity-priority latch: the display (DB_Error.Code, HMI text) shows the
@@ -418,15 +330,13 @@ BEGIN
                 "DB_Error".Line := -1;
             END_IF;
             "DB_Error".TimeStamp := #currentTime;
-            "DB_Error".Details   := #ActiveErrorText;
         ELSE
             // Same/lower-tier secondary error: restore output vars to the displayed error
-            // so DB_HMI.ErrorText and callers still see the highest-priority root cause.
+            // so DB_HMI.ErrorID and callers still see the highest-priority root cause.
             // Restoring ActiveErrorCode is what keeps the HMI honest now that text is
             // resolved from the code by a WinCC text list (ITEM-55): code and text cannot
             // disagree, which is what the old latchedText_ES pairing existed to prevent.
             #ActiveErrorCode := "DB_Error".Code;
-            #ActiveErrorText := "DB_Error".Details;
             #ActiveSeverity  := "DB_Error".Severity;
             #ActiveSource    := "DB_Error".Source;
             #ActiveTime      := "DB_Error".TimeStamp;
@@ -438,14 +348,11 @@ BEGIN
             "DB_Error".History_Code[#i]    := "DB_Error".History_Code[#i - 1];
             "DB_Error".History_Time[#i]    := "DB_Error".History_Time[#i - 1];
             "DB_Error".History_Source[#i]  := "DB_Error".History_Source[#i - 1];
-            "DB_Error".History_Details[#i] := "DB_Error".History_Details[#i - 1];
         END_FOR;
         "DB_Error".History_Code[1]    := #newHistCode;
         "DB_Error".History_Time[1]    := #currentTime;
         "DB_Error".History_Source[1]  := #newHistSource;
-        // LEFT(..., 40): History_Details is String[40] while #newHistText is String[80].
-        // Truncate explicitly rather than relying on implicit assignment truncation.
-        "DB_Error".History_Details[1] := LEFT(IN := #newHistText, L := 40);
+        // History_Details (text) deleted 2026-09-29, ITEM-55 stage 2 -- the code is the key.
         "DB_Error".History_Index := "DB_Error".History_Index + 1;
         IF "DB_Error".History_Index > 10 THEN "DB_Error".History_Index := 1; END_IF;
         IF "DB_Error".History_Count < 10 THEN "DB_Error".History_Count := "DB_Error".History_Count + 1; END_IF;
@@ -462,7 +369,6 @@ BEGIN
         "DB_AlarmHistory".Hist_Log["DB_AlarmHistory".Hist_Head].ErrorCode  := #newHistCode;
         "DB_AlarmHistory".Hist_Log["DB_AlarmHistory".Hist_Head].ProgramNum := #ActiveProgram;
         "DB_AlarmHistory".Hist_Log["DB_AlarmHistory".Hist_Head].LineNum    := #ActiveLine;
-        "DB_AlarmHistory".Hist_Log["DB_AlarmHistory".Hist_Head].ErrorText  := LEFT(IN := #newHistText, L := 40);
         "DB_AlarmHistory".Hist_Head   := ("DB_AlarmHistory".Hist_Head + 1) MOD 20;
         "DB_AlarmHistory".Hist_SeqNum := "DB_AlarmHistory".Hist_SeqNum + 1;
         IF "DB_AlarmHistory".Hist_Count < 20 THEN
@@ -477,14 +383,12 @@ BEGIN
     IF #AcknowledgeError THEN
         #ActiveErrorCode := 0;
         #HasActiveError := FALSE;
-        #ActiveErrorText := '';
         #ActiveSeverity := 0;
         #ActiveSource := '';
         #ActiveTime := DTL#1970-01-01-00:00:00;
         // legacy DB_AlarmHistory removed; history retained in DB_Error
         "DB_Error".Active := FALSE;
         "DB_Error".Code := 0;  // BUG FIX: clear code so DB_HMI_Errors bits go FALSE
-        "DB_Error".Details := CONCAT(IN1 := "DB_Error".Details, IN2 := ' [ACK]');
     END_IF;
 
     // =========================================================================
@@ -1718,8 +1622,9 @@ BEGIN
     // Warning: only E-Stop bypass is shown on HMI (Door/Air/Drive bypasses silently permitted for setup)
     // Since 2026-08-12 the bypass no longer blocks auto start, so this banner is the
     // ONLY indication that the machine will run with the E-Stop circuit defeated.
-    // WarningID stays 1 (WinCC text list key); the wording changed -- keep
-    // tools/hmi_texts.csv row 'warning,1' in step with this string.
+    // WarningID is the only output (WinCC 'Warnings' text list key); WarningText was
+    // deleted 2026-09-29 (ITEM-55 stage 2). Wording lives in tools/hmi_texts.csv and
+    // tools/textlists/Warnings_*.tsv.
     // Priority chain, highest first. E-Stop bypass is never suppressed by anything --
     // it is the only sign that the machine will run unguarded, so it outranks a
     // transient interlock message. A blocked tool jog therefore shows no banner while
@@ -1727,7 +1632,6 @@ BEGIN
     "DB_HMI".HasWarning := "DB_HMI".Bypass_EStop OR #bToolAxisBlocked
                            OR #bToolStepBlocked OR #bBlindMoveBlocked;
     IF "DB_HMI".Bypass_EStop THEN
-        "DB_HMI".WarningText    := 'DANGER: E-Stop bypassed - machine runs unguarded';
         "DB_HMI".WarningID      := 1;
     ELSIF #bToolAxisBlocked OR #bToolStepBlocked THEN
         // Shown as soon as the tool axis is selected with the lock engaged, not only
@@ -1737,7 +1641,6 @@ BEGIN
         // The turret-step buttons (#bToolStepBlocked) have no "selection" to hook, so
         // for them the banner is necessarily press-driven and shares WarningID 3 --
         // same cause, same wording, no new text-list row needed.
-        "DB_HMI".WarningText    := 'Tool axis locked - ToolHeadLock is engaged';
         "DB_HMI".WarningID      := 3;
     ELSIF #bBlindMoveBlocked THEN
         // ITEM-56d: MoveAbsolute / GoSafe / GoZero are refused while halted in a PNP zone.
@@ -1746,38 +1649,13 @@ BEGIN
         // button must never demand a Reset (same rule as the ToolHeadLock interlock above).
         // #bBlindMoveBlocked is assigned near the bottom of this FB, so this reads the previous
         // scan's value; harmless, because STATE_PNP_HALT is held for many scans.
-        "DB_HMI".WarningText    := 'Blocked in proximity zone - use jog or Home to escape';
         "DB_HMI".WarningID      := 4;
     ELSE
-        "DB_HMI".WarningText    := '';
         "DB_HMI".WarningID      := 0;
     END_IF;
     
-    // Update HMI status message based on state (English only since 2026-08-10 --
-    // Spanish comes from a WinCC text list keyed off DB_HMI.MachineState, ITEM-55)
-    CASE #State OF
-        0:   "DB_HMI".StatusMsg := 'Stopped';
-        5:   "DB_HMI".StatusMsg := 'Manual Mode';
-        10:  "DB_HMI".StatusMsg := 'Starting...';
-        11:  "DB_HMI".StatusMsg := 'Loading recipe...';
-        12:  "DB_HMI".StatusMsg := 'Pre-scanning...';
-        13:  "DB_HMI".StatusMsg := 'Clearing PNP zone...';
-        14:  "DB_HMI".StatusMsg := 'Waiting for sheet...';
-        15:  "DB_HMI".StatusMsg := 'Homing...';
-        16:  "DB_HMI".StatusMsg := 'Sheet-load park move...';
-        17:  "DB_HMI".StatusMsg := 'Lock engaging...';
-        18:  "DB_HMI".StatusMsg := 'Stopping...';
-        29:  "DB_HMI".StatusMsg := 'Lock releasing...';
-        19:  "DB_HMI".StatusMsg := 'Homing (post-stop)...';
-        20:  "DB_HMI".StatusMsg := 'Running';
-        21:  "DB_HMI".StatusMsg := 'Returning to zero...';
-        22:  "DB_HMI".StatusMsg := 'PNP Halt - jog to escape limit zone';
-        25:  "DB_HMI".StatusMsg := 'Paused';
-        30:  "DB_HMI".StatusMsg := 'Tool Change';
-        35:  "DB_HMI".StatusMsg := 'Tool Change Wait';
-        100: "DB_HMI".StatusMsg := 'Program Complete';
-        999: "DB_HMI".StatusMsg := 'ERROR';
-    END_CASE;
+    // StatusMsg CASE deleted 2026-09-29 (ITEM-55 stage 2). The HMI shows the state from
+    // the WinCC 'Status' text list keyed off DB_HMI.MachineState.
     
     // =========================================================================
     // ALARM MANAGER - call FIRST so outputs are ready for DB_HMI
@@ -1815,24 +1693,26 @@ BEGIN
 
     // Copy alarm outputs to HMI (now reads CURRENT scan values)
     "DB_HMI".ErrorID       := #fbAlarmManager.ActiveErrorCode;
-    "DB_HMI".ErrorText     := #fbAlarmManager.ActiveErrorText;
-    // ITEM-08: If no active alarm text but a safety condition is blocking, show it.
+    // ITEM-08: If no active alarm but a safety condition is blocking, show it.
     // This covers the case where the operator is in STOPPED state with door open / E-Stop active
-    // after a previous error was acknowledged — AlarmManager cleared its text but the safety
-    // condition is still live and writing to DB_Diagnostic.Error_Text.
-    // Use compact customer-facing text here; DB_Diagnostic keeps the developer detail.
+    // after a previous error was acknowledged -- AlarmManager cleared its code but the safety
+    // condition is still live.
+    // Since 2026-09-29 (ITEM-55 stage 2) the hint is an ErrorID, shown from the WinCC 'Errors'
+    // text list (1025-1029), instead of an English string in DB_HMI.ErrorText. The test
+    // "no active alarm" is therefore ErrorID = 0 (was ErrorText = ''). Nothing in the PLC
+    // reads DB_HMI.ErrorID, so writing the hint into it is display-only.
     // ITEM-16: ErrorDetail is also written here so the operator does not need DB_Diagnostic.
-    IF "DB_HMI".ErrorText = '' AND NOT #fbSafetyMonitor.SafeToRun THEN
+    IF "DB_HMI".ErrorID = 0 AND NOT #fbSafetyMonitor.SafeToRun THEN
         CASE #fbSafetyMonitor.ErrorCode OF
-            16#0401: "DB_HMI".ErrorText      := 'EMERGENCY STOP active';
+            16#0401: "DB_HMI".ErrorID        := 16#0401;   // EMERGENCY STOP active
                      "DB_HMI".ErrorDetail    := 'Check E-Stop pushbutton and wiring';
-            16#0402: "DB_HMI".ErrorText      := 'Safety door open';
+            16#0402: "DB_HMI".ErrorID        := 16#0402;   // Safety door open
                      "DB_HMI".ErrorDetail    := 'Close the safety door to continue';
-            16#0403: "DB_HMI".ErrorText      := 'Drives not ready';
+            16#0403: "DB_HMI".ErrorID        := 16#0403;   // Drives not ready
                      "DB_HMI".ErrorDetail    := 'Check contactor, enable wiring and drive status';
-            16#0404: "DB_HMI".ErrorText      := 'Air pressure low';
+            16#0404: "DB_HMI".ErrorID        := 16#0404;   // Air pressure low
                      "DB_HMI".ErrorDetail    := 'Check air compressor and pressure switch';
-            ELSE:    "DB_HMI".ErrorText      := 'Safety interlock active';
+            ELSE:    "DB_HMI".ErrorID        := 16#0405;   // Safety interlock active
                      "DB_HMI".ErrorDetail    := '';
         END_CASE;
     END_IF;
@@ -2012,11 +1892,12 @@ BEGIN
             #bRecipeLoadExec := FALSE;   // no recipe copy may stay in flight while idle
             // ITEM-34 FIX: clear only when no safety condition is blocking a start.
             // The ITEM-08 fallback (runs BEFORE this CASE) writes the door-open /
-            // E-Stop / air-pressure hint into ErrorText when SafeToRun is FALSE;
+            // E-Stop / air-pressure hint into ErrorDetail when SafeToRun is FALSE;
             // clearing unconditionally here erased that hint every scan, so the
             // operator saw a machine that refused to start with no explanation.
+            // (DB_HMI.ErrorText was cleared here too until it was deleted 2026-09-29;
+            // ErrorID needs no clear -- it is rewritten from the AlarmManager every scan.)
             IF #fbSafetyMonitor.SafeToRun THEN
-                "DB_HMI".ErrorText      := '';
                 "DB_HMI".ErrorDetail    := '';
             END_IF;
             // Clear ALL motion-FB execute flags every scan while stopped.
@@ -2138,11 +2019,9 @@ BEGIN
                     // 5, not 1: 'Executed' already uses 1. Two different messages on one
                     // value would collapse into one entry in the HMI text list (ITEM-55).
                     "DB_Manual".MDI_Status        := 5;
-                    "DB_Manual".MDI_StatusText    := 'CMD40 done';
                 ELSIF "DB_Cylinder_BackSupport".Error THEN
                     #bMDI_Cmd40Extend             := FALSE;
                     "DB_Manual".MDI_Status        := 4;
-                    "DB_Manual".MDI_StatusText    := 'CMD40 cylinder error';
                 END_IF;
             END_IF;
 
@@ -2195,7 +2074,6 @@ BEGIN
             // -----------------------------------------------------------------
             IF "DB_Manual".Btn_MDI_Execute AND NOT #prevMDIExec THEN
                 "DB_Manual".MDI_Status        := 1;              // assume accepted
-                "DB_Manual".MDI_StatusText    := 'Executed';
                 CASE "DB_Manual".MDI_Cmd OF
                     40: // BackSupport extend -- same sequence as the recipe: assert
                         // Cmd_Extend, hold it, auto-release at AtSetpoint (handled by
@@ -2209,7 +2087,6 @@ BEGIN
                             #bMDI_Cmd40Extend := FALSE;
                         ELSE
                             "DB_Manual".MDI_Status        := 3;
-                            "DB_Manual".MDI_StatusText    := 'CMD40: use Param 0 or 1';
                         END_IF;
 
                     41: // BackSupport atmosphere / retract -- identical to the recipe CMD=41
@@ -2224,12 +2101,10 @@ BEGIN
                         ELSE
                             // 6, not 3: CMD40's param error already uses 3 (see above).
                             "DB_Manual".MDI_Status        := 6;
-                            "DB_Manual".MDI_StatusText    := 'CMD41: use Param 1,2,3';
                         END_IF;
 
                     ELSE: // Not an MDI-supported command -- nothing written
                         "DB_Manual".MDI_Status        := 2;
-                        "DB_Manual".MDI_StatusText    := 'Unknown/blocked CMD';
                 END_CASE;
             END_IF;
             #prevMDIExec := "DB_Manual".Btn_MDI_Execute;
@@ -2263,7 +2138,6 @@ BEGIN
                 // Clear MDI result so a stale message does not greet the operator
                 // the next time the manual page is opened.
                 "DB_Manual".MDI_Status         := 0;
-                "DB_Manual".MDI_StatusText     := '';
                 #prevMDIExec                   := FALSE;
                 #bMDI_Cmd40Extend              := FALSE;  // Do not carry the extend latch out of manual
                 // CMD=41 edge memory: seed (not clear) so a button still latched on
@@ -2483,9 +2357,8 @@ BEGIN
                     #State := STATE_STARTING;
                 ELSE
                     // Pre-scan failed - limits exceeded.
-                    // Single-writer: report via queue so the failing line number reaches the
-                    // displayed text (queue path shows Details as the EN ErrorText; ES comes
-                    // from the FB_AlarmManager CASE table for 16#0305).
+                    // Single-writer: report via queue so the failing line number reaches
+                    // DB_Diagnostic.Error_Text (the HMI shows 16#0305 from the Errors text list).
                     "FC_ReportError"(Code := 16#0305,
                                      Details := CONCAT(IN1 := 'PreScan Ln', IN2 := CONCAT(
                                                 IN1 := INT_TO_STRING(#fbPreScan.ErrorLine), IN2 := CONCAT(
@@ -2766,12 +2639,10 @@ BEGIN
                 // (TRUE while State = SHEET_WAIT AND NOT Ph3).
                 #bSheetHolderRetractHold := FALSE;
                 "DB_HMI".HasWarning     := TRUE;
-                "DB_HMI".WarningText    := 'Insert sheet, then press both start buttons';
                 "DB_HMI".WarningID      := 2;
                 IF #fbInputs.Cmd_Start THEN
                     // Operator confirmed — clear prompt
                     "DB_HMI".HasWarning     := FALSE;
-                    "DB_HMI".WarningText    := '';
                     "DB_HMI".WarningID      := 0;
                     IF NOT "DB_MachineConfig".Bypass_MandrelLock THEN
                         // Normal: extend MandrelLock (Ph2), then SheetHolder retracts (Ph3)
@@ -3453,19 +3324,12 @@ BEGIN
         // De-energise the atmosphere valve. Cmd_Retract is left alone -- the
         // end-of-recipe retract block at the bottom of this FB owns it.
         "DB_Cylinder_BackSupport".SolAtmo_Cmd := FALSE;
-        // Status text. The sanding variant is deliberately explicit that the spindle is
-        // TURNING -- 'Program Complete' on a screen above a spinning part is how somebody
-        // reaches in. English only (ITEM-55); the Spanish comes from a WinCC text list, and
-        // its key for this one is DB_HMI.SandActive, NOT MachineState -- MachineState is 100
-        // for both halves of COMPLETE and cannot tell them apart. Keep the wording in step
-        // with the two 'sanding' rows in tools/hmi_texts.csv.
-        IF #bSandActive THEN
-            "DB_HMI".StatusMsg := 'Sanding - SPINDLE TURNING';
-        ELSE
-            "DB_HMI".StatusMsg := 'Program Complete';
-        END_IF;
-        // Single-writer: ErrorText is owned by FB_AlarmManager. Completion is a status,
-        // not an error -- StatusMsg above already announces it ('Done!' write removed).
+        // Status text: none written here since 2026-09-29 (ITEM-55 stage 2, StatusMsg
+        // deleted). The sanding banner must say the spindle is TURNING -- 'Program Complete'
+        // above a spinning part is how somebody reaches in. It comes from the WinCC
+        // 'Sanding' text list keyed off DB_HMI.SandActive, NOT MachineState (100 for both
+        // halves of COMPLETE). Wording: the two 'sanding' rows in tools/hmi_texts.csv.
+        // Completion is a status, not an error -- no ErrorID is raised ('Done!' write removed).
         // DB_HMI.CycleCount and its #bCycleCountDone one-shot were DELETED 2026-08-15.
         // The counter was a duplicate of "DB_Production".TotalOK, and a broken one: the
         // one-shot was cleared ONLY by the hard reset, and the normal cycle
@@ -4193,7 +4057,7 @@ BEGIN
     IF #fbManualMode.Error AND NOT #prevManualError THEN
         #newErrorFlag := TRUE;
         #newErrorCode := #fbManualMode.ErrorID;
-        // Single-writer: ErrorText comes from the FB_AlarmManager CASE table for the code.
+        // Single-writer: the HMI shows the code from the WinCC 'Errors' text list.
         // DB_HMI.ErrorDetail is written directly inside FB_ManualMode at each error point.
     END_IF;
     #prevManualError := #fbManualMode.Error;

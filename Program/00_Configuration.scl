@@ -25,7 +25,7 @@
 // "(→PLC)" = HMI writes, PLC reads  |  "(PLC→)" = PLC writes, HMI reads (read-only)
 //
 // ┌─ MAIN SCREEN / STATUS LAMPS ────────────────────────────────────────────┐
-// │  DB_HMI.StatusMsg          (String[50])  PLC→  "Running/Stopped/Error…"│
+// │  DB_HMI.MachineState       (Int)         PLC→  'Status' text list key   │
 // │  DB_HMI.IsRunning          (Bool)        PLC→  Green lamp               │
 // │  DB_HMI.IsPaused           (Bool)        PLC→  Yellow lamp              │
 // │  DB_HMI.HasError           (Bool)        PLC→  Red lamp                 │

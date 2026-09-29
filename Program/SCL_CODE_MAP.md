@@ -757,19 +757,21 @@ higher**; same or lower tier goes to history only. All errors always go to histo
 | 2 | Project error | 0x0300–0x0316 (recipe, incl. 0x0311 missing tool table, 0x0312 load failure, 0x0313 empty/corrupt buffer, 0x0314 copy never landed, 0x0316 checksum mismatch; 0x0315 reserved), 0x0201–0x0202 (tool config) |
 | 1 | Warning / info | 0x0010 (user STOP), unknown codes |
 
-### Single-Writer Rule for DB_HMI.ErrorText (2026-07-02)
+### Single-Writer Rule for DB_HMI.ErrorID (2026-07-02; text removed 2026-09-29)
 
-`DB_HMI.ErrorText / ErrorText_ES` are written in **exactly three places**, all inside FB_Process:
-1. The AlarmManager mirror (`:= fbAlarmManager.ActiveErrorText`) — every scan
-2. The ITEM-08 safety fallback (only when ErrorText='' and NOT SafeToRun)
-3. The STATE_STOPPED clear (only when SafeToRun)
+`DB_HMI.ErrorText` was **deleted** in ITEM-55 stage 2 — the HMI shows every error from the
+WinCC 'Errors' text list keyed off `DB_HMI.ErrorID`. `ErrorID` is written in **exactly two
+places**, both inside FB_Process:
+1. The AlarmManager mirror (`:= fbAlarmManager.ActiveErrorCode`) — every scan
+2. The ITEM-08 safety fallback (only when ErrorID = 0 and NOT SafeToRun → 16#0401..16#0405)
 
-**No state handler or FB may write ErrorText directly.** Error sites report a code —
+**No state handler or FB may write ErrorID directly.** Error sites report a code —
 either via `newErrorFlag/newErrorCode` (FB_Process internal) or `FC_ReportError`
 (other FBs / sites needing dynamic text such as line numbers) — and put rich context
 (TO text, line number, tool code) into `DB_HMI.ErrorDetail`, which remains the
-multi-writer detail channel. The FB_AlarmManager CASE table supplies the EN/ES display
-text; the queue path (`FC_ReportError`) shows its `Details` string as the EN text.
+multi-writer detail channel. The queue path (`FC_ReportError`) puts its `Details` string
+into `DB_Diagnostic.Error_Text`. There is no PLC-side display text any more: a new error code
+needs a row in the Errors text list (`tools/textlists/Errors_*.tsv` + TIA).
 
 | Code (hex) | Source | Description |
 |-----------|--------|-------------|

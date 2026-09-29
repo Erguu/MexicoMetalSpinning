@@ -121,7 +121,7 @@ BEGIN
                 #ErrorID       := 16#0206;
                 "DB_Diagnostic".Error_Text := CONCAT(IN1 := 'ToolChanger: Timeout T', IN2 := INT_TO_STRING(#ToolNumber));
                 "DB_Diagnostic".Error_Code := #ErrorID;
-                // Single-writer: DB_HMI.ErrorText comes from FB_AlarmManager (FB_Process
+                // Single-writer: DB_HMI.ErrorID comes from FB_AlarmManager (FB_Process
                 // forwards #ErrorID in STATE_TOOL_WAIT); tool number is in ErrorDetail there.
                 #state := 999;
             ELSIF #fbMoveTool.Error THEN
@@ -133,7 +133,7 @@ BEGIN
                                               IN2 := CONCAT(IN1 := INT_TO_STRING(#ToolNumber),
                                               IN2 := CONCAT(IN1 := ' TO:', IN2 := "DB_Diagnostic".TO_ErrorText)));
                 "DB_Diagnostic".Error_Code := #ErrorID;
-                // Single-writer: DB_HMI.ErrorText comes from FB_AlarmManager via FB_Process forward.
+                // Single-writer: DB_HMI.ErrorID comes from FB_AlarmManager via FB_Process forward.
                 "DB_HMI".ErrorDetail    := CONCAT(IN1 := 'TO:', IN2 := "DB_Diagnostic".TO_ErrorText);
                 #state := 999;
             END_IF;

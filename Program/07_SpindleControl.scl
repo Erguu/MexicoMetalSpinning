@@ -285,7 +285,7 @@ BEGIN
                                                           IN2 := "DB_Diagnostic".TO_ErrorText);
                     "DB_Diagnostic".Error_Code := #ErrorID;
                     // Single-writer: report via queue -> FB_AlarmManager latches DB_Error and
-                    // drives DB_HMI.ErrorText through the mirror. (The old direct ErrorText
+                    // drives DB_HMI.ErrorID through the mirror. (The old direct ErrorText
                     // write here was overwritten by the mirror one scan later and the error
                     // never reached DB_Error/history at all.)
                     "FC_ReportError"(Code := #ErrorID,

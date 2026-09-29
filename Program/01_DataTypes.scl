@@ -98,7 +98,7 @@ VERSION : 0.1
         ErrorCode  : Word;          // 16#xxxx error code
         ProgramNum : Int;           // Active recipe program at fault time (0 = none)
         LineNum    : Int;           // Active recipe line at fault time (-1 = outside recipe)
-        ErrorText  : String[40];    // ITEM-26: English error text snapshot (first 40 chars of DB_HMI.ErrorText)
+        // ErrorText (String[40]) deleted 2026-09-29 (ITEM-55 stage 2) -- ErrorCode is the key.
     END_STRUCT;
 END_TYPE
 

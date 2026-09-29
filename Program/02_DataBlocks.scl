@@ -110,7 +110,7 @@ NON_RETAIN
         // ===========================================================
         // STATUS DISPLAYS (Output)
         // ===========================================================
-        StatusMsg : String[50];     // Status message text
+        // StatusMsg deleted ITEM-55 stage 2, 2026-09-29 -- text comes from a WinCC text list: 'Status' list keyed off MachineState.
         MachineState : Int;         // State machine state
         CurrentLine : Int;          // Current line being executed
         TotalLines : Int;           // Total lines in program
@@ -137,10 +137,7 @@ NON_RETAIN
         Axis_Status_Z        : Int;
         Axis_Status_Spindle  : Int;
         Axis_Status_Toolhead : Int;
-        Axis_Status_X_Str        : String[10];
-        Axis_Status_Z_Str        : String[10];
-        Axis_Status_Spindle_Str  : String[10];
-        Axis_Status_Toolhead_Str : String[10];
+        // Axis_Status_*_Str (4 x String[10]) deleted 2026-09-29 -- never written by the PLC.
         // ===========================================================
         // STATUS LAMPS (Output)
         // ===========================================================
@@ -159,23 +156,25 @@ NON_RETAIN
         // ERROR DISPLAY (Output)
         // ===========================================================
         ErrorID : Word;             // Error code (0=OK)
-        ErrorText : String[100];     // Error description
+        // ErrorText deleted 2026-09-29 (ITEM-55 stage 2): the HMI shows the error from the
+        // 'Errors' text list keyed off ErrorID, including the ITEM-08 safety hint (1025-1029).
         ErrorDetail : String[120];   // Additional error info
 
         // ===========================================================
         // WARNING DISPLAY (Output)
         // ===========================================================
         HasWarning : Bool;          // TRUE when a non-blocking warning is active (E-Stop bypass or sheet insert prompt)
-        // Key for the HMI's warning text list (ITEM-55). Written every scan next to
-        // WarningText, so it needs no reset-path entry: the ELSE branch of the warning
+        // Key for the HMI's warning text list (ITEM-55). Written every scan by the
+        // warning block in FB_Process, so it needs no reset-path entry: the ELSE branch of the warning
         // block drives it to 0 unconditionally. 0 must stay "no warning".
         //   1 = DANGER: E-Stop bypassed - machine runs unguarded (auto run IS permitted
         //       since 2026-08-12 -- this is the only on-screen sign of it)
         //   2 = Insert sheet, then press both start buttons
         //   3 = Tool axis locked - ToolHeadLock is engaged (manual jog/move/home
         //       on the tool axis refused; see the interlock in FB_Process)
+        //   4 = Blocked in proximity zone - use jog or Home to escape (ITEM-56d)
         WarningID : Int;
-        WarningText : String[70];   // Warning message text -- English (E-Stop bypass or operator prompts only)
+        // WarningText deleted 2026-09-29 (ITEM-55 stage 2) -- 'Warnings' text list.
         ResumeLine : Int := -1;     // Saved recipe line for warm restart (-1 = none). Set in STATE_ERROR, cleared on Btn_Restart.
 
         // End-of-program sanding dwell in progress (2026-08-29). PLC-written, read-only
@@ -537,15 +536,14 @@ NON_RETAIN
         Source    : String[20];          // Originating FB or category (e.g. 'Recipe', 'Safety')
         Line      : Int := -1;           // Recipe line (if applicable) or -1
         TimeStamp : DTL;                 // Timestamp captured with RD_SYS_T
-        Details   : String[120];          // Free text details / ActiveErrorText
+        // Details (String[120], the English text) deleted 2026-09-29 (ITEM-55 stage 2).
+        // Rich per-event text: DB_Diagnostic.Error_Text.
         // History ring buffer (last 10 errors) for post-mortem analysis
         History_Code    : Array[1..10] of Word;
         History_Time    : Array[1..10] of DTL;
         History_Source  : Array[1..10] of String[20];
-        // String[40] (was String[80], 2026-07-31 memory reclaim -- saves 400 B).
-        // Matches AlarmEntry.ErrorText[40] in DB_AlarmHistory, so both history views
-        // truncate identically. Written via LEFT(..., 40) in FB_AlarmManager.
-        History_Details : Array[1..10] of String[40];
+        // History_Details (10 x String[40]) deleted 2026-09-29 (ITEM-55 stage 2) --
+        // History_Code is the key to the 'Errors' text list.
         History_Index   : Int := 0;      // 1..10
         History_Count   : Int := 0;      // Number of valid entries (<=10)
         TotalErrorCount : DInt := 0;     // Lifetime error count (incremented on each new error)
@@ -860,7 +858,7 @@ NON_RETAIN
         // 0=idle  1=Executed  2=unknown/blocked CMD  3=CMD40 bad Param
         // 4=CMD40 cylinder error  5=CMD40 done  6=CMD41 bad Param
         MDI_Status          : Int;
-        MDI_StatusText      : String[24];   // Result text (EN)
+        // MDI_StatusText deleted 2026-09-29 (ITEM-55 stage 2) -- 'MDI' list keyed off MDI_Status.
         // MDI_StatusText_ES removed 2026-08-10 (ITEM-55) -- Spanish comes from a
         // WinCC text list keyed off MDI_Status. NOTE: MDI_Status is not yet unique --
         // values 1 and 3 each carry two different messages, so two new values must be
