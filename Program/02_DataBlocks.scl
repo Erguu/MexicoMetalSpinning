@@ -1341,7 +1341,9 @@ NON_RETAIN
         // tools/gen_recipe_slots.py, the two Lines InOuts in 05_RecipeHandler.scl,
         // the pre-scan guard (06_MainProcess.scl, activeLineCount > 500) and the
         // SpinningCam output.
-        Lines  : Array[0..499] of "RecipeLine"; // Copy of the selected recipe's lines
+        // <<< GENERATED:SELECTED_LINES -- do not hand-edit; run tools/gen_recipe_slots.py --lines N >>>
+        Lines  : Array[0..799] of "RecipeLine"; // Copy of the selected recipe's lines
+        // <<< END GENERATED:SELECTED_LINES >>>
     END_VAR
 BEGIN
 END_DATA_BLOCK

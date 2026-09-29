@@ -172,6 +172,7 @@ Program/
   SCL_CODE_MAP.md          — Primary reference (read this first)
   docs/                    — Spec and scaffold docs
     Wiring_Diagram.md      — Full-system wiring (Mermaid/DOT); addresses from docs/PLCTags.xlsx
+    RECIPE_RESIZE.md       — Step-by-step: change the recipe LINE count (`gen_recipe_slots.py --lines N` writes all 7 coupled sites), memory cost, trial log
 Customer_Operator_Manual.md — Detailed bilingual (EN/ES) customer operator manual (root level)
 backup/                    — Historical snapshots — do not read
 ```

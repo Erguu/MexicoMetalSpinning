@@ -188,8 +188,8 @@ VERSION : 0.3
         // emits. Change them together or the transfers go out of step.
         // <<< GENERATED:CHUNK_GEOMETRY -- do not hand-edit; run tools/gen_recipe_slots.py >>>
         CHUNK_LINES    : Int := 100;
-        CHUNK_COUNT    : Int := 5;
-        LINES_MAX      : Int := 500; // = CHUNK_LINES * CHUNK_COUNT, and the bound of
+        CHUNK_COUNT    : Int := 8;
+        LINES_MAX      : Int := 800; // = CHUNK_LINES * CHUNK_COUNT, and the bound of
                                       // DB_SelectedRecipe.Lines + the pre-scan guard
         // <<< END GENERATED:CHUNK_GEOMETRY >>>
         // <<< GENERATED:PROGRAM_COUNT -- do not hand-edit; run tools/gen_recipe_slots.py >>>
@@ -250,6 +250,12 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines5,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram1".Lines8,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         2:  CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Header,
@@ -263,6 +269,12 @@ BEGIN
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram2".Lines8,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         3:  CASE #chunkPhase OF
@@ -278,6 +290,12 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines5,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram3".Lines8,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         4:  CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Header,
@@ -291,6 +309,12 @@ BEGIN
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram4".Lines8,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         5:  CASE #chunkPhase OF
@@ -306,6 +330,12 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines5,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram5".Lines8,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         6:  CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Header,
@@ -319,6 +349,12 @@ BEGIN
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram6".Lines8,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         7:  CASE #chunkPhase OF
@@ -334,6 +370,12 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines5,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram7".Lines8,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         8:  CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Header,
@@ -347,6 +389,12 @@ BEGIN
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram8".Lines8,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         9:  CASE #chunkPhase OF
@@ -362,6 +410,12 @@ BEGIN
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines5,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram9".Lines8,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
         10: CASE #chunkPhase OF
                 0: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Header,
@@ -375,6 +429,12 @@ BEGIN
                 4: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines4,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
                 5: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines5,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                6: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines6,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                7: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines7,
+                                           BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
+                8: #retValRaw := READ_DBL(REQ := #reqActive, SRCBLK := "DB_RecipeProgram10".Lines8,
                                            BUSY => #busyRaw, DSTBLK := "DB_RecipeChunk".Lines);
             END_CASE;
     END_CASE;
@@ -663,7 +723,9 @@ VERSION : 0.1
     VAR_IN_OUT
         // Bound to "DB_SelectedRecipe".Lines -- the work-memory buffer, never a
         // DB_RecipeProgram* (those are load-memory only). Must match that DB.
-        Lines : Array[0..499] of "RecipeLine"; // Recipe lines storage (in/out DB reference)
+        // <<< GENERATED:PRESCAN_LINES -- do not hand-edit; run tools/gen_recipe_slots.py --lines N >>>
+        Lines : Array[0..799] of "RecipeLine"; // Recipe lines storage (in/out DB reference)
+        // <<< END GENERATED:PRESCAN_LINES >>>
     END_VAR
     VAR
         state : Int;                // Local state machine
@@ -936,7 +998,9 @@ VERSION : 0.1
     VAR_IN_OUT
         // Bound to "DB_SelectedRecipe".Lines -- the work-memory buffer, never a
         // DB_RecipeProgram* (those are load-memory only). Must match that DB.
-        Lines : Array[0..499] of "RecipeLine"; // Reference to recipe lines in DB
+        // <<< GENERATED:HANDLER_LINES -- do not hand-edit; run tools/gen_recipe_slots.py --lines N >>>
+        Lines : Array[0..799] of "RecipeLine"; // Reference to recipe lines in DB
+        // <<< END GENERATED:HANDLER_LINES >>>
         Axis_X : TO_PositioningAxis;           // Axis TO IN_OUT
         Axis_Z : TO_PositioningAxis;
     END_VAR

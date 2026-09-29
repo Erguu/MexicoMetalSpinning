@@ -49,12 +49,12 @@
 //      *** OMITTING UNLINKED FAILS SILENTLY. ***
 //      The recipe then sits in work memory, READ_DBL still succeeds (it reads
 //      the DB's start values either way), every test still passes, and the
-//      only symptom is that ~6 KB of work memory per recipe is quietly
+//      only symptom is that ~9 KB of work memory per recipe is quietly
 //      consumed again. It will not surface until the CPU runs out. Wrong
 //      ORDER is loud (nothing generates); a MISSING line is silent.
 //
-//   3. Array[0..499] -- 500 lines. Must match DB_SelectedRecipe exactly.
-//      Header.LineCount is validated against 1..500 in STATE_PRE_SCAN(12).
+//   3. Array[0..799] -- 800 lines. Must match DB_SelectedRecipe exactly.
+//      Header.LineCount is validated against 1..800 in STATE_PRE_SCAN(12).
 //
 // A load-memory-only DB CANNOT be monitored online -- that is expected, and is
 // the quickest proof the attribute took effect. To inspect recipe data, run a
@@ -79,7 +79,7 @@
 // without --shrink-02b, because importing a shrunk 02b wipes recipe data as well
 // as removing declarations.
 //
-// Load memory cost: 10 x ~6 KB = ~0.06 MB of the 1214C's 4 MB.
+// Load memory cost: 10 x ~9 KB = ~0.09 MB of the 1214C's 4 MB.
 // =============================================================================
 
 // -----------------------------------------------------------------------------
@@ -118,6 +118,9 @@ NON_RETAIN
         Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
         Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
         Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
     END_VAR
 BEGIN
 END_DATA_BLOCK
@@ -137,6 +140,9 @@ NON_RETAIN
         Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
         Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
         Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
     END_VAR
 BEGIN
 END_DATA_BLOCK
@@ -156,6 +162,9 @@ NON_RETAIN
         Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
         Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
         Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
     END_VAR
 BEGIN
 END_DATA_BLOCK
@@ -175,6 +184,9 @@ NON_RETAIN
         Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
         Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
         Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
     END_VAR
 BEGIN
 END_DATA_BLOCK
@@ -194,6 +206,9 @@ NON_RETAIN
         Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
         Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
         Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
     END_VAR
 BEGIN
 END_DATA_BLOCK
@@ -213,6 +228,9 @@ NON_RETAIN
         Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
         Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
         Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
     END_VAR
 BEGIN
 END_DATA_BLOCK
@@ -232,6 +250,9 @@ NON_RETAIN
         Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
         Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
         Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
     END_VAR
 BEGIN
 END_DATA_BLOCK
@@ -251,6 +272,9 @@ NON_RETAIN
         Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
         Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
         Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
     END_VAR
 BEGIN
 END_DATA_BLOCK
@@ -270,6 +294,9 @@ NON_RETAIN
         Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
         Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
         Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
     END_VAR
 BEGIN
 END_DATA_BLOCK
@@ -289,6 +316,9 @@ NON_RETAIN
         Lines3 : Array[0..99] of "RecipeLine"; // global lines 200..299
         Lines4 : Array[0..99] of "RecipeLine"; // global lines 300..399
         Lines5 : Array[0..99] of "RecipeLine"; // global lines 400..499
+        Lines6 : Array[0..99] of "RecipeLine"; // global lines 500..599
+        Lines7 : Array[0..99] of "RecipeLine"; // global lines 600..699
+        Lines8 : Array[0..99] of "RecipeLine"; // global lines 700..799
     END_VAR
 BEGIN
 END_DATA_BLOCK

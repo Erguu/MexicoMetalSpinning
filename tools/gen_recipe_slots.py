@@ -9,11 +9,18 @@ of them. Change the number, run it once.
     python tools/gen_recipe_slots.py            # regenerate at the current count
     python tools/gen_recipe_slots.py --slots 50
     python tools/gen_recipe_slots.py --slots 50 --check   # verify, write nothing
+    python tools/gen_recipe_slots.py --lines 700          # change the recipe LINE count
+
+    Step-by-step for the line count, memory cost and trial log:
+    Program/docs/RECIPE_RESIZE.md
 
 WHAT IT WRITES
     Program/02b_RecipePrograms.scl   -- rewritten in full: N DATA_BLOCK declarations
     Program/05_RecipeHandler.scl     -- GENERATED:PROGRAM_COUNT and GENERATED:LOADER_CASE
-    Program/06_MainProcess.scl       -- GENERATED:PROGRAM_CLAMP
+    Program/06_MainProcess.scl       -- GENERATED:PROGRAM_CLAMP, LINECOUNT_GUARD
+    Program/02_DataBlocks.scl        -- GENERATED:SELECTED_LINES (DB_SelectedRecipe.Lines)
+    Program/05_RecipeHandler.scl     -- also GENERATED:PRESCAN_LINES / HANDLER_LINES
+    tools/gen_recipe_slots.py        -- its own LINES_PER_RECIPE line, only with --lines
 
 Everything else in those two SCL files is hand-written and is never touched: the
 script only replaces text between the `// <<< GENERATED:NAME >>>` markers. If a
@@ -93,7 +100,7 @@ import sys
 # and still frees ~11.7 KB against the 1000-line layout. The 999-line production
 # parts STILL do not fit -- they need a coarser CAM export (~2 mm chords). Do not
 # merge this value to master without that decision being made for production.
-LINES_PER_RECIPE = 500
+LINES_PER_RECIPE = 800
 BYTES_PER_LINE = 12
 HEADER_BYTES = 48
 
@@ -124,6 +131,8 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 F_02B = REPO / "Program" / "02b_RecipePrograms.scl"
 F_LOADER = REPO / "Program" / "05_RecipeHandler.scl"
 F_PROCESS = REPO / "Program" / "06_MainProcess.scl"
+F_DATABLOCKS = REPO / "Program" / "02_DataBlocks.scl"
+F_SELF = pathlib.Path(__file__).resolve()
 
 EOL = "\r\n"  # every SCL file in this project is CRLF; TIA does not care, git does
 
@@ -364,6 +373,35 @@ def build_chunk_geometry() -> str:
     )
 
 
+def build_lines_decl(comment: str, pad: str = " ") -> str:
+    """A Lines InOut / DB member bound to DB_SelectedRecipe's line count."""
+    return (f"        Lines{pad}: Array[0..{LINES_PER_RECIPE - 1}] of \"RecipeLine\";"
+            f" // {comment}\n")
+
+
+def build_linecount_guard() -> str:
+    return (f"            IF #activeLineCount <= 0 OR #activeLineCount > {LINES_PER_RECIPE}"
+            f" THEN\n")
+
+
+def current_lines() -> int:
+    """Line count the LOADER is compiled against (LINES_MAX), 0 if unreadable."""
+    m = re.search(r"LINES_MAX\s+: Int := (\d+);", read(F_LOADER))
+    return int(m.group(1)) if m else 0
+
+
+def set_lines_per_recipe(n: int) -> None:
+    """Rewrite this file's own LINES_PER_RECIPE so split_recipe_db.py and every
+    other tool that imports the geometry follows the new size."""
+    src = read(F_SELF)
+    new, k = re.subn(r"^LINES_PER_RECIPE = \d+", f"LINES_PER_RECIPE = {n}", src,
+                     count=1, flags=re.MULTILINE)
+    if k != 1:
+        sys.exit("ERROR: LINES_PER_RECIPE line not found in gen_recipe_slots.py")
+    if new != src:
+        write(F_SELF, new)
+
+
 def current_chunk_lines() -> int:
     """Chunk size the LOADER is compiled against (not this file's constant)."""
     m = re.search(r"CHUNK_LINES\s+: Int := (\d+);", read(F_LOADER))
@@ -389,7 +427,11 @@ def replace_region(text: str, name: str, body: str, path: pathlib.Path) -> str:
             f"           // <<< END GENERATED:{name} >>>\n"
             f"       Restore them (git diff will show where) and re-run."
         )
-    return text[: m.start(2)] + body.replace("\n", EOL) + text[m.end(2):]
+    # Follow the file's own line endings. With core.autocrlf the working copy is
+    # LF even though the repo convention is CRLF; writing CRLF into an LF file
+    # left mixed endings and made --check report WOULD CHANGE forever.
+    eol = "\r\n" if text.count("\r\n") * 2 > text.count("\n") else "\n"
+    return text[: m.start(2)] + body.replace("\n", eol) + text[m.end(2):]
 
 
 def read(path: pathlib.Path) -> str:
@@ -429,10 +471,20 @@ def build_targets(n: int, loader_only: bool) -> dict:
     loader = replace_region(loader, "PROGRAM_COUNT", build_program_count(n), F_LOADER)
     loader = replace_region(loader, "CHUNK_GEOMETRY", build_chunk_geometry(), F_LOADER)
     loader = replace_region(loader, "LOADER_CASE", build_loader_case(n), F_LOADER)
+    loader = replace_region(loader, "PRESCAN_LINES",
+                            build_lines_decl("Recipe lines storage (in/out DB reference)"),
+                            F_LOADER)
+    loader = replace_region(loader, "HANDLER_LINES",
+                            build_lines_decl("Reference to recipe lines in DB"), F_LOADER)
+    process = read(F_PROCESS)
+    process = replace_region(process, "PROGRAM_CLAMP", build_program_clamp(n), F_PROCESS)
+    process = replace_region(process, "LINECOUNT_GUARD", build_linecount_guard(), F_PROCESS)
     out = {
         F_LOADER: loader,
-        F_PROCESS: replace_region(read(F_PROCESS), "PROGRAM_CLAMP",
-                                  build_program_clamp(n), F_PROCESS),
+        F_PROCESS: process,
+        F_DATABLOCKS: replace_region(
+            read(F_DATABLOCKS), "SELECTED_LINES",
+            build_lines_decl("Copy of the selected recipe's lines", pad="  "), F_DATABLOCKS),
     }
     if not loader_only:
         out[F_02B] = build_02b(n)
@@ -635,9 +687,33 @@ def main() -> int:
                          f"{LINES_PER_RECIPE} exactly. Halve it if 16#0314 fires with a "
                          "different ErrorChunk each time. Forces a 02b rewrite and a "
                          "re-run of tools/split_recipe_db.py over every recipe.")
+    ap.add_argument("--lines", type=int, default=None,
+                    help=f"recipe LINE count (currently {LINES_PER_RECIPE}). Must be a "
+                         f"multiple of the chunk size ({CHUNK_LINES}). Rewrites 02b, the "
+                         "loader, both Lines InOuts, DB_SelectedRecipe and the pre-scan "
+                         "guard. Wipes recipe data on the 02b import -- see "
+                         "Program/docs/RECIPE_RESIZE.md.")
     ap.add_argument("--batch", action="store_true",
                     help="never prompt, even with no other arguments (for scripts/CI)")
     args = ap.parse_args()
+
+    old_lines = LINES_PER_RECIPE
+    if args.lines is not None:
+        if args.lines < CHUNK_LINES or args.lines % CHUNK_LINES:
+            sys.stderr.write(
+                f"ERROR: --lines must be a positive multiple of the chunk size "
+                f"{CHUNK_LINES} (got {args.lines})\n")
+            return 2
+        if args.lines > 32767:
+            sys.stderr.write("ERROR: --lines must fit an Int (<= 32767)\n")
+            return 2
+        if args.loader_only and args.lines != current_lines():
+            sys.stderr.write(
+                "ERROR: --lines cannot be combined with --loader-only. The loader would\n"
+                "       call Lines1..LinesN arrays that 02b does not declare yet.\n")
+            return 2
+        globals()["LINES_PER_RECIPE"] = args.lines
+        globals()["CHUNK_COUNT"] = args.lines // CHUNK_LINES
 
     if args.chunk_lines is not None:
         if args.chunk_lines < 1 or LINES_PER_RECIPE % args.chunk_lines:
@@ -651,6 +727,7 @@ def main() -> int:
     # No arguments at all, and a human on the other end -> menu. Anything else
     # behaves exactly as it always has, so scripts and habits keep working.
     if (not args.batch and args.slots is None and args.chunk_lines is None
+            and args.lines is None
             and not args.check and not args.loader_only and not args.shrink_02b
             and sys.stdin.isatty()):
         return interactive()
@@ -675,6 +752,7 @@ def main() -> int:
 
     if args.check:
         print(f"slots: loader reaches {now}, requested {n}, 02b declares {have02b}")
+        print(f"lines: loader compiled for {current_lines()}, requested {LINES_PER_RECIPE}")
         for p in targets:
             if p is F_02B and surplus:
                 # Not drift -- an intentional surplus. Labelling it WOULD CHANGE
@@ -713,6 +791,10 @@ def main() -> int:
     for p, new in targets.items():
         if p in changed:
             write(p, new)
+    if args.lines is not None:
+        set_lines_per_recipe(args.lines)
+        print(f"Recipe lines: {old_lines} -> {args.lines}"
+              f"  ({CHUNK_COUNT} x {CHUNK_LINES}-line chunks)")
 
     kb = (HEADER_BYTES + LINES_PER_RECIPE * BYTES_PER_LINE) / 1024.0
     print(f"Recipe slots: {now} -> {n}" + ("  (loader only, 02b untouched)" if args.loader_only else ""))
@@ -735,6 +817,10 @@ def main() -> int:
     else:
         print("\nTIA IMPORT ORDER -- getting this wrong wipes every recipe:")
         print("  1. import Program/02b_RecipePrograms.scl        (structure, empty BEGIN blocks)")
+        if F_DATABLOCKS in changed:
+            print("     + DB_SelectedRecipe.Lines changed: set it in the TIA DB editor, or")
+            print("       re-import 02_DataBlocks.scl and redo docs/RETAINED_TAGS.md ticks")
+        print("     + re-import 05_RecipeHandler.scl and 06_MainProcess.scl, compile")
         print("  2. re-import EVERY gcodes/DB_RecipeProgramN.scl (data)")
         print("  Never step 1 without step 2. The DBs are UNLINKED, so a wipe is")
         print("  invisible online until a cycle start fails pre-scan with 16#0313.")

@@ -2389,7 +2389,9 @@ BEGIN
             // exp/velocity-path-350: guard lowered 1000 -> 400 (2026-09-14), raised to
             // 500 (2026-09-16), together with DB_SelectedRecipe.Lines and LINES_MAX in
             // the loader. The comment above predates this branch.
-            IF #activeLineCount <= 0 OR #activeLineCount > 500 THEN
+            // <<< GENERATED:LINECOUNT_GUARD -- do not hand-edit; run tools/gen_recipe_slots.py --lines N >>>
+            IF #activeLineCount <= 0 OR #activeLineCount > 800 THEN
+            // <<< END GENERATED:LINECOUNT_GUARD >>>
                 #newErrorFlag := TRUE;     // BUG FIX: was missing -- alarm manager never latched 16#0310,
                                            // so HMI showed ERROR state with empty text and no history entry
                 #newErrorCode := 16#0310;  // Recipe: invalid line count (not loaded?)
