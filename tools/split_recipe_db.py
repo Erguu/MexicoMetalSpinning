@@ -289,6 +289,99 @@ def check_continuous(text: str, line_count: int) -> None:
         prev = (x, z)
 
 
+# End-of-run hand-over model (2026-09-29). COPIES of the constants in FB_RecipeHandler
+# (VM_HO_*) and of two DB_MachineConfig values -- keep them in step.
+HANDOVER_JERK = 2564.0      # mm/s^3  VM_HO_JERK
+HANDOVER_DEC = 184.6        # mm/s^2  VM_HO_DEC
+HANDOVER_SCAN = 0.045       # s       VM_HO_SCAN
+HANDOVER_MARGIN = 2.0       #         VM_HO_MARGIN
+FEED_CONV = 60.0            # DB_MachineConfig.FeedrateConvFactor (mm/min -> mm/s)
+RAPID_VEL = 40.0            # DB_MachineConfig.RapidVelocity = MaxVelocity (mm/s)
+HANDOVER_WARN_MM = 1.0      # report a hand-over predicted further off the path than this
+
+
+def _brake_dist(v: float) -> float:
+    """Braking distance with margin, same expression as FB_RecipeHandler STATE_EXEC."""
+    v = abs(v)
+    if v <= HANDOVER_DEC * HANDOVER_DEC / HANDOVER_JERK:
+        d = v * math.sqrt(v / HANDOVER_JERK)
+    else:
+        d = v * v / (2.0 * HANDOVER_DEC) + v * HANDOVER_DEC / (2.0 * HANDOVER_JERK)
+    return HANDOVER_MARGIN * (d + v * HANDOVER_SCAN)
+
+
+def handover_report(text: str, line_count: int) -> list[str]:
+    """Predict the path error at every end of a CMD=2 run -- report only.
+
+    At a hand-over the handler switches from MC_MoveVelocity to one MC_MoveAbsolute
+    per axis. Each axis gets its proportional share of the feed, except that an axis
+    which cannot brake to that share in the distance it has left (or must reverse)
+    keeps its live speed -- the speed floor. A floored axis finishes early and the
+    other one finishes alone. On 2026-09-29 the floor applied to every hand-over and
+    put program 1 line 35 ~17 mm off the path. This replays the PLC rule with
+    constant speeds (ramps ignored) so a recipe that would still do that is visible
+    before it runs.
+
+    Approximations: the live speed is the previous line's feed along its programmed
+    direction, and the catch-up skip is not modelled. Good to a few tenths of a mm.
+    """
+    lines = parse_lines(text)
+    xz: dict[int, list[float]] = {}
+    for chunk, idx, axis, value in XZ_RE.findall(text):
+        g = (int(chunk) - 1) * CHUNK_LINES + int(idx) if chunk else int(idx)
+        xz.setdefault(g, [0.0, 0.0])[0 if axis == "X" else 1] = float(value)
+    cmd = lambda g: lines.get(g, [0, 0, 0])[0]
+    feed = lambda g: lines.get(g, [0, 0, 0])[2]
+
+    def eligible(g: int) -> bool:
+        return (cmd(g) == CMD_LINEAR_CONT and feed(g) > 0 and g + 1 < line_count
+                and cmd(g + 1) in (1, CMD_LINEAR_CONT) and feed(g + 1) > 0)
+
+    results = []
+    prev = pprev = None
+    for g in range(line_count):
+        if cmd(g) > CMD_LINEAR_CONT:
+            continue
+        x, z = xz.get(g, [0.0, 0.0])
+        if prev and pprev and g > 0 and eligible(g - 1) and not eligible(g):
+            dx0, dz0 = prev[0] - pprev[0], prev[1] - pprev[1]
+            l0 = math.hypot(dx0, dz0) or 1.0
+            fp = min(feed(g - 1) / FEED_CONV, RAPID_VEL)
+            cvx, cvz = fp * dx0 / l0, fp * dz0 / l0
+            dx, dz = x - prev[0], z - prev[1]
+            ln = math.hypot(dx, dz)
+            fe = RAPID_VEL if (cmd(g) == 0 or feed(g) == 0) else min(feed(g) / FEED_CONV, RAPID_VEL)
+            if ln > 0.01:
+                vx, vz = fe * abs(dx) / ln, fe * abs(dz) / ln
+                if abs(dx) <= _brake_dist(cvx) or dx * cvx < 0:
+                    vx = max(vx, min(abs(cvx), fe))
+                if abs(dz) <= _brake_dist(cvz) or dz * cvz < 0:
+                    vz = max(vz, min(abs(cvz), fe))
+                vx, vz = max(vx, 1e-3), max(vz, 1e-3)
+                tx, tz = abs(dx) / vx, abs(dz) / vz
+                tmax, dev = max(tx, tz), 0.0
+                for k in range(201):
+                    t = tmax * k / 200
+                    ax = math.copysign(min(abs(dx), vx * t), dx)
+                    az = math.copysign(min(abs(dz), vz * t), dz)
+                    dev = max(dev, abs(ax * dz - az * dx) / ln)
+                alone = "X" if tx > tz else "Z"
+                results.append((dev, g, ln, alone, abs(tx - tz)))
+        pprev, prev = prev, (x, z)
+
+    if not results:
+        return ["hand-over: no CMD=2 runs"]
+    worst = max(results)
+    rows = [f"hand-over: {len(results)} run end(s), worst predicted path error"
+            f" {worst[0]:.2f} mm (line {worst[1]})"]
+    for dev, g, ln, alone, dt in sorted(results, reverse=True):
+        if dev <= HANDOVER_WARN_MM:
+            break
+        rows.append(f"  WARN line {g}: {dev:.2f} mm off path ({ln:.1f} mm line,"
+                    f" {alone} finishes {dt:.1f} s after the other axis)")
+    return rows
+
+
 def check_flat(text: str) -> int:
     line_count = check_common(text)
     cmds = {int(i): int(v) for i, v in CMD_RE.findall(text)}
@@ -466,9 +559,12 @@ def process(path: pathlib.Path, check_only: bool, stamp: bool = False,
         return 2
 
     def show_passes() -> None:
+        raw = io.open(path, encoding="utf-8", newline="").read().replace("\r\n", "\n")
+        # Hand-over report: always shown, report only (never changes the exit code).
+        for row in handover_report(raw, line_count):
+            print(f"                {row}")
         if not passes:
             return
-        raw = io.open(path, encoding="utf-8", newline="").read().replace("\r\n", "\n")
         for row in pass_report(raw, line_count):
             print(f"                {row}")
 

@@ -289,7 +289,7 @@ or the end of the program.
 | Hand-off | `STATE_VEL_WAIT` → `READ` → `EXEC` | When `rem ≤ feed × VelPath_LeadTime` the line is done; the next line launches on the **other** instance pair in the same scan it is read. The axes never stop |
 | Zero-length line | `STATE_EXEC` | Programmed length ≤ 0.01 mm: counted done, next line on the next scan. **A `CMD=2` zero-length line is refused at pre-scan (2026-09-15)** — see §9.3 |
 | **Already passed — same-scan catch-up** (2026-09-14) | `STATE_EXEC` | While a run is moving, **every** line whose end point the axes are already within `live speed × LeadTime` of — **measured along the programmed segment** (previous programmed end → this end) — is skipped **in the same scan** (up to `VM_CATCHUP_MAX` = 10), but only into a line that is itself velocity-eligible; the vector is then aimed at the first point genuinely ahead. The last line before a hand-over, if already passed, is counted done and the next line read on the next scan. **Simulated on the real program 2 (0.41–2.66 mm chords, F300):** at T = 0.1 s, one skip per scan left 0.77 mm path error and a `16#000F` fault; the same-scan loop gave **0.023 mm, no reversals, no fault, at most 2 lines per scan**; at T = 0.05 / 0.02 s ≤ 0.01 mm. Re-run with `tools/sim_velocity_path.py` once T is measured. Added because the first real exports have 0.4 mm chords — shorter than one 100 ms scan of travel — and aiming at a passed point would pull the axes backwards. Refused with `16#000F` if the axes are further than `VelPath_MaxDeviation` off the programmed line |
-| End of run | `STATE_EXEC` | `currX/Z := ActualPosition`, `MC_MoveAbsolute` on **both** axes (forced — an axis with < 0.01 mm left but a live velocity would otherwise never be told to stop). **Speed floor (2026-09-25):** each axis gets at least the speed it is already carrying (`|vmVelX/Z|`, capped at the line's feed), not just its proportional share — see below |
+| End of run | `STATE_EXEC` | `currX/Z := ActualPosition`, `MC_MoveAbsolute` on **both** axes (forced — an axis with < 0.01 mm left but a live velocity would otherwise never be told to stop). **Speed floor (2026-09-25, narrowed 2026-09-29):** an axis that cannot brake to its proportional share in the distance it has left, or must reverse, keeps the speed it is already carrying (`|vmVelX/Z|`, capped at the line's feed); every other axis gets its proportional share — see below |
 
 **Why the end-of-run speed floor (2026-09-25):** the proportional split `v = feed · Δaxis / Δtotal`
 is only right from standstill. At the end of a run the axes are still moving, and an axis with almost
@@ -300,7 +300,41 @@ and 0–0.2 mm left (the jerk-limited stop needs ~0.18 mm). Estimated crawl: 0.6
 2–3 s at ~0.05 mm, up to `Timeout_Motion` near 0 — which depends on where the switch lands inside
 a scan, so it looks intermittent. With the floor the overshoot is the same (≤ ~0.2 mm), but it is
 recovered at the axis's own speed. The two axes no longer finish exactly together on that one
-line. Not yet run on the machine.
+line. **Confirmed on the machine (user, 2026-09-29): the 2–3 s wait at pass ends is gone.**
+
+**Why the floor was narrowed (2026-09-29):** applied to *every* hand-over, the floor broke long
+ending lines. The 2026-09-29 export of program 1 ends runs on lines up to 93 mm (the pass markers are
+back on, and every marker ends a run). Line 35: Z carried 7 mm/s, its share was 3.5 mm/s, the floor
+put it back to 7 — Z finished 5.6 s early and **X ran the last ~42 mm alone, ~17.7 mm off the path**.
+That is the operator's "X move at the end of the pass that is not in the recipe". Offline, 53 of the
+83 run ends in that file were over 1 mm off. The 2026-09-24 export the floor was checked against had
+no ending line longer than 14 mm (worst ~1 mm), which is why this was not seen.
+
+Now the floor applies to an axis **only** when the crawl is actually possible:
+
+| Condition (per axis) | Speed |
+|---|---|
+| distance left ≤ braking distance from the live speed, **or** target behind the axis | live speed, capped at feed (the floor) |
+| otherwise | proportional share — the axis slows to it in well under 1 mm, both axes finish together |
+
+Braking distance = `2 × (S-curve stop + one scan of travel)`, computed from copies of the TO dynamics
+held as `VM_HO_*` CONSTs in `FB_RecipeHandler` (jerk 2564 mm/s³, dec 184.6 mm/s², scan 0.045 s,
+margin ×2). At 4.4 mm/s ≈ 0.8 mm, 7 mm/s ≈ 1.4 mm, F1000 (16.7 mm/s) ≈ 4.2 mm. Constants, not a
+live TO read: no TO tag is read anywhere in this project and a wrong tag name would fail at compile.
+If they go stale: a *shorter* real braking distance (t1 0.03) floors a few extra axes, error bounded
+by the estimate; a *longer* one (t1 back to 0.3) can let the crawl return on a line — retune both.
+
+Offline, same model (constant speeds, ramps ignored), 2026-09-29 exports: program 1 worst
+**0.52 mm** (was 17.7), program 2 0.37 mm, program 3 0.00 mm (was 8.0), the 2026-09-24 export 0.03 mm.
+`tools/split_recipe_db.py` now prints this hand-over report for every ready file and warns on any
+run end predicted > 1 mm off path (report only, exit code unchanged). Its `HANDOVER_*` constants
+copy the `VM_HO_*` ones. NOT compiled, NOT run.
+
+The structural fix, if the ending lines still show error: drive the ending line in velocity mode
+too and hand over to `MC_MoveAbsolute` only for its last few mm, once both axes already move along
+it — then the proportional split equals the live speeds and no floor is needed. Kept in reserve: it
+is a larger change, puts ending lines under the deviation guard, and still needs this rule as the
+fallback for ending lines too short to align on.
 
 **Why actual position and not the nominal end point:** the scan it takes `READ`/`EXEC` to launch
 the next line means every hand-off is slightly late. Aiming each new segment from where the axes

@@ -1045,6 +1045,9 @@ VERSION : 0.1
         vmNextOK    : Bool;         // Next line may itself run in velocity mode (catch-up may skip into it)
         vmUnsupScans : Int;         // Safety net 2: consecutive scans a velocity instance is Busy with no command live
         vmSkipCount : Int;          // Lines skipped by the catch-up loop in THIS scan
+        vmBrakeV    : Real;         // Hand-over: live speed of the axis being evaluated (mm/s)
+        vmBrakeX    : Real;         // Hand-over: X braking distance from its live speed, with margin (mm)
+        vmBrakeZ    : Real;         // Hand-over: Z braking distance from its live speed, with margin (mm)
         actX        : Real;         // Axis ActualPosition snapshot
         actZ        : Real;
         
@@ -1070,7 +1073,7 @@ VERSION : 0.1
         // opening this block ONLINE in TIA (the CONST section shows the CPU's copy),
         // or by an online/offline compare. Deliberately written nowhere: a DB field
         // would force a second block to be imported and downloaded.
-        BUILD_TAG : String[16] := '2026-09-25a';
+        BUILD_TAG : String[16] := '2026-09-29a';
 
         STATE_IDLE : Int := 0;
         STATE_READ : Int := 10;
@@ -1098,6 +1101,16 @@ VERSION : 0.1
                                             //       runaway. Commission with the smallest value that runs.
         VM_UNSUPERVISED_SCANS : Int := 2;  // Safety net 2 grace: a hand-over MC_MoveAbsolute or MC_Halt aborts the
                                            // velocity command within ~1 scan; Busy on the 3rd scan = unsupervised
+        // Hand-over speed floor: braking-distance test (2026-09-29, see STATE_EXEC).
+        // COPIES of the X/Z TO dynamics -- keep in step with the TO (docs/MotionSmoothing.md
+        // table at the top) and with tools/split_recipe_db.py HANDOVER_* constants.
+        // Going stale is benign one way and bounded the other: a SHORTER real braking
+        // distance (faster jerk, e.g. t1 0.03) floors a few more axes, error <= this
+        // estimate; a LONGER one (t1 back to 0.3) can bring the old crawl back on a line.
+        VM_HO_JERK   : Real := 2564.0;  // mm/s^3 -- TO jerk (acc/t1 = dec/t2, t1 0.06 s)
+        VM_HO_DEC    : Real := 184.6;   // mm/s^2 -- TO deceleration
+        VM_HO_SCAN   : Real := 0.045;   // s      -- OB1 cycle, measured 40-45 ms 2026-09-15
+        VM_HO_MARGIN : Real := 2.0;     // covers servo following error and scan jitter the model ignores
         STATE_DONE : Int := 99;
         STATE_PAUSED : Int := 800;         // Pause entry: halt axes, then retract
         STATE_PAUSE_RETRACT : Int := 801;  // Moving to retracted (tool-clear) position
@@ -2159,19 +2172,55 @@ BEGIN
             #velZ := #feedrate;
         END_IF;
 
-        // Hand-over speed floor (2026-09-25). The proportional split above assumes both
-        // axes start from standstill. At a hand-over they are still moving, and an axis
-        // with almost nothing left (e.g. an axis-parallel CMD=1 link right after a run --
-        // program 1 line 197, Z ~0..0.2 mm left at 4.4 mm/s) got a crawl speed, down to
-        // MinVelocity. It could not stop in the distance left, overshot, and crept back
-        // at that crawl speed for seconds. So never command an axis slower than the
-        // velocity it is already carrying, capped at this line's feed. The path error is
-        // bounded by the overshoot (~0.2 mm at 4.4 mm/s), recovered in milliseconds.
-        // Never remove this as "breaks linear interpolation" -- the split is only valid
-        // from standstill.
+        // Hand-over speed floor (2026-09-25, narrowed 2026-09-29). The proportional split
+        // above assumes both axes start from standstill. At a hand-over they are still
+        // moving, and an axis with almost nothing left (program 1 line 197, 2026-09-24
+        // export: X-only CMD=1 link, Z ~0..0.2 mm left at 4.4 mm/s) got a crawl speed,
+        // down to MinVelocity. It could not stop in the distance left, overshot, and crept
+        // back at that crawl speed -- the 2-3 s wait at pass ends. The floor (never slower
+        // than the live speed, capped at this line's feed) fixed that.
+        //
+        // But applied to EVERY hand-over it broke long ending lines: program 1 line 35
+        // (2026-09-29 export, 93 mm) had Z forced from 3.5 to 7 mm/s, Z arrived 5.6 s
+        // early and X then ran the last ~42 mm ALONE -- up to ~17 mm off the path, the
+        // "X move at the end of the pass" the operator reported.
+        //
+        // So the floor applies to an axis ONLY when it is needed:
+        //   * its distance left is within its braking distance from the live speed
+        //     (it cannot slow to its proportional share in time -> overshoot), or
+        //   * its target is BEHIND it (it must reverse; the return must not crawl).
+        // Otherwise the axis gets its proportional share and slows to it in well under
+        // a millimetre, finishing together with the other axis. A floored axis can only
+        // finish early by at most its braking distance (~0.8 mm at 4.4 mm/s, ~4 mm at
+        // F1000), not by the whole line.
+        //
+        // Never remove the floor as "breaks linear interpolation" (the crawl comes back),
+        // and never widen it back to every hand-over (the long-line error comes back).
+        // Offline check of both: tools/split_recipe_db.py (hand-over report).
         IF #vmWasActive THEN
-            #velX := MAX(IN1 := #velX, IN2 := MIN(IN1 := ABS(#vmVelX), IN2 := #feedrate));
-            #velZ := MAX(IN1 := #velZ, IN2 := MIN(IN1 := ABS(#vmVelZ), IN2 := #feedrate));
+            #vmBrakeV := ABS(#vmVelX);
+            IF #vmBrakeV <= VM_HO_DEC * VM_HO_DEC / VM_HO_JERK THEN
+                #vmBrakeX := #vmBrakeV * SQRT(#vmBrakeV / VM_HO_JERK);   // S-curve, decel never saturates
+            ELSE
+                #vmBrakeX := #vmBrakeV * #vmBrakeV / (2.0 * VM_HO_DEC) + #vmBrakeV * VM_HO_DEC / (2.0 * VM_HO_JERK);
+            END_IF;
+            #vmBrakeX := VM_HO_MARGIN * (#vmBrakeX + #vmBrakeV * VM_HO_SCAN);
+
+            #vmBrakeV := ABS(#vmVelZ);
+            IF #vmBrakeV <= VM_HO_DEC * VM_HO_DEC / VM_HO_JERK THEN
+                #vmBrakeZ := #vmBrakeV * SQRT(#vmBrakeV / VM_HO_JERK);
+            ELSE
+                #vmBrakeZ := #vmBrakeV * #vmBrakeV / (2.0 * VM_HO_DEC) + #vmBrakeV * VM_HO_DEC / (2.0 * VM_HO_JERK);
+            END_IF;
+            #vmBrakeZ := VM_HO_MARGIN * (#vmBrakeZ + #vmBrakeV * VM_HO_SCAN);
+
+            // currX/currZ hold the ACTUAL position here (set in the hand-over block above).
+            IF #deltaX <= #vmBrakeX OR (#targX - #currX) * #vmVelX < 0.0 THEN
+                #velX := MAX(IN1 := #velX, IN2 := MIN(IN1 := ABS(#vmVelX), IN2 := #feedrate));
+            END_IF;
+            IF #deltaZ <= #vmBrakeZ OR (#targZ - #currZ) * #vmVelZ < 0.0 THEN
+                #velZ := MAX(IN1 := #velZ, IN2 := MIN(IN1 := ABS(#vmVelZ), IN2 := #feedrate));
+            END_IF;
         END_IF;
 
         // Ensure minimum velocity
