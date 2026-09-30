@@ -223,10 +223,16 @@ BEGIN
     // experimental motion mode must never be inherited across a power cycle.
     // See docs/MotionSmoothing.md section 9 before switching it on.
     "DB_MachineConfig".VelPath_Enable       := TRUE;
-    "DB_MachineConfig".VelPath_LeadTime     := 0.09;   // s  -- takeover lead (feed x time = distance). Covers the scan delay
-                                                       //       (OB1 40-45 ms) AND the drive's jerk-limited ramp (t1 0.06 s).
-                                                       //       Jerk-aware sim, program 1 (2026-09-16): 0.0675 -> 0.164 mm,
-                                                       //       0.09 -> 0.115 mm, 0.12 -> 0.175 mm. Retune if t1 or the cycle changes
+    // CycleTime (2026-09-30) -- ENTER THIS CPU'S OB1 CYCLE TIME HERE, nowhere else.
+    //   How: TIA > Online & diagnostics > Cycle time, run a program, take the LONGEST value.
+    //   Then also set SpinningCam's planning "T" to the same number.
+    //   Derived from it in FB_RecipeHandler: take-over lead = 2.5 x CycleTime (the best factor
+    //   at every cycle from 30 to 90 ms in the jerk-aware sim, docs/MotionSmoothing.md 9.8),
+    //   and the hand-over braking margin. Replaces VelPath_LeadTime (was 0.09 s, tuned for
+    //   the 45 ms that turned out to be PLCSIM's cycle, not this CPU's).
+    //   If a running program measures a longer cycle, the HMI shows WarningID 5 and
+    //   DB_Diagnostic.CycleTime_MaxRun_ms holds the number to put here.
+    "DB_MachineConfig".CycleTime            := 0.070;  // s -- real CPU 60-70 ms (user, 2026-09-30); confirm from the cycle statistics
     // VelPath_MaxDeviation is NOT written here (2026-09-16): it is operator-owned, set
     // from the HMI, and needs a manual TIA Retain tick (docs/RETAINED_TAGS.md). Do not
     // "complete" this block by adding it back -- that would reset the operator's value

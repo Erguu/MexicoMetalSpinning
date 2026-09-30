@@ -1087,6 +1087,8 @@ VERSION : 0.1
         vmErr       : Bool;         // Live instance pair reports Error (from last call)
         vmAborted   : Bool;         // Live instance pair was aborted by someone else
         vmMaxDev    : Real;         // VelPath_MaxDeviation clamped to VM_MAXDEV_MIN..VM_MAXDEV_MAX (mm), every scan
+        vmCycle     : Real;         // DB_MachineConfig.CycleTime clamped to VM_CYCLE_MIN..VM_CYCLE_MAX (s), every scan
+        vmLeadTime  : Real;         // Take-over lead time = VM_LEAD_FACTOR x vmCycle (s)
         vmVelX      : Real;         // Signed X velocity of the live segment (mm/s)
         vmVelZ      : Real;         // Signed Z velocity of the live segment (mm/s)
         vmDX        : Real;         // Launch vector, actual position -> line end (mm)
@@ -1104,7 +1106,7 @@ VERSION : 0.1
         vmAhead     : Real;         // How far this line's end point still is AHEAD of the axes, along the programmed segment (mm)
         vmNLat      : Real;         // Distance of the axes from the programmed segment line (mm)
         vmSkipDist  : Real;         // vmAhead at or below which the line counts as already passed (mm)
-        vmLeadDist  : Real;         // Distance the axes cover in VelPath_LeadTime at the live commanded speed (mm)
+        vmLeadDist  : Real;         // Distance the axes cover in #vmLeadTime at the live commanded speed (mm)
         vmLoop      : Int;          // Same-scan catch-up loop counter
         vmNextOK    : Bool;         // Next line may itself run in velocity mode (catch-up may skip into it)
         vmUnsupScans : Int;         // Safety net 2: consecutive scans a velocity instance is Busy with no command live
@@ -1137,7 +1139,7 @@ VERSION : 0.1
         // opening this block ONLINE in TIA (the CONST section shows the CPU's copy),
         // or by an online/offline compare. Deliberately written nowhere: a DB field
         // would force a second block to be imported and downloaded.
-        BUILD_TAG : String[16] := '2026-09-29c';
+        BUILD_TAG : String[16] := '2026-09-30a';
 
         STATE_IDLE : Int := 0;
         STATE_READ : Int := 10;
@@ -1163,6 +1165,13 @@ VERSION : 0.1
                                             //       roller-mandrel gap IS the 0.8 mm sheet, so a limit set above
                                             //       it no longer protects the mandrel -- it only catches a
                                             //       runaway. Commission with the smallest value that runs.
+        // Cycle-time derived values (2026-09-30). DB_MachineConfig.CycleTime is the one input;
+        // the lead factor is the best value at every cycle from 30 to 90 ms in the jerk-aware
+        // sim (docs/MotionSmoothing.md 9.8). The clamp keeps a typo (0, 7, 700) from making
+        // the lead zero or longer than a whole segment -- the half-segment cap still applies.
+        VM_CYCLE_MIN   : Real := 0.010;  // s
+        VM_CYCLE_MAX   : Real := 0.200;  // s
+        VM_LEAD_FACTOR : Real := 2.5;    // lead time = 2.5 x cycle time
         VM_UNSUPERVISED_SCANS : Int := 2;  // Safety net 2 grace: a hand-over MC_MoveAbsolute or MC_Halt aborts the
                                            // velocity command within ~1 scan; Busy on the 3rd scan = unsupervised
         // Hand-over speed floor: braking-distance test (2026-09-29, see STATE_EXEC).
@@ -1173,7 +1182,6 @@ VERSION : 0.1
         // estimate; a LONGER one (t1 back to 0.3) can bring the old crawl back on a line.
         VM_HO_JERK   : Real := 2564.0;  // mm/s^3 -- TO jerk (acc/t1 = dec/t2, t1 0.06 s)
         VM_HO_DEC    : Real := 184.6;   // mm/s^2 -- TO deceleration
-        VM_HO_SCAN   : Real := 0.045;   // s      -- OB1 cycle, measured 40-45 ms 2026-09-15
         VM_HO_MARGIN : Real := 2.0;     // covers servo following error and scan jitter the model ignores
         STATE_DONE : Int := 99;
         STATE_PAUSED : Int := 800;         // Pause entry: halt axes, then retract
@@ -1326,6 +1334,16 @@ BEGIN
     ELSIF #vmMaxDev > VM_MAXDEV_MAX THEN
         #vmMaxDev := VM_MAXDEV_MAX;
     END_IF;
+
+    // Cycle time -> lead time (2026-09-30). One configured number, clamped here once;
+    // every velocity-mode read uses #vmCycle / #vmLeadTime, never the raw config value.
+    #vmCycle := "DB_MachineConfig".CycleTime;
+    IF NOT (#vmCycle >= VM_CYCLE_MIN) THEN        // also catches NaN
+        #vmCycle := VM_CYCLE_MIN;
+    ELSIF #vmCycle > VM_CYCLE_MAX THEN
+        #vmCycle := VM_CYCLE_MAX;
+    END_IF;
+    #vmLeadTime := VM_LEAD_FACTOR * #vmCycle;
 
     // Move timeout timer -- only counts during STATE_WAIT and STATE_VEL_WAIT.
     // PT is DB_MachineConfig.Timeout_Motion (T#300S as configured in FC_LoadConfig).
@@ -2141,7 +2159,7 @@ BEGIN
         // same line. Everything below this block (feed, vector) uses the updated line.
         #vmSkipCount := 0;
         IF #vmEligible AND #vmActive AND NOT (#vmErr OR #vmAborted) THEN
-            #vmLeadDist := SQRT(#vmVelX * #vmVelX + #vmVelZ * #vmVelZ) * "DB_MachineConfig".VelPath_LeadTime;
+            #vmLeadDist := SQRT(#vmVelX * #vmVelX + #vmVelZ * #vmVelZ) * #vmLeadTime;
             FOR #vmLoop := 1 TO VM_CATCHUP_MAX DO
                 #vmNDX := #targX - #currX;
                 #vmNDZ := #targZ - #currZ;
@@ -2268,7 +2286,7 @@ BEGIN
             ELSE
                 #vmBrakeX := #vmBrakeV * #vmBrakeV / (2.0 * VM_HO_DEC) + #vmBrakeV * VM_HO_DEC / (2.0 * VM_HO_JERK);
             END_IF;
-            #vmBrakeX := VM_HO_MARGIN * (#vmBrakeX + #vmBrakeV * VM_HO_SCAN);
+            #vmBrakeX := VM_HO_MARGIN * (#vmBrakeX + #vmBrakeV * #vmCycle);
 
             #vmBrakeV := ABS(#vmVelZ);
             IF #vmBrakeV <= VM_HO_DEC * VM_HO_DEC / VM_HO_JERK THEN
@@ -2276,7 +2294,7 @@ BEGIN
             ELSE
                 #vmBrakeZ := #vmBrakeV * #vmBrakeV / (2.0 * VM_HO_DEC) + #vmBrakeV * VM_HO_DEC / (2.0 * VM_HO_JERK);
             END_IF;
-            #vmBrakeZ := VM_HO_MARGIN * (#vmBrakeZ + #vmBrakeV * VM_HO_SCAN);
+            #vmBrakeZ := VM_HO_MARGIN * (#vmBrakeZ + #vmBrakeV * #vmCycle);
 
             // currX/currZ hold the ACTUAL position here (set in the hand-over block above).
             IF #deltaX <= #vmBrakeX OR (#targX - #currX) * #vmVelX < 0.0 THEN
@@ -2307,7 +2325,7 @@ BEGIN
             // Lead distance, capped at HALF the segment. The cap is what keeps a slow
             // scan safe: at a ~100 ms OB1 cycle and 5 mm/s the uncapped lead can exceed
             // a whole 1 mm chord, and every line would then be "done" on arrival.
-            #vmSwitchDist := MIN(IN1 := #feedrate * "DB_MachineConfig".VelPath_LeadTime,
+            #vmSwitchDist := MIN(IN1 := #feedrate * #vmLeadTime,
                                  IN2 := 0.5 * #vmDist);
 
             // Short-segment catch-up (2026-09-14). With a slow scan a short line (the
@@ -2327,7 +2345,7 @@ BEGIN
                 #vmAhead := 0.0;
                 #vmNLat := 0.0;
             END_IF;
-            #vmSkipDist := MIN(IN1 := #feedrate * "DB_MachineConfig".VelPath_LeadTime,
+            #vmSkipDist := MIN(IN1 := #feedrate * #vmLeadTime,
                                IN2 := 0.5 * #vmNLen);
 
             IF #vmActive AND (#vmErr OR #vmAborted) THEN

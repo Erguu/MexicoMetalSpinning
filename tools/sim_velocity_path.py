@@ -17,8 +17,12 @@ object's jerk-limited velocity profile.
 
 What it models:
   * PLC side, once per scan (--scan): the handler logic reads the axis position, and a new
-    velocity command takes effect at the end of the scan that launches it (READ and EXEC
+    velocity command is issued at the end of the scan that launches it (READ and EXEC
     share a scan; VEL_WAIT's completion costs one).
+  * PTO slice (--slice, added 2026-09-30): the TO takes a new command only at the next
+    boundary of its segment clock (Actor.PTOSliceTime, 10 ms on this machine). The slice
+    clock is not synchronised with the scan, so each run is simulated at four phases and
+    the worst is reported. --slice 0 restores the old instant-take-over model.
   * TO side, every --dt (1 ms): each axis moves its velocity toward the last command with
     acceleration limited to --acc (speeding up) / --dec (slowing down) and jerk limited to
     acc/t1 / dec/t2 -- the S7 smoothing times as set in the TO. A new command mid-ramp
@@ -119,10 +123,14 @@ def axis_step(v, a, vt, dt, A, D, JA, JD):
     return nv, a
 
 
-def simulate(lines, start, end, T, lead, maxdev, dyn, dt=0.001, override=1.0, catchup_max=10):
+def simulate(lines, start, end, T, lead, maxdev, dyn, dt=0.001, override=1.0, catchup_max=10,
+             slice_t=0.0, slice_phase=0.0):
     pos = lines[start - 1][:2]
     path = [lines[g][:2] for g in range(start - 1, end + 2)]
     vel = (0.0, 0.0)                       # COMMANDED vector (vmVelX/Z) -- what the PLC logic reads
+    tov = (0.0, 0.0)                       # vector the TO is actually tracking (lags vel by the PTO slice)
+    queued, t_eff = None, 0.0              # command waiting for the next PTO slice boundary
+    tnow = 0.0
     act = [0.0, 0.0]                       # actual TO velocity per axis
     acl = [0.0, 0.0]                       # actual TO acceleration per axis
     lim = [(dyn.acc, dyn.dec, dyn.jacc, dyn.jdec)] * 2
@@ -197,20 +205,30 @@ def simulate(lines, start, end, T, lead, maxdev, dyn, dt=0.001, override=1.0, ca
             if rem <= sw:
                 cur = (tx, tz); li += 1; state = "READ"
         if pending:
+            # The PLC variable changes now; the TO picks it up at the next PTO slice
+            # boundary (Actor.PTOSliceTime). slice_t = 0 -> immediately (old model).
             vel, pending = pending, None
-            if dyn.ideal:
-                act, acl = list(vel), [0.0, 0.0]
-            elif dyn.sync:
-                # Proposal F: scale each axis's limits so both finish their change together.
-                dv = [abs(vel[i] - act[i]) for i in (0, 1)]
-                m = max(dv)
-                ac = min(dyn.acc, dyn.dec)
-                jc = min(dyn.jacc, dyn.jdec)
-                lim = [(ac * k, ac * k, jc * k, jc * k)
-                       for k in ((d / m if m > 0.0 else 1.0) for d in dv)]
+            queued = vel
+            if slice_t > 0.0:
+                t_eff = slice_phase + math.ceil((tnow - slice_phase) / slice_t - 1e-9) * slice_t
+            else:
+                t_eff = tnow
         seg = li - start
         window = range(max(0, seg - 8), min(len(path) - 1, seg + 3))
         for _ in range(nsub):
+            if queued is not None and tnow >= t_eff - 1e-9:
+                tov, queued = queued, None
+                if dyn.ideal:
+                    act, acl = list(tov), [0.0, 0.0]
+                elif dyn.sync:
+                    # Proposal F: scale each axis's limits so both finish their change together.
+                    dv = [abs(tov[i] - act[i]) for i in (0, 1)]
+                    m = max(dv)
+                    ac = min(dyn.acc, dyn.dec)
+                    jc = min(dyn.jacc, dyn.jdec)
+                    lim = [(ac * k, ac * k, jc * k, jc * k)
+                           for k in ((d / m if m > 0.0 else 1.0) for d in dv)]
+            tnow += h
             nxt = [pos[0], pos[1]]
             for i in (0, 1):
                 if dyn.ideal:
@@ -218,7 +236,7 @@ def simulate(lines, start, end, T, lead, maxdev, dyn, dt=0.001, override=1.0, ca
                 else:
                     A, D, JA, JD = lim[i]
                     v0 = act[i]
-                    act[i], acl[i] = axis_step(v0, acl[i], vel[i], h, A, D, JA, JD)
+                    act[i], acl[i] = axis_step(v0, acl[i], tov[i], h, A, D, JA, JD)
                     nxt[i] += 0.5 * (v0 + act[i]) * h
             pos = (nxt[0], nxt[1])
             d = min(seg_dist(pos, path[k], path[k + 1]) for k in window)
@@ -231,9 +249,11 @@ def simulate(lines, start, end, T, lead, maxdev, dyn, dt=0.001, override=1.0, ca
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("recipe")
-    ap.add_argument("--scan", type=float, default=0.045,
-                    help="OB1 cycle time s (default 0.045, measured 40-45 ms 2026-09-15)")
-    ap.add_argument("--lead", type=float, default=0.09, help="VelPath_LeadTime s (default 0.09, the PLC value)")
+    ap.add_argument("--scan", type=float, default=0.070,
+                    help="OB1 cycle time s = DB_MachineConfig.CycleTime (default 0.070: real CPU 60-70 ms, "
+                         "user 2026-09-30; the old 0.045 was PLCSIM's cycle)")
+    ap.add_argument("--lead", type=float, default=None,
+                    help="take-over lead time s (default 2.5 x --scan, the PLC's VM_LEAD_FACTOR rule)")
     ap.add_argument("--maxdev", type=float, default=0.3, help="VelPath_MaxDeviation mm (PLC start value 2.0; PLC clamps 0.05..5.0)")
     ap.add_argument("--override", type=float, default=1.0, help="feed override factor (1.0 = 100 percent)")
     ap.add_argument("--acc", type=float, default=153.8423, help="TO acceleration mm/s^2")
@@ -241,12 +261,17 @@ def main():
     ap.add_argument("--t1", type=float, default=0.06, help="TO smoothing time t1 s (jerk = acc / t1)")
     ap.add_argument("--t2", type=float, default=0.072, help="TO smoothing time t2 s (jerk = dec / t2)")
     ap.add_argument("--dt", type=float, default=0.001, help="TO integration step s")
+    ap.add_argument("--slice", type=float, default=0.010,
+                    help="PTO segment time s (TO tag Actor.PTOSliceTime, 2..20 ms; this machine 10 ms, "
+                         "user 2026-09-30). A new command reaches the axis at the next slice boundary. 0 = instantly")
+    ap.add_argument("--slice-phase", type=float, default=None,
+                    help="offset of the slice clock against the scan clock s. Default: worst of 4 phases")
     ap.add_argument("--ideal", action="store_true", help="old model: commands apply instantly")
     ap.add_argument("--sync", action="store_true", help="proposal F: synchronised axis ramps")
     args = ap.parse_args()
     if args.ideal and args.sync:
         ap.error("--ideal and --sync are exclusive")
-    lead = args.lead
+    lead = args.lead if args.lead is not None else 2.5 * args.scan
     dyn = Dyn(args.acc, args.dec, args.t1, args.t2, ideal=args.ideal, sync=args.sync)
     lines = load(args.recipe)
     runs = runs_of(lines)
@@ -257,11 +282,16 @@ def main():
              f"jerk {dyn.jacc:.0f}/{dyn.jdec:.0f} mm/s3, acc/dec {args.acc}/{args.dec}"
              + (", SYNC ramps" if args.sync else ""))
     print(f"{args.recipe}: {len(lines)} lines, {len(runs)} run(s), scan {args.scan} s, "
-          f"lead {lead:.4f} s, maxdev {args.maxdev} mm, override {args.override:.0%}")
+          f"lead {lead:.4f} s, maxdev {args.maxdev} mm, override {args.override:.0%}, "
+          f"PTO slice {args.slice * 1000:.0f} ms")
     print(f"  model: {model}")
     worst, faults = 0.0, 0
     for s, e in runs:
-        r = simulate(lines, s, e, args.scan, lead, args.maxdev, dyn, args.dt, args.override)
+        phases = ([args.slice_phase] if args.slice_phase is not None or args.slice <= 0.0
+                  else [k * args.slice / 4.0 for k in range(4)])
+        rs = [simulate(lines, s, e, args.scan, lead, args.maxdev, dyn, args.dt, args.override,
+                       slice_t=args.slice, slice_phase=ph or 0.0) for ph in phases]
+        r = next((x for x in rs if "fault" in x), None) or max(rs, key=lambda x: x["dev_mm"])
         print(f"  lines {s}..{e + 1}: {r}")
         if "fault" in r:
             faults += 1

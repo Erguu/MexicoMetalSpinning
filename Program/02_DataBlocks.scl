@@ -393,15 +393,19 @@ VERSION : 0.3
         FeedrateConvFactor : Real := 60.0; // divisor to convert recipe F (mm/min) to axis velocity (mm/s)
 
         // EXPERIMENTAL -- velocity-mode continuous path (branch exp/velocity-path-350).
-        // VelPath_Enable and VelPath_LeadTime are written by FC_LoadConfig on every
-        // restart, so an online change lasts until the next power cycle. VelPath_Enable
-        // is forced FALSE there -- the experiment must be switched on deliberately.
+        // VelPath_Enable and CycleTime are written by FC_LoadConfig on every restart, so
+        // an online change lasts until the next power cycle.
         // VelPath_MaxDeviation is OPERATOR-OWNED (2026-09-16): HMI-editable, NOT written
         // by FC_LoadConfig, needs a manual Retain tick (docs/RETAINED_TAGS.md). Without
         // the tick it falls back to the start value below at power-up.
         // Design and test plan: docs/MotionSmoothing.md section 9.
         VelPath_Enable       : Bool := TRUE; // TRUE = runs of G1 lines use MC_MoveVelocity (no stop per line)
-        VelPath_LeadTime     : Real := 0.09;   // s -- next line takes over at feed x this before the end point (capped at half the segment). Tuned with the jerk-aware sim (scan 45 ms, t1 0.06)
+        // CycleTime (2026-09-30) replaces VelPath_LeadTime. THE ONE PLACE to enter this
+        // CPU's OB1 cycle time -- set it in FC_LoadConfig, per project/machine. FB_RecipeHandler
+        // derives the take-over lead time (2.5 x CycleTime) and the hand-over braking margin
+        // from it, and FB_Process warns (WarningID 5) when a running program measures a longer
+        // cycle (DB_Diagnostic.CycleTime_*). SpinningCam's planning "T" must carry the same value.
+        CycleTime            : Real := 0.070;  // s -- LONGEST OB1 cycle of this CPU (TIA Online & diagnostics > Cycle time). Clamped 0.010..0.200 in FB_RecipeHandler
         VelPath_MaxDeviation : Real := 2.0;   // mm -- HMI-EDITABLE. Start value raised 1.0 -> 2.0 on 2026-09-21 (user). Off-path / backwards distance that faults with 16#000F. PLC clamps to 0.05..5.0 (VM_MAXDEV_MIN/MAX in 05_RecipeHandler.scl -- the clamped value is what the fault text prints). Above 0.8 mm (the final-pass roller-mandrel gap = sheet thickness) it no longer protects the mandrel
 
         // Tool Configuration -- HMI-EDITABLE: active slot count (1-4)
@@ -709,6 +713,15 @@ NON_RETAIN
         // regardless of AlwaysHomeOnAutoStart. Useful on the HMI to explain to the
         // operator why a cycle homed when fast cycle mode is enabled.
         Require_Homing : Bool;
+
+        // =========================================================
+        // CPU CYCLE TIME (2026-09-30) -- measured by FB_Process with RD_SYS_T,
+        // compare with DB_MachineConfig.CycleTime (the value the velocity path is tuned for)
+        // =========================================================
+        CycleTime_ms        : DInt;   // Last OB1 cycle
+        CycleTime_Max_ms    : DInt;   // Longest cycle since power-up (any state; startup/download spikes included)
+        CycleTime_MaxRun_ms : DInt;   // Longest cycle while RUNNING since the last program start -- the number to enter
+                                      // in CycleTime. Zeroed at every Start and by Reset. Drives WarningID 5
 
         // =========================================================
         // ERROR CONTEXT

@@ -8,6 +8,19 @@ a clean, safe, runnable state — regardless of where the machine was when it fa
 
 **Rule reference:** See "Reset-Path Rule" section in `CLAUDE.md` for the four mandatory checkpoints.
 
+## FB_Process — CPU cycle-time check, WarningID 5 (2026-09-30) — CLEARED
+
+- **`#bCycleTooLong` is level-computed every scan** from `DB_Diagnostic.CycleTime_MaxRun_ms` and
+  `DB_MachineConfig.CycleTime` / `VelPath_Enable`. No latch of its own.
+- **The peak it reads is zeroed on both exit paths the operator uses:** the Start edge (the
+  existing `RECIPE_LOAD` entry block beside the `DB_Production` start counter) and the hard reset
+  (`bDoHardReset`). So Reset dismisses the banner, and every program is measured afresh. STOPPED
+  and ERROR deliberately do **not** clear it — the warning reports the program that just ran.
+- **The banner clears through the existing chain:** `WarningID = 5` is the lowest branch of the
+  every-scan if/else whose `ELSE` writes 0. No timer, no physical output.
+- The measurement statics (`cycPrevMs`, `cycPrevValid`, ...) need no reset: a stale sample only
+  produces one delta, and anything outside 1..5000 ms is ignored.
+
 ## FB_Process — ToolHeadLock tool-axis interlock (2026-08-14, extended 2026-08-17) — CLEARED
 
 - **No reset path required, by construction.** `#bToolLockEngaged`, `#bToolAxisBlocked` and

@@ -2,7 +2,7 @@
 
 **Status:** Analysis. Items #1–#3 not done. **Item #4 implemented 2026-09-02** (see
 `RecipeHandler_ScanLatency.md`).
-**Updated:** 2026-09-02
+**Updated:** 2026-09-30 (§9.8: ramp options, PTO slice time, real cycle time)
 
 The machine stops at every recipe point instead of cutting continuously. This document says
 why, and what to change.
@@ -414,7 +414,8 @@ No new timer. `tonMoveTimeout` is reused and reset at every launch.
 | Tag | Default | Meaning |
 |---|---|---|
 | `VelPath_Enable` | **FALSE** (forced every restart) | Master switch. Set online to try it |
-| `VelPath_LeadTime` | **0.09 s** (was 0.0675 until 2026-09-16) | Next line takes over at `feed × this` before the end point (0.34 mm at 5 mm/s), **capped at half the segment**. Rule: **≈ 1.5 × OB1 cycle time.** History: 0.05 s (assumed 10 ms scan) → 0.15 s (recalled ~100 ms, 2026-09-14) → **0.0675 s, cycle measured 40–45 ms (2026-09-15)**. Simulated on program 1 (357 `CMD=2` lines, 10 runs, max turn 23°): lead 0.15 / 0.09 / **0.0675** / 0.045 s → worst path error 0.167 / 0.046 / **0.023** / 0.041 mm, corner miss 0.132 / 0.084 / **0.064** / 0.043 mm, no faults. **Those figures are from the old instant-velocity model.** With jerk modelled (2026-09-16, §9.6 item 5) the optimum moves to **≈0.09 s** (0.164 → 0.115 mm on the 2026-09-16 export). Too long overshoots into passed points; too short lands late |
+| `CycleTime` (**replaces `VelPath_LeadTime` since 2026-09-30**) | **0.070 s** | The CPU's longest OB1 cycle, entered once in `FC_LoadConfig`. The handler derives lead = **2.5 × CycleTime** (best factor at every cycle 30–90 ms, §9.8) and the hand-over braking margin from it; `FB_Process` warns (WarningID 5) when a running program measures longer. |
+| *(history)* `VelPath_LeadTime` | 0.09 s (was 0.0675 until 2026-09-16) | Next line takes over at `feed × this` before the end point (0.34 mm at 5 mm/s), **capped at half the segment**. Rule: **≈ 1.5 × OB1 cycle time.** History: 0.05 s (assumed 10 ms scan) → 0.15 s (recalled ~100 ms, 2026-09-14) → **0.0675 s, cycle measured 40–45 ms (2026-09-15)**. Simulated on program 1 (357 `CMD=2` lines, 10 runs, max turn 23°): lead 0.15 / 0.09 / **0.0675** / 0.045 s → worst path error 0.167 / 0.046 / **0.023** / 0.041 mm, corner miss 0.132 / 0.084 / **0.064** / 0.043 mm, no faults. **Those figures are from the old instant-velocity model.** With jerk modelled (2026-09-16, §9.6 item 5) the optimum moves to **≈0.09 s** (0.164 → 0.115 mm on the 2026-09-16 export). Too long overshoots into passed points; too short lands late |
 | `VelPath_MaxDeviation` | **2.0 mm** (start value, raised from 1.0 on 2026-09-21) | Off-path / backwards fault threshold. **Operator-owned since 2026-09-16:** HMI-editable, *not* written by `FC_LoadConfig`, needs a Retain tick; the handler clamps it to `VM_MAXDEV_MIN..VM_MAXDEV_MAX` = **0.05..5.0 mm** into `#vmMaxDev`, and every guard reads the clamped copy. Fault texts show the limit in force — **the clamped one**, which is why a value typed above the ceiling looks like it was ignored. **The ceiling was 1.0 until 2026-09-21** (user: raising the tag on the HMI still faulted at `limit 1.0`). Made adjustable at all because `16#000F` kept firing on the machine. **The meaning changes above 0.8 mm:** on the final pass the roller–mandrel gap *is* the sheet thickness, so a limit above it no longer protects the mandrel — it only catches a runaway. Commission with the smallest value that runs |
 
 Online changes last until the next power cycle — deliberate for an experiment.
@@ -496,5 +497,87 @@ Online changes last until the next power cycle — deliberate for an experiment.
 | 3 | Same, press Pause mid-run, then Continue | Halts, retracts, returns, carries on | — |
 | 4 | Same, press Stop mid-run; then Reset mid-run | Axes stop; Reset → no motion afterwards | **Stop testing** — a runaway guard is broken |
 | 5 | Drive power on, mandrel empty, flag on, one roughing pass | Continuous motion, no stop per line | Flag off |
-| 6 | Time the same pass as step 1 | Close to programmed feed | Tune `VelPath_LeadTime` |
+| 6 | Time the same pass as step 1 | Close to programmed feed | Check `DB_Diagnostic.CycleTime_MaxRun_ms` against `DB_MachineConfig.CycleTime` |
 | 7 | Cut a part, compare with a flag-off part | Finish at least as good | Flag off, record why |
+
+### 9.8 Ramp options, PTO slice time and the real cycle time (2026-09-30, simulation only)
+
+**Two new inputs (user, 2026-09-30):**
+
+- **PTO segment time.** The TO tag `Actor.PTOSliceTime` ("segment time for PTO", 2..20 ms, TO V7+)
+  is **10 ms** on this machine. A new motion command reaches the axis only at the next slice
+  boundary (Siemens S7-1200 Motion Control V6–V7 manual, p. 293). `tools/sim_velocity_path.py`
+  now models it (`--slice`, default 0.010; the slice clock is not synchronised with the scan, so
+  each run is simulated at four phases and the worst is reported). `--slice 0` gives the old
+  model exactly (program 1: 0.5666 mm both ways).
+- **The real cycle time is 60–70 ms, not 40–45.** The 2026-09-15 figure was taken in PLCSIM
+  (user). Not yet confirmed from the CPU's own cycle statistics — **do that first** (TIA → Online &
+  diagnostics → Cycle time: shortest / current / longest). Every lead-time and corner number in
+  §9.2–9.6 was tuned for 45 ms.
+
+**Results** — `tools/sim_velocity_path.py`, 10 ms slice, `--maxdev 5` so nothing faults, best lead
+time per cell (L). Cell = worst path error mm / runs over 0.3 mm (the production guard target).
+Exports of 2026-09-29: program 1 (800 lines, 84 runs), program 2 (84 runs), program 3 (10 runs).
+
+| Option | Program 1 | Program 2 | Program 3 |
+|---|---|---|---|
+| OB1 45 ms, today's TO (the old assumption) | 0.47 / 24 (L 0.15) | 0.55 / 16 (L 0.15) | 0.65 / 9 (L 0.15) |
+| **OB1 65 ms, today's TO, today's lead 0.09** | **0.79** | **0.73** | **1.20** |
+| OB1 65 ms, today's TO, lead 0.15 | 0.70 / 31 | 0.69 / 23 | 0.75 / 10 |
+| OB1 65 ms, t1 0.03 s | 0.55 / 26 (L 0.12) | 0.57 / 19 (L 0.15) | 0.66 / 10 (L 0.15) |
+| OB1 65 ms, acceleration ×2 | 0.60 / 17 (L 0.09) | 0.61 / 22 (L 0.09) | 0.69 / 10 (L 0.15) |
+| OB1 65 ms, acc ×2 + t1 0.03 s | 0.56 / 18 (L 0.0675) | 0.56 / 29 (L 0.0675) | 0.60 / 9 (L 0.15) |
+| OB1 65 ms, synchronised ramps (`--sync`) | 0.76 / 17 | 0.74 / 9 | 0.81 / 10 |
+| OB1 65 ms, feed 80 % (stands in for CAM corner slow-down) | 0.42 / 8 | 0.44 / 3 | 0.49 / 10 |
+| 10 ms cyclic-interrupt OB, today's TO | 0.39 / 21 (L 0.045) | 0.39 / 13 (L 0.0675) | 0.25 / 0 (L 0.0675) |
+| **10 ms OB + acc ×2 + t1 0.03 s** | **0.21 / 0** (L 0.03) | **0.20 / 0** (L 0.045) | **0.13 / 0** (L 0.0675) |
+| same, slice 5 ms | 0.20 / 0 | 0.20 / 0 | 0.12 / 0 |
+
+Lead sweep at 65 ms, today's TO: 0.15 is the optimum on all three programs (0.18 equal, 0.21+
+worse). Acceleration ×2 = 307.7 / 369.2 mm/s² (acc / dec), jerk kept as acc / t1.
+
+**What it says:**
+
+1. **At the real cycle time, today's settings are worse than we thought:** up to 1.2 mm on
+   program 3 with lead 0.09 — above the 0.8 mm final-pass sheet gap. Raising
+   `VelPath_LeadTime` to **0.15 s** brings it to ~0.75 mm. That is a one-value change, but only
+   after the cycle time is confirmed on the CPU. The hand-over speed floor's `VM_HO_SCAN`
+   (0.045) and SpinningCam's planning `T=0.045` came from the same wrong number — both need
+   the real value.
+2. **With a 65 ms OB1, the axis settings barely matter** (0.70 → 0.55 at best). The cycle
+   timing is the dominant error. This reverses the 2026-09-29 conclusion, which assumed 45 ms
+   and no slice.
+3. **The 10 ms cyclic-interrupt OB is the main lever**, and it is the only option that gets
+   every run of every program under 0.3 mm — together with acc ×2 + t1 0.03. That is the level
+   where `VelPath_MaxDeviation` could be tightened far enough to protect the mandrel.
+4. **Synchronised ramps: no gain** — third time this has been shown. Drop it.
+5. **Slice 5 ms instead of 10: no gain.** Leave `PTOSliceTime` at 10.
+
+**Caveats.** The model has no servo following error and was ~25 % optimistic against the one
+machine measurement (§9.6 item 3). It does not include the run-end `MC_MoveAbsolute` hand-over
+(the separate X-move problem, §9.2). Acc ×2 is a mechanical/servo question the model cannot
+answer; `MC_ChangeDynamic` could apply it only during velocity runs. Rules for starting motion
+commands from a cyclic-interrupt OB: the same instance must never be called from two priority
+classes without interlocking (manual p. 178, p. 251) — so every instance the velocity core uses
+moves into that OB together. MC-PreServo/MC-PostServo (OB67/OB95) are for PROFIdrive/analog
+axes, not PTO, and are not the place for it.
+
+**Implemented 2026-09-30 (NOT compiled, BUILD_TAG `2026-09-30a`):** the cycle time is now one
+setting, `DB_MachineConfig.CycleTime` (FC_LoadConfig, 0.070 s). `VelPath_LeadTime` and the
+`VM_HO_SCAN` CONST are gone; the handler derives lead = `VM_LEAD_FACTOR` (2.5) × CycleTime and
+uses CycleTime in the hand-over braking margin. The factor comes from a sweep (worst of programs
+1–3, today's TO, 10 ms slice; mm):
+
+| Cycle | ×1.0 | ×1.5 | ×2.0 | **×2.5** | ×3.0 | ×3.5 |
+|---|---|---|---|---|---|---|
+| 30 ms | 0.73 | 0.66 | 0.55 | **0.53** | 0.55 | 0.55 |
+| 45 ms | 0.82 | 0.76 | 0.77 | **0.77** | 0.77 | 0.55 |
+| 60 ms | 0.95 | 0.96 | 0.96 | **0.71** | 0.71 | 0.74 |
+| 70 ms | 1.09 | 1.22 | 0.84 | **0.81** | 0.81 | 0.92 |
+| 90 ms | 1.62 | 1.88 | 1.35 | **1.35** | 1.35 | 1.46 |
+
+`FB_Process` measures the OB1 cycle with `RD_SYS_T` into `DB_Diagnostic.CycleTime_ms` (last),
+`CycleTime_Max_ms` (since power-up) and `CycleTime_MaxRun_ms` (longest while RUNNING since the
+last Start; zeroed by Start and Reset). WarningID 5 when `CycleTime_MaxRun_ms > CycleTime × 1.2`
+with velocity mode on. `tools/sim_velocity_path.py` defaults follow the same rule (`--scan`
+0.070, lead 2.5 × scan); `tools/split_recipe_db.py` `HANDOVER_SCAN` = 0.070.

@@ -1022,6 +1022,18 @@ VERSION : 4.0
         // in a PNP zone. Home/HomeAll are NOT included -- homing is the escape. Level-computed
         // every scan from #State alone, like bToolAxisBlocked above, so it needs no reset path.
         bBlindMoveBlocked  : Bool;
+        // CPU cycle-time check (2026-09-30). The velocity path is tuned for
+        // DB_MachineConfig.CycleTime; if a running program measures a longer OB1 cycle the
+        // HMI shows WarningID 5 so a changed project or CPU load is noticed, not guessed.
+        // Recomputed every scan from DB_Diagnostic.CycleTime_MaxRun_ms, which Start and
+        // Reset zero -- so it needs no reset entry of its own.
+        bCycleTooLong      : Bool;
+        cycTimeNow         : DTL;    // RD_SYS_T sample, this scan
+        cycTimeStatus      : Int;    // RD_SYS_T return value (<> 0 -> sample ignored)
+        cycNowMs           : DInt;   // this scan's time of day, ms
+        cycPrevMs          : DInt;   // previous scan's time of day, ms
+        cycDeltaMs         : DInt;   // this cycle, ms
+        cycPrevValid       : Bool;   // FALSE on the first scan after power-up / download
                                     // Both recomputed every scan -- no reset path needed
         prevManualError : Bool;  // Edge detection: manual mode error
         prevMDIExec : Bool;      // Edge detection: manual MDI execute button (STATE_MANUAL)
@@ -1163,6 +1175,10 @@ VERSION : 4.0
         // spindle turning unattended for hours. The clamp is the reason the config value
         // can safely be a plain Int the operator types into.
         SAND_TIME_MAX_S : Int := 600;
+        // Cycle-time warning (2026-09-30): the longest RUNNING cycle may exceed the configured
+        // DB_MachineConfig.CycleTime by this factor before WarningID 5 appears. 1.2 keeps scan
+        // jitter from nagging; a real change (a heavier project, more HMI traffic) clears it.
+        CYCLE_WARN_FACTOR : Real := 1.2;
     END_CONST
 BEGIN
     // Update HMI displays
@@ -1630,7 +1646,7 @@ BEGIN
     // transient interlock message. A blocked tool jog therefore shows no banner while
     // the bypass is on; the jog is still refused, which is the part that matters.
     "DB_HMI".HasWarning := "DB_HMI".Bypass_EStop OR #bToolAxisBlocked
-                           OR #bToolStepBlocked OR #bBlindMoveBlocked;
+                           OR #bToolStepBlocked OR #bBlindMoveBlocked OR #bCycleTooLong;
     IF "DB_HMI".Bypass_EStop THEN
         "DB_HMI".WarningID      := 1;
     ELSIF #bToolAxisBlocked OR #bToolStepBlocked THEN
@@ -1650,6 +1666,14 @@ BEGIN
         // #bBlindMoveBlocked is assigned near the bottom of this FB, so this reads the previous
         // scan's value; harmless, because STATE_PNP_HALT is held for many scans.
         "DB_HMI".WarningID      := 4;
+    ELSIF #bCycleTooLong THEN
+        // 2026-09-30: the last program ran with a longer OB1 cycle than
+        // DB_MachineConfig.CycleTime, so the velocity path's lead time is too short and
+        // corners cut further than simulated. Lowest priority -- it is a tuning hint, never
+        // a reason to hide an interlock message. The number to enter is in
+        // DB_Diagnostic.CycleTime_MaxRun_ms. Clears at the next Start or Reset.
+        // #bCycleTooLong is assigned near the bottom of this FB (previous scan's value).
+        "DB_HMI".WarningID      := 5;
     ELSE
         "DB_HMI".WarningID      := 0;
     END_IF;
@@ -1761,6 +1785,7 @@ BEGIN
             #bRequireHoming := TRUE;
         END_IF;
         #bHaltAllAxes    := TRUE;   // ITEM-31: abort any in-progress MC_Home before clearing state
+        "DB_Diagnostic".CycleTime_MaxRun_ms := 0;   // dismisses WarningID 5 (bCycleTooLong follows)
         #State           := STATE_STOPPED;
         #Error           := FALSE;
         #bPauseActive    := FALSE;
@@ -3603,6 +3628,7 @@ BEGIN
         "DB_Production".TotalStarted := "DB_Production".TotalStarted + 1;
         #prodTimeStatus := RD_SYS_T(OUT => #prodTimeNow);
         "DB_Production".CurrentStartTime := #prodTimeNow;
+        "DB_Diagnostic".CycleTime_MaxRun_ms := 0;   // cycle-time check measures each program afresh
     END_IF;
     
     // Edge: OK complete (enter state 100)
@@ -4192,6 +4218,38 @@ BEGIN
     // Pair it with DB_Diagnostic.Recipe_LoadedProgram on the HMI: slot number + name +
     // loaded-slot is enough for an operator to catch a wrong selection before pressing Start.
     "DB_HMI".LoadedProgramName           := "DB_SelectedRecipe".Header.sName;
+
+    // CPU cycle time (2026-09-30). Time between two passes through this line = one OB1
+    // cycle. RD_SYS_T is already used for production logging; converted to ms of the day,
+    // with the midnight wrap handled. A sample outside 1..5000 ms (clock set, NTP step,
+    // download) is ignored rather than trusted. The RUNNING peak is what the velocity path
+    // cares about -- other states (loading, homing) are not moving on a velocity path.
+    #cycTimeStatus := RD_SYS_T(OUT => #cycTimeNow);
+    IF #cycTimeStatus = 0 THEN
+        #cycNowMs := USINT_TO_DINT(#cycTimeNow.HOUR) * 3600000 + USINT_TO_DINT(#cycTimeNow.MINUTE) * 60000
+                     + USINT_TO_DINT(#cycTimeNow.SECOND) * 1000 + UDINT_TO_DINT(#cycTimeNow.NANOSECOND / 1000000);
+        IF #cycPrevValid THEN
+            #cycDeltaMs := #cycNowMs - #cycPrevMs;
+            IF #cycDeltaMs < 0 THEN
+                #cycDeltaMs := #cycDeltaMs + 86400000;   // midnight
+            END_IF;
+            IF #cycDeltaMs >= 1 AND #cycDeltaMs <= 5000 THEN
+                "DB_Diagnostic".CycleTime_ms := #cycDeltaMs;
+                IF #cycDeltaMs > "DB_Diagnostic".CycleTime_Max_ms THEN
+                    "DB_Diagnostic".CycleTime_Max_ms := #cycDeltaMs;
+                END_IF;
+                IF #State = STATE_RUNNING AND #cycDeltaMs > "DB_Diagnostic".CycleTime_MaxRun_ms THEN
+                    "DB_Diagnostic".CycleTime_MaxRun_ms := #cycDeltaMs;
+                END_IF;
+            END_IF;
+        END_IF;
+        #cycPrevMs := #cycNowMs;
+        #cycPrevValid := TRUE;
+    END_IF;
+    // Only meaningful while velocity mode is on -- nothing else depends on CycleTime.
+    #bCycleTooLong := "DB_MachineConfig".VelPath_Enable
+                      AND DINT_TO_REAL("DB_Diagnostic".CycleTime_MaxRun_ms)
+                          > "DB_MachineConfig".CycleTime * 1000.0 * CYCLE_WARN_FACTOR;
     // Sanding dwell in progress (2026-08-29). Continuous mirror of the FB_Process latch,
     // so it appears in no reset path by design -- it follows #bSandActive to FALSE on
     // every exit (dwell expiry, Start, Stop, hard reset, error).
