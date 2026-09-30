@@ -681,6 +681,7 @@ load-memory recipe change — see `Program/docs/LOADMEM_COPY_ON_SELECT.md`.
 | `fbRecipeLoader.Done` | PRE_SCAN (12), writes `DB_Diagnostic.Recipe_LoadedProgram` |
 | `fbRecipeLoader.Error`, `ErrorPhase` 1/2 | ERROR (999) with `16#0312`; `DB_Diagnostic.Error_Text` carries `ErrorPhase` (1 = Header, 2 = Lines) + `READ_DBL` RET_VAL (16#FFFF = watchdog) |
 | `fbRecipeLoader.Error`, `ErrorPhase` 3 | ERROR (999) with `16#0314` — every transfer returned `RET_VAL = 0` and the END marker never arrived, `LINES_RETRY_MAX` times over. Not a `READ_DBL` fault: check that the recipe DB in the CPU actually holds data (re-import `gcodes/DB_RecipeProgramN.scl`) |
+| `fbRecipeLoader.Error`, `ErrorPhase` 5 | ERROR (999) with `16#0314` — `Header.LineCount` is 0 or larger than the loader's `LINES_MAX` (2026-09-30). No chunk was transferred. The CPU's loader geometry and the CAM export's capacity disagree: download the matching build or re-export |
 
 **Why it runs on every cycle start.** It is tempting to skip the copy when the same program is already
 in the buffer. Do not. A recipe re-downloaded from CAM changes load memory while `DB_SelectedRecipe`

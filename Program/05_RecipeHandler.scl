@@ -111,11 +111,14 @@ VERSION : 0.3
         Error         : Bool;       // Copy failed -- FB_Process raises 16#0312 or 16#0314
         ErrorCode     : Word;       // READ_DBL RET_VAL, latched. Two sentinels that are
                                     // NOT RET_VAL values: 16#FFFF = watchdog timeout,
-                                    // 16#0314 = a chunk never arrived intact
+                                    // 16#0314 = a chunk never arrived intact, or
+                                    // (ErrorPhase 5) LineCount out of range
         ErrorPhase    : Int;        // 1 = Header transfer, 2 = chunk transfer (RET_VAL),
                                     // 3 = chunk verify (RET_VAL said OK, data did not arrive),
                                     // 4 = checksum mismatch (it all arrived, but it is not
                                     //     the recipe the CAM exported)
+                                    // 5 = Header.LineCount outside 1..LINES_MAX (the
+                                    //     export is longer than this build holds)
         ErrorChunk    : Int;        // Which chunk failed (1..CHUNK_COUNT), 0 = Header or
                                     // the assembled-buffer end-marker check
         RetryTotal    : Int;        // Re-issued transfers across the WHOLE load, cleared
@@ -532,11 +535,28 @@ BEGIN
         // The Header has landed, so LineCount is known before the first chunk.
         // Latch it here: the checksum fold needs it per line, and re-reading the
         // Header 1000 times would make a moving target of the bound.
+        //
+        // LINECOUNT GUARD (2026-09-30). A Header claiming more lines than this
+        // build holds is refused HERE, before any chunk moves. Without it the
+        // load ran CHUNK_COUNT chunks, the END-marker check further down skipped
+        // itself (it is bounded by LINES_MAX), and the checksum -- folded over
+        // LINES_MAX lines against a CAM figure over all of them -- failed with
+        // 16#0316. Seen on the machine: a CPU still on the 5 x 100 loader loading
+        // a 5xx-line export. That error sends the operator after the recipe data;
+        // the real fault is a PLC build and a CAM layout that disagree. 0 is
+        // refused too: nothing downstream can do anything useful with it.
         ST_HDR_SETTLE:
             #hdrLines := "DB_SelectedRecipe".Header.LineCount;
-            #chunkPhase := 1;
-            #chunkRetry := 0;
-            #state := ST_CHUNK_PREP;
+            IF #hdrLines < 1 OR #hdrLines > LINES_MAX THEN
+                #ErrorCode := 16#0314;
+                #ErrorPhase := 5;
+                #ErrorChunk := 0;
+                #state := ST_ERROR;
+            ELSE
+                #chunkPhase := 1;
+                #chunkRetry := 0;
+                #state := ST_CHUNK_PREP;
+            END_IF;
 
         // === ST_CHUNK_PREP (38) -- REQ low: poison the staging buffer ===
         // Every line gets 16#FF in its CMD byte. After the transfer, ANY line

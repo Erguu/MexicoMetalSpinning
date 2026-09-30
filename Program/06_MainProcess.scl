@@ -2208,7 +2208,8 @@ BEGIN
                 // Same pattern as the 16#0310 / 16#0311 sites next door: context goes
                 // to DB_Diagnostic.Error_Text, never to DB_HMI.ErrorText (single-writer
                 // rule). 16#FFFF here means the watchdog fired, not a READ_DBL code.
-                // ErrorPhase (1 = Header, 2 = chunk, 3 = chunk verify, 4 = checksum)
+                // ErrorPhase (1 = Header, 2 = chunk, 3 = chunk verify, 4 = checksum,
+                // 5 = LineCount out of range)
                 // says WHICH stage failed -- the 2026-08-06 field fault was a silent
                 // Lines failure, so this must stay visible.
                 IF #fbRecipeLoader.ErrorPhase = 4 THEN
@@ -2226,6 +2227,18 @@ BEGIN
                                       IN2 := UDINT_TO_STRING(#fbRecipeLoader.ChecksumCalc)),
                         IN2 := CONCAT(IN1 := ' vs CAM ',
                                       IN2 := UDINT_TO_STRING("DB_SelectedRecipe".Header.Checksum)));
+
+                ELSIF #fbRecipeLoader.ErrorPhase = 5 THEN
+                    // Phase 5 (2026-09-30): Header.LineCount is 0 or larger than the
+                    // loader's LINES_MAX, refused before any chunk moved. In practice
+                    // the PLC build and the CAM layout disagree (a CPU still on an
+                    // older, shorter geometry) -- not a transfer fault and not bad
+                    // recipe data, which is what 16#0316 used to suggest for it.
+                    #newErrorCode := 16#0314;
+                    "DB_Diagnostic".Error_Text := CONCAT(
+                        IN1 := CONCAT(IN1 := 'Recipe LineCount ',
+                                      IN2 := INT_TO_STRING("DB_SelectedRecipe".Header.LineCount)),
+                        IN2 := ' outside 1..LINES_MAX of this PLC build - check loader geometry');
 
                 ELSIF #fbRecipeLoader.ErrorPhase = 3 THEN
                     // Phase 3 is NOT a READ_DBL error: every call returned RET_VAL = 0
