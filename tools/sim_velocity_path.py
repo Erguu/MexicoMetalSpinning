@@ -256,10 +256,10 @@ def main():
                     help="take-over lead time s (default 2.5 x --scan, the PLC's VM_LEAD_FACTOR rule)")
     ap.add_argument("--maxdev", type=float, default=0.3, help="VelPath_MaxDeviation mm (PLC start value 2.0; PLC clamps 0.05..5.0)")
     ap.add_argument("--override", type=float, default=1.0, help="feed override factor (1.0 = 100 percent)")
-    ap.add_argument("--acc", type=float, default=153.8423, help="TO acceleration mm/s^2")
-    ap.add_argument("--dec", type=float, default=184.6107, help="TO deceleration mm/s^2")
-    ap.add_argument("--t1", type=float, default=0.06, help="TO smoothing time t1 s (jerk = acc / t1)")
-    ap.add_argument("--t2", type=float, default=0.072, help="TO smoothing time t2 s (jerk = dec / t2)")
+    ap.add_argument("--acc", type=float, default=250.0, help="TO acceleration mm/s^2 (machine 2026-09-30; was 153.8)")
+    ap.add_argument("--dec", type=float, default=250.0, help="TO deceleration mm/s^2 (machine 2026-09-30; was 184.6)")
+    ap.add_argument("--t1", type=float, default=0.03, help="TO smoothing time t1 s (jerk = acc / t1; machine 2026-09-30, was 0.06)")
+    ap.add_argument("--t2", type=float, default=0.03, help="TO smoothing time t2 s (jerk = dec / t2; machine 2026-09-30, was 0.072)")
     ap.add_argument("--dt", type=float, default=0.001, help="TO integration step s")
     ap.add_argument("--slice", type=float, default=0.010,
                     help="PTO segment time s (TO tag Actor.PTOSliceTime, 2..20 ms; this machine 10 ms, "

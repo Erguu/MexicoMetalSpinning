@@ -291,8 +291,8 @@ def check_continuous(text: str, line_count: int) -> None:
 
 # End-of-run hand-over model (2026-09-29). COPIES of the constants in FB_RecipeHandler
 # (VM_HO_*) and of two DB_MachineConfig values -- keep them in step.
-HANDOVER_JERK = 2564.0      # mm/s^3  VM_HO_JERK
-HANDOVER_DEC = 184.6        # mm/s^2  VM_HO_DEC
+HANDOVER_JERK = 8333.3      # mm/s^3  VM_HO_JERK (250 / 0.03, 2026-09-30)
+HANDOVER_DEC = 250.0        # mm/s^2  VM_HO_DEC (2026-09-30)
 HANDOVER_SCAN = 0.070       # s       DB_MachineConfig.CycleTime (FC_LoadConfig) -- was the VM_HO_SCAN CONST until 2026-09-30
 HANDOVER_MARGIN = 2.0       #         VM_HO_MARGIN
 FEED_CONV = 60.0            # DB_MachineConfig.FeedrateConvFactor (mm/min -> mm/s)

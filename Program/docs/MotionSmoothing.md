@@ -17,12 +17,12 @@ X and Z are identical.
 |---|---|
 | Max velocity | 40 mm/s |
 | Start/stop velocity | 0.001 mm/s |
-| Acceleration | 153.8423 mm/s² |
-| Deceleration | 184.6108 mm/s² |
+| Acceleration | **250 mm/s²** (2026-09-30, user; was 153.8423) |
+| Deceleration | **250 mm/s²** (2026-09-30, user; was 184.6108) |
 | **Jerk limiter** | **ACTIVE** |
-| Ramp-up / ramp-down time | 0.26 s / 0.2166667 s (to max velocity, without jerk) |
-| Smoothing time t1 / t2 | **0.06 s / 0.072 s** (was 0.3 s / 0.36 s until 2026-09-15, see §9.6 item 3) |
-| Jerk | **2564.038 mm/s³** (was 512.8076 at t1 = 0.3 s). Same both ways: acc / t1 = dec / t2 |
+| Ramp-up / ramp-down time | 0.16 s / 0.16 s at 250 mm/s² (was 0.26 / 0.2166667 s) |
+| Smoothing time t1 / t2 | **0.03 s / 0.03 s** (2026-09-30; 0.06 / 0.072 s from 2026-09-15, 0.3 / 0.36 s before — see §9.6 item 3) |
+| Jerk | **8333 mm/s³** (2026-09-30; 2564.038 at t1 0.06, 512.8076 at t1 0.3). Same both ways: acc / t1 = dec / t2 |
 
 Values confirmed by the user 2026-09-16. With them, a speed change below `a²/j = 9.2 mm/s`
 (13.3 mm/s decelerating) never reaches full acceleration; its duration is `2√(Δv/j)`: 40 ms for

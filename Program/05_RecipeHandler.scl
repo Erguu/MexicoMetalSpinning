@@ -1159,7 +1159,7 @@ VERSION : 0.1
         // opening this block ONLINE in TIA (the CONST section shows the CPU's copy),
         // or by an online/offline compare. Deliberately written nowhere: a DB field
         // would force a second block to be imported and downloaded.
-        BUILD_TAG : String[16] := '2026-09-30a';
+        BUILD_TAG : String[16] := '2026-09-30b';
 
         STATE_IDLE : Int := 0;
         STATE_READ : Int := 10;
@@ -1200,8 +1200,8 @@ VERSION : 0.1
         // Going stale is benign one way and bounded the other: a SHORTER real braking
         // distance (faster jerk, e.g. t1 0.03) floors a few more axes, error <= this
         // estimate; a LONGER one (t1 back to 0.3) can bring the old crawl back on a line.
-        VM_HO_JERK   : Real := 2564.0;  // mm/s^3 -- TO jerk (acc/t1 = dec/t2, t1 0.06 s)
-        VM_HO_DEC    : Real := 184.6;   // mm/s^2 -- TO deceleration
+        VM_HO_JERK   : Real := 8333.3;  // mm/s^3 -- TO jerk (acc/t1 = dec/t2 = 250/0.03, set on the machine 2026-09-30; was 2564 at t1 0.06)
+        VM_HO_DEC    : Real := 250.0;   // mm/s^2 -- TO deceleration (2026-09-30; was 184.6)
         VM_HO_MARGIN : Real := 2.0;     // covers servo following error and scan jitter the model ignores
         STATE_DONE : Int := 99;
         STATE_PAUSED : Int := 800;         // Pause entry: halt axes, then retract
