@@ -2730,6 +2730,11 @@ BEGIN
                 IF "DB_MachineConfig".Bypass_ToolAxis THEN
                     // Skip tool change - clear request and continue
                     #fbRecipeHandler.ToolChangeReq := FALSE;
+                // !!! KNOWN DEFECT -- FIX ON THE NEXT MACHINE (Program/docs/NEXT_MACHINE.md section 3) !!!
+                // This compares slot NUMBERS, never the turret angle. Homing sets CurrentTool := 1,
+                // so if the recipe gives slot 1 an angle other than 0 deg, the first request for
+                // slot 1 is skipped and the turret stays at home. On THIS machine: keep slot 1 at
+                // 0 deg in the CAM tool table. Field-reported 2026-10-01.
                 ELSIF #fbRecipeHandler.ToolReqNumber = #CurrentTool THEN
                     // Requested tool already in position (e.g. home = slot 1) - skip retract/rotate/extend
                     #fbRecipeHandler.ToolChangeReq := FALSE;

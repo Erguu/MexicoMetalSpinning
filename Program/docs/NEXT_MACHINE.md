@@ -1,6 +1,6 @@
 # Carry-forward list — changes wanted on the NEXT machine, deliberately NOT on this one
 
-**Last updated:** 2026-08-16
+**Last updated:** 2026-10-01
 
 This machine is in production. Some fixes are correct in principle but are not worth the risk of
 touching a running installation, either because the fault is unreachable here or because the change
@@ -76,6 +76,38 @@ exactly the same latent problem, so **fix both together.**
 for anything unexpected. Display only — no effect on motion.
 
 Full original finding: `Program/docs/TODO.md` → ITEM-56h.
+
+---
+
+## 3. ⚠️ Tool change skips slot 1 after homing — assumes slot 1 is at 0° ⚠️
+
+**Status: wanted on the next machine. Deliberately NOT applied here (user, 2026-10-01). The user
+called this poor coding — FIX IT, do not carry the pattern into a new build.**
+
+`06_MainProcess.scl`, `FB_Process`:
+
+- Homing sets `#CurrentTool := 1` ("Tool axis homed to slot 1 position", `:2561` and `:2587`).
+- STATE_RUNNING skips the tool change when `ToolReqNumber = #CurrentTool` (`:2733`).
+
+Together that hard-codes **"tool home = slot 1 = 0°"**. The slot angles are CAM-authored
+(`Header.ToolAngle_List`), so when slot 1's angle is anything other than 0°, the first request for
+slot 1 after homing is skipped and the turret stays at home. Every other slot obeys its new angle;
+only slot 1 does not. Reported from the field 2026-10-01: "the PLC follows the new tool angles except
+the first one". `CurrentTool` is a slot **number**, so the skip never looks at an angle at all.
+
+**Why it is safe to skip on this machine:** keep slot 1 at **0°** in the CAM tool table and put any
+turret offset in the tool-axis home offset instead. With slot 1 at 0° the skip is correct.
+
+**Why that does not transfer:** the guard is a **CAM setting someone has to remember**, not a PLC
+check. Nothing refuses a recipe whose slot 1 is not 0° — the turret silently stays at the wrong slot,
+which is a wrong-tool cut, not an alarm.
+
+**The fix:** skip only when the turret is *physically* at the requested slot:
+`ToolReqNumber = #CurrentTool AND ABS(Axis_Tool.ActualPosition - Tool<n>_Position) <= tolerance`.
+Then the slot-1 skip is kept when it is genuinely true and lost when it is not. Do **not** "fix" it
+by setting `CurrentTool := 0` after homing — that costs a lock retract/extend cycle on every first
+tool even when slot 1 is at 0°. Fix ITEM-57 (manual turret step desyncs `CurrentTool`) in the same
+pass: the same position check closes it too.
 
 ---
 
