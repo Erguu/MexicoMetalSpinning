@@ -315,8 +315,9 @@ def handover_report(text: str, line_count: int) -> list[str]:
 
     At a hand-over the handler switches from MC_MoveVelocity to one MC_MoveAbsolute
     per axis. Each axis gets its proportional share of the feed, except that an axis
-    which cannot brake to that share in the distance it has left (or must reverse)
-    keeps its live speed -- the speed floor. A floored axis finishes early and the
+    which cannot brake to that share in the distance it has left keeps its live
+    speed -- the speed floor. (A second trigger, "target behind the axis", was
+    removed 2026-10-01: it caused the linear-pass X move.) A floored axis finishes early and the
     other one finishes alone. On 2026-09-29 the floor applied to every hand-over and
     put program 1 line 35 ~17 mm off the path. This replays the PLC rule with
     constant speeds (ramps ignored) so a recipe that would still do that is visible
@@ -324,6 +325,9 @@ def handover_report(text: str, line_count: int) -> list[str]:
 
     Approximations: the live speed is the previous line's feed along its programmed
     direction, and the catch-up skip is not modelled. Good to a few tenths of a mm.
+    Blind spot: it cannot see a corner OVERSHOOT, where the real last vector points
+    backwards on one axis -- the case behind the 2026-10-01 fix. The jerk-aware
+    replay (tools/sim_velocity_path.py) is needed for that.
     """
     lines = parse_lines(text)
     xz: dict[int, list[float]] = {}
@@ -353,9 +357,9 @@ def handover_report(text: str, line_count: int) -> list[str]:
             fe = RAPID_VEL if (cmd(g) == 0 or feed(g) == 0) else min(feed(g) / FEED_CONV, RAPID_VEL)
             if ln > 0.01:
                 vx, vz = fe * abs(dx) / ln, fe * abs(dz) / ln
-                if abs(dx) <= _brake_dist(cvx) or dx * cvx < 0:
+                if abs(dx) <= _brake_dist(cvx):
                     vx = max(vx, min(abs(cvx), fe))
-                if abs(dz) <= _brake_dist(cvz) or dz * cvz < 0:
+                if abs(dz) <= _brake_dist(cvz):
                     vz = max(vz, min(abs(cvz), fe))
                 vx, vz = max(vx, 1e-3), max(vz, 1e-3)
                 tx, tz = abs(dx) / vx, abs(dz) / vz

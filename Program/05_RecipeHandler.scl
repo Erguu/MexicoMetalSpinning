@@ -1159,7 +1159,7 @@ VERSION : 0.1
         // opening this block ONLINE in TIA (the CONST section shows the CPU's copy),
         // or by an online/offline compare. Deliberately written nowhere: a DB field
         // would force a second block to be imported and downloaded.
-        BUILD_TAG : String[16] := '2026-09-30b';
+        BUILD_TAG : String[16] := '2026-10-01a';
 
         STATE_IDLE : Int := 0;
         STATE_READ : Int := 10;
@@ -2287,18 +2287,27 @@ BEGIN
         // early and X then ran the last ~42 mm ALONE -- up to ~17 mm off the path, the
         // "X move at the end of the pass" the operator reported.
         //
-        // So the floor applies to an axis ONLY when it is needed:
-        //   * its distance left is within its braking distance from the live speed
-        //     (it cannot slow to its proportional share in time -> overshoot), or
-        //   * its target is BEHIND it (it must reverse; the return must not crawl).
-        // Otherwise the axis gets its proportional share and slows to it in well under
-        // a millimetre, finishing together with the other axis. A floored axis can only
-        // finish early by at most its braking distance (~0.8 mm at 4.4 mm/s, ~4 mm at
-        // F1000), not by the whole line.
+        // So the floor applies to an axis ONLY when its distance left is within its
+        // braking distance from the live speed (it cannot slow to its proportional share
+        // in time -> overshoot -> crawl back). Otherwise the axis gets its proportional
+        // share and finishes together with the other axis. A floored axis can only finish
+        // early by at most its braking distance (~0.8 mm at 4.4 mm/s), not by the line.
+        //
+        // 2026-10-01: the second trigger "target BEHIND the axis" is REMOVED. At a 70 ms
+        // scan the axes overshoot the short corner lines before a linear pass's long last
+        // line, the last corner vector points slightly BACKWARDS in Z (seen: -7.5 mm/s),
+        // and that trigger then gave Z its full live speed for the whole 20-30 mm instead
+        // of its share -- Z arrived at ~60 % of the line and X ran the rest alone, ~10 mm
+        // off path. That was the operator's "Z stops, X continues", on SOME linear passes
+        // only, because it depends on where the hand-over lands in the scan. A reversing
+        // axis with a SHORT distance left is still floored by the braking test above;
+        // with a long distance its proportional share is not a crawl. Machine baseline
+        // before this change: git tag velpath-baseline-2026-10-01.
         //
         // Never remove the floor as "breaks linear interpolation" (the crawl comes back),
-        // and never widen it back to every hand-over (the long-line error comes back).
-        // Offline check of both: tools/split_recipe_db.py (hand-over report).
+        // never widen it back to every hand-over (the long-line error comes back), and
+        // never re-add the "target behind" trigger (the linear-pass X move comes back).
+        // Offline check: tools/split_recipe_db.py (hand-over report).
         IF #vmWasActive THEN
             #vmBrakeV := ABS(#vmVelX);
             IF #vmBrakeV <= VM_HO_DEC * VM_HO_DEC / VM_HO_JERK THEN
@@ -2317,10 +2326,10 @@ BEGIN
             #vmBrakeZ := VM_HO_MARGIN * (#vmBrakeZ + #vmBrakeV * #vmCycle);
 
             // currX/currZ hold the ACTUAL position here (set in the hand-over block above).
-            IF #deltaX <= #vmBrakeX OR (#targX - #currX) * #vmVelX < 0.0 THEN
+            IF #deltaX <= #vmBrakeX THEN
                 #velX := MAX(IN1 := #velX, IN2 := MIN(IN1 := ABS(#vmVelX), IN2 := #feedrate));
             END_IF;
-            IF #deltaZ <= #vmBrakeZ OR (#targZ - #currZ) * #vmVelZ < 0.0 THEN
+            IF #deltaZ <= #vmBrakeZ THEN
                 #velZ := MAX(IN1 := #velZ, IN2 := MIN(IN1 := ABS(#vmVelZ), IN2 := #feedrate));
             END_IF;
         END_IF;

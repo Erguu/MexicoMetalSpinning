@@ -289,7 +289,7 @@ or the end of the program.
 | Hand-off | `STATE_VEL_WAIT` → `READ` → `EXEC` | When `rem ≤ feed × VelPath_LeadTime` the line is done; the next line launches on the **other** instance pair in the same scan it is read. The axes never stop |
 | Zero-length line | `STATE_EXEC` | Programmed length ≤ 0.01 mm: counted done, next line on the next scan. **A `CMD=2` zero-length line is refused at pre-scan (2026-09-15)** — see §9.3 |
 | **Already passed — same-scan catch-up** (2026-09-14) | `STATE_EXEC` | While a run is moving, **every** line whose end point the axes are already within `live speed × LeadTime` of — **measured along the programmed segment** (previous programmed end → this end) — is skipped **in the same scan** (up to `VM_CATCHUP_MAX` = 10), but only into a line that is itself velocity-eligible; the vector is then aimed at the first point genuinely ahead. The last line before a hand-over, if already passed, is counted done and the next line read on the next scan. **Simulated on the real program 2 (0.41–2.66 mm chords, F300):** at T = 0.1 s, one skip per scan left 0.77 mm path error and a `16#000F` fault; the same-scan loop gave **0.023 mm, no reversals, no fault, at most 2 lines per scan**; at T = 0.05 / 0.02 s ≤ 0.01 mm. Re-run with `tools/sim_velocity_path.py` once T is measured. Added because the first real exports have 0.4 mm chords — shorter than one 100 ms scan of travel — and aiming at a passed point would pull the axes backwards. Refused with `16#000F` if the axes are further than `VelPath_MaxDeviation` off the programmed line |
-| End of run | `STATE_EXEC` | `currX/Z := ActualPosition`, `MC_MoveAbsolute` on **both** axes (forced — an axis with < 0.01 mm left but a live velocity would otherwise never be told to stop). **Speed floor (2026-09-25, narrowed 2026-09-29):** an axis that cannot brake to its proportional share in the distance it has left, or must reverse, keeps the speed it is already carrying (`|vmVelX/Z|`, capped at the line's feed); every other axis gets its proportional share — see below |
+| End of run | `STATE_EXEC` | `currX/Z := ActualPosition`, `MC_MoveAbsolute` on **both** axes (forced — an axis with < 0.01 mm left but a live velocity would otherwise never be told to stop). **Speed floor (2026-09-25, narrowed 2026-09-29 and 2026-10-01):** an axis that cannot brake to its proportional share in the distance it has left keeps the speed it is already carrying (`|vmVelX/Z|`, capped at the line's feed); every other axis gets its proportional share — see below |
 
 **Why the end-of-run speed floor (2026-09-25):** the proportional split `v = feed · Δaxis / Δtotal`
 is only right from standstill. At the end of a run the axes are still moving, and an axis with almost
@@ -314,8 +314,23 @@ Now the floor applies to an axis **only** when the crawl is actually possible:
 
 | Condition (per axis) | Speed |
 |---|---|
-| distance left ≤ braking distance from the live speed, **or** target behind the axis | live speed, capped at feed (the floor) |
+| distance left ≤ braking distance from the live speed | live speed, capped at feed (the floor) |
 | otherwise | proportional share — the axis slows to it in well under 1 mm, both axes finish together |
+
+**2026-10-01 — the "target behind the axis" trigger is removed.** It was the cause of the X-only
+move at the end of *some* linear-approach passes, which survived the 2026-09-29 narrowing and the
+t1 0.03 / acc 250 retune (user: still present on the machine, gone with `VelPath_Enable = FALSE`).
+Mechanism, replayed on the 2026-09-30 test export (56 lines, Op2/Op3): at a 70 ms scan the axes
+overshoot the ~1 mm corner lines before the long last line, so the last corner vector points
+slightly **backwards in Z** (−6 to −7.5 mm/s). The hand-over then saw "Z target behind" and gave Z
+its live 7.5 mm/s for the whole 27 mm instead of its 4.5 mm/s share: Z done at 3.6 s, X at 6.1 s,
+X alone for ~35 mm, ~10 mm off the line. Intermittent because it depends on where the hand-over
+lands in the scan. Replay with only the braking test: 10.4 → **0.29 mm**; the 2026-09-24 crawl case
+(line 197) is still floored. A reversing axis with little distance left is caught by the braking
+test anyway; with a long distance its share is not a crawl. **Do not re-add it.** Machine state
+before this change is tagged **`velpath-baseline-2026-10-01`** (BUILD_TAG family 2026-09-30b).
+`split_recipe_db.py`'s report could not have seen this: it assumes the live speed follows the
+previous line's programmed direction, so it never models a corner overshoot.
 
 Braking distance = `2 × (S-curve stop + one scan of travel)`, computed from copies of the TO dynamics
 held as `VM_HO_*` CONSTs in `FB_RecipeHandler` (jerk 2564 mm/s³, dec 184.6 mm/s², scan 0.045 s,
